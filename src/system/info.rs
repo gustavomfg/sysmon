@@ -7,6 +7,11 @@ pub struct DiskInfo {
     pub available_space: f64,
 }
 
+pub struct ProcessInfo {
+    pub name: String,
+    pub memory: f64,
+}
+
 pub struct SystemInfo {
     pub os_name: String,
     pub kernel: String,
@@ -18,6 +23,7 @@ pub struct SystemInfo {
     pub processes: usize,
     pub uptime: u64,
     pub disks: Vec<DiskInfo>,
+    pub processes_list: Vec<ProcessInfo>,
 }
 
 impl SystemInfo {
@@ -36,6 +42,23 @@ impl SystemInfo {
             })
             .collect();
 
+        let mut processes_list = system
+            .processes()
+            .values()
+            .map(|process| ProcessInfo {
+                name: process.name().to_string_lossy().to_string(),
+                memory: process.memory() as f64 / 1024.0 / 1024.0,
+            })
+            .collect::<Vec<ProcessInfo>>();
+
+        processes_list.sort_by(|a, b| {
+            b.memory
+                .partial_cmp(&a.memory)
+                .unwrap()
+        });
+
+        processes_list.truncate(5);
+
         Self {
             os_name: System::name().unwrap_or("Desconhecido".to_string()),
             kernel: System::kernel_version().unwrap_or("Desconhecido".to_string()),
@@ -51,6 +74,7 @@ impl SystemInfo {
             processes: system.processes().len(),
             uptime: System::uptime(),
             disks: disk_infos,
+            processes_list,
         }
     }
 }
