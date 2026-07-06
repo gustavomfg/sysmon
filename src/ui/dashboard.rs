@@ -2,7 +2,7 @@ use crate::system::info::SystemInfo;
 
 use ratatui::{
     layout::{Constraint, Direction, Layout},
-    widgets::{Block, Borders, Paragraph},
+    widgets::{Block, Borders, Gauge, Paragraph},
     Frame,
 };
 
@@ -16,27 +16,59 @@ pub fn draw(frame: &mut Frame, info: &SystemInfo) {
         ])
         .split(frame.area());
 
+    let cpu_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Length(3),
+        ])
+        .split(chunks[0]);
+
+    let ram_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Length(3),
+        ])
+        .split(chunks[1]);
+
     let cpu_text = format!(
-        "{}\nUso: {:.2}%\nCores: {}",
-        info.cpu_name, info.cpu_usage, info.cpu_cores
+        "{}\nCores: {}",
+        info.cpu_name,
+        info.cpu_cores
     );
 
-    let cpu = Paragraph::new(cpu_text).block(
+    let cpu_info = Paragraph::new(cpu_text).block(
         Block::default()
             .title("CPU")
             .borders(Borders::ALL),
     );
 
+    let cpu_gauge = Gauge::default()
+        .block(Block::default().borders(Borders::ALL))
+        .gauge_style(ratatui::style::Style::default())
+        .percent(info.cpu_usage as u16)
+        .label(format!("{:.2}%", info.cpu_usage));
+
+    let ram_percent = ((info.used_ram / info.total_ram) * 100.0) as u16;
+
     let ram_text = format!(
         "{:.2} GB / {:.2} GB",
-        info.used_ram, info.total_ram
+        info.used_ram,
+        info.total_ram
     );
 
-    let ram = Paragraph::new(ram_text).block(
+    let ram_info = Paragraph::new(ram_text).block(
         Block::default()
             .title("MEMORY")
             .borders(Borders::ALL),
     );
+
+    let ram_gauge = Gauge::default()
+        .block(Block::default().borders(Borders::ALL))
+        .gauge_style(ratatui::style::Style::default())
+        .percent(ram_percent)
+        .label(format!("{}%", ram_percent));
 
     let disk_text = info
         .disks
@@ -44,7 +76,10 @@ pub fn draw(frame: &mut Frame, info: &SystemInfo) {
         .map(|disk| {
             format!(
                 "{} | {} | livre: {:.2} GB / {:.2} GB",
-                disk.name, disk.mount_point, disk.available_space, disk.total_space
+                disk.name,
+                disk.mount_point,
+                disk.available_space,
+                disk.total_space
             )
         })
         .collect::<Vec<String>>()
@@ -56,7 +91,11 @@ pub fn draw(frame: &mut Frame, info: &SystemInfo) {
             .borders(Borders::ALL),
     );
 
-    frame.render_widget(cpu, chunks[0]);
-    frame.render_widget(ram, chunks[1]);
+    frame.render_widget(cpu_info, cpu_chunks[0]);
+    frame.render_widget(cpu_gauge, cpu_chunks[1]);
+
+    frame.render_widget(ram_info, ram_chunks[0]);
+    frame.render_widget(ram_gauge, ram_chunks[1]);
+
     frame.render_widget(disk, chunks[2]);
 }
