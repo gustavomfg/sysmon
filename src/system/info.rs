@@ -1,5 +1,6 @@
 use sysinfo::{Disks, System};
 use crate::system::gpu::GpuInfo;
+use crate::system::network::NetworkInfo;
 
 pub struct DiskInfo {
     pub name: String,
@@ -26,6 +27,7 @@ pub struct SystemInfo {
     pub disks: Vec<DiskInfo>,
     pub processes_list: Vec<ProcessInfo>,
     pub gpu: Option<GpuInfo>,
+    pub networks: Vec<NetworkInfo>,
 }
 
 impl SystemInfo {
@@ -78,6 +80,7 @@ impl SystemInfo {
             disks: disk_infos,
             processes_list,
             gpu: GpuInfo::get(),
+            networks: NetworkInfo::get(),
         }
     }
 }

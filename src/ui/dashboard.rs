@@ -131,21 +131,46 @@ pub fn draw(
     )
     .data(&app.cpu_history);
 
+    let network_lines = info
+    .networks
+    .iter()
+    .map(|net| {
+        Line::from(
+            format!(
+                "{} ↓ {:.2}MB ↑ {:.2}MB",
+                net.interface,
+                net.received,
+                net.transmitted
+            )
+        )
+    })
+    .collect::<Vec<Line>>();
+
+
+let network =
+    Paragraph::new(network_lines)
+        .block(
+            Block::default()
+                .title("NETWORK")
+                .borders(Borders::ALL)
+        );
+
     frame.render_widget(cpu_info, cpu_layout[0]);
     frame.render_widget(cpu_gauge, cpu_layout[1]);
     frame.render_widget(gpu, top[1]);
     frame.render_widget(ram, middle[0]);
     frame.render_widget(processes, middle[1]);
-    
+
     let bottom = Layout::default()
     .direction(Direction::Horizontal)
     .constraints([
-        Constraint::Percentage(50),
-        Constraint::Percentage(50),
+        Constraint::Percentage(33),
+        Constraint::Percentage(33),
+        Constraint::Percentage(34),
     ])
     .split(main[2]);
 
-
 frame.render_widget(disks, bottom[0]);
 frame.render_widget(cpu_history, bottom[1]);
+frame.render_widget(network, bottom[2]);
 }
