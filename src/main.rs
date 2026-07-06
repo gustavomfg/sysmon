@@ -1,30 +1,53 @@
-use std::{thread, time::Duration};
+mod system;
+
+use std::{
+    thread,
+    time::Duration,
+};
+
 use sysinfo::System;
 
+use system::info::SystemInfo;
+
+
 fn main() {
-    let mut system = System::new_all();
+    let mut sys = System::new_all();
 
     loop {
-        system.refresh_all();
-
-        let total_ram = system.total_memory() as f64 / 1024.0 / 1024.0;
-        let used_ram = system.used_memory() as f64 / 1024.0 / 1024.0;
+        let info = SystemInfo::get(&mut sys);
 
         println!("============================");
-        println!("      SYSTEM MONITOR");
+        println!("       SYSTEM MONITOR");
         println!("============================");
 
-        println!("Sistema: {}", System::name().unwrap_or("Desconhecido".into()));
-        println!("Kernel: {}", System::kernel_version().unwrap_or("Desconhecido".into()));
+        println!("Sistema: {}", info.os_name);
+        println!("Kernel: {}", info.kernel);
 
-        println!("CPU cores: {}", system.cpus().len());
-        println!("CPU uso: {:.2}%", system.global_cpu_usage());
+        println!(
+            "CPU cores: {}",
+            info.cpu_cores
+        );
 
-        println!("RAM: {:.2} GB / {:.2} GB", used_ram, total_ram);
+        println!(
+            "CPU uso: {:.2}%",
+            info.cpu_usage
+        );
 
-        println!("Processos: {}", system.processes().len());
+        println!(
+            "RAM: {:.2} GB / {:.2} GB",
+            info.used_ram,
+            info.total_ram
+        );
 
-        thread::sleep(Duration::from_secs(2));
+        println!(
+            "Processos: {}",
+            info.processes
+        );
+
+
+        thread::sleep(
+            Duration::from_secs(2)
+        );
 
         print!("\x1B[2J\x1B[1;1H");
     }
