@@ -22,6 +22,7 @@ fn main() {
 
         println!("Sistema: {}", info.os_name);
         println!("Kernel: {}", info.kernel);
+        println!("CPU: {}", info.cpu_name);
 
         println!(
             "CPU cores: {}",
@@ -39,11 +40,24 @@ fn main() {
             info.total_ram
         );
 
+        println!("Uptime: {}h {}min", info.uptime / 3600, (info.uptime % 3600) / 60);
+
         println!(
             "Processos: {}",
             info.processes
         );
 
+        println!("Discos:");
+
+for disk in info.disks {
+    println!(
+        "- {} | {} | livre: {:.2} GB / {:.2} GB",
+        disk.name,
+        disk.mount_point,
+        disk.available_space,
+        disk.total_space
+    );
+}
 
         thread::sleep(
             Duration::from_secs(2)
