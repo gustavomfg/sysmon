@@ -1,1 +1,25 @@
-/target
+/target/
+
+# Rust/editor leftovers
+**/*.rs.bk
+*.profraw
+
+# Logs and temporary files
+*.log
+*.tmp
+*.temp
+*.swp
+*.swo
+*~
+
+# Local environment files
+.env
+.env.*
+
+# Editor/project settings
+.idea/
+.vscode/
+
+# OS files
+.DS_Store
+Thumbs.db

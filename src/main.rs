@@ -10,72 +10,97 @@ use std::{
 use app::AppState;
 
 use crossterm::{
-    event::{self, Event, KeyCode},
+    cursor::Show,
+    event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
     execute,
-    terminal::{
-        disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
-    },
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 
-use ratatui::{backend::CrosstermBackend, Terminal};
+use ratatui::{Terminal, backend::CrosstermBackend};
 
-use sysinfo::System;
+use sysinfo::{Networks, System};
 
 use system::info::SystemInfo;
 
+struct TerminalGuard;
+
+impl TerminalGuard {
+    fn enter() -> io::Result<Self> {
+        enable_raw_mode()?;
+        execute!(io::stdout(), EnterAlternateScreen)?;
+        Ok(Self)
+    }
+}
+
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        let _ = disable_raw_mode();
+        let _ = execute!(io::stdout(), Show, LeaveAlternateScreen);
+    }
+}
+
+fn should_quit(event: Event) -> bool {
+    matches!(
+        event,
+        Event::Key(key)
+            if key.kind == KeyEventKind::Press
+                && (key.code == KeyCode::Char('q')
+                    || key.code == KeyCode::Esc
+                    || (key.code == KeyCode::Char('c')
+                        && key.modifiers.contains(KeyModifiers::CONTROL)))
+    )
+}
+
 fn main() -> io::Result<()> {
-    enable_raw_mode()?;
+    let _terminal_guard = TerminalGuard::enter()?;
 
-    let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
-
-    let backend = CrosstermBackend::new(stdout);
+    let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend)?;
+    terminal.clear()?;
 
     let mut sys = System::new_all();
+    let mut networks = Networks::new_with_refreshed_list();
     let mut app = AppState::new();
 
-    let result = run_app(&mut terminal, &mut sys, &mut app);
-
-    disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
-
-    result
+    run_app(&mut terminal, &mut sys, &mut networks, &mut app)
 }
 
 fn run_app(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     sys: &mut System,
+    networks: &mut Networks,
     app: &mut AppState,
 ) -> io::Result<()> {
     let tick_rate = Duration::from_secs(1);
-    let mut last_tick = Instant::now();
+    let mut last_tick = Instant::now() - tick_rate;
 
     loop {
-        let info = SystemInfo::get(sys);
+        if last_tick.elapsed() >= tick_rate {
+            let info = SystemInfo::get(sys, networks);
 
-        app.update_cpu_history(info.cpu_usage);
+            app.update_cpu_history(info.cpu_usage);
 
-        terminal.draw(|frame| {
-            ui::dashboard::draw(frame, &info, app);
-        })?;
+            terminal.draw(|frame| {
+                ui::dashboard::draw(frame, &info, app);
+            })?;
+
+            last_tick = Instant::now();
+        }
 
         let timeout = tick_rate
             .checked_sub(last_tick.elapsed())
             .unwrap_or(Duration::ZERO);
 
         if event::poll(timeout)? {
-            if let Event::Key(key) = event::read()? {
-                if key.code == KeyCode::Char('q') {
+            loop {
+                if should_quit(event::read()?) {
+                    return Ok(());
+                }
+
+                if !event::poll(Duration::ZERO)? {
                     break;
                 }
             }
         }
-
-        if last_tick.elapsed() >= tick_rate {
-            last_tick = Instant::now();
-        }
     }
-
-    Ok(())
 }

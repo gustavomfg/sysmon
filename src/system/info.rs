@@ -1,6 +1,8 @@
-use sysinfo::{Disks, System};
+use std::cmp::Ordering;
+
 use crate::system::gpu::GpuInfo;
 use crate::system::network::NetworkInfo;
+use sysinfo::{Disks, Networks, System};
 
 pub struct DiskInfo {
     pub name: String,
@@ -31,8 +33,9 @@ pub struct SystemInfo {
 }
 
 impl SystemInfo {
-    pub fn get(system: &mut System) -> Self {
+    pub fn get(system: &mut System, networks: &mut Networks) -> Self {
         system.refresh_all();
+        networks.refresh(true);
 
         let disks = Disks::new_with_refreshed_list();
 
@@ -55,11 +58,7 @@ impl SystemInfo {
             })
             .collect::<Vec<ProcessInfo>>();
 
-        processes_list.sort_by(|a, b| {
-            b.memory
-                .partial_cmp(&a.memory)
-                .unwrap()
-        });
+        processes_list.sort_by(|a, b| b.memory.partial_cmp(&a.memory).unwrap_or(Ordering::Equal));
 
         processes_list.truncate(5);
 
@@ -73,14 +72,14 @@ impl SystemInfo {
                 .unwrap_or("Desconhecido".to_string()),
             cpu_cores: system.cpus().len(),
             cpu_usage: system.global_cpu_usage(),
-            total_ram: system.total_memory() as f64 / 1024.0 / 1024.0,
-            used_ram: system.used_memory() as f64 / 1024.0 / 1024.0,
+            total_ram: system.total_memory() as f64 / 1024.0 / 1024.0 / 1024.0,
+            used_ram: system.used_memory() as f64 / 1024.0 / 1024.0 / 1024.0,
             processes: system.processes().len(),
             uptime: System::uptime(),
             disks: disk_infos,
             processes_list,
             gpu: GpuInfo::get(),
-            networks: NetworkInfo::get(),
+            networks: NetworkInfo::get(networks),
         }
     }
 }

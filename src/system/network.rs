@@ -1,43 +1,19 @@
 use sysinfo::Networks;
 
-
 pub struct NetworkInfo {
     pub interface: String,
-    pub received: f64,
-    pub transmitted: f64,
+    pub received_per_sec: f64,
+    pub transmitted_per_sec: f64,
 }
 
-
 impl NetworkInfo {
-
-    pub fn get() -> Vec<Self> {
-
-        let networks =
-            Networks::new_with_refreshed_list();
-
-
+    pub fn get(networks: &Networks) -> Vec<Self> {
         networks
             .iter()
-            .map(|(name, data)| {
-
-                Self {
-
-                    interface:
-                        name.to_string(),
-
-                    received:
-                        data.total_received()
-                            as f64
-                            /1024.0
-                            /1024.0,
-
-                    transmitted:
-                        data.total_transmitted()
-                            as f64
-                            /1024.0
-                            /1024.0,
-                }
-
+            .map(|(name, data)| Self {
+                interface: name.to_string(),
+                received_per_sec: data.received() as f64 / 1024.0 / 1024.0,
+                transmitted_per_sec: data.transmitted() as f64 / 1024.0 / 1024.0,
             })
             .collect()
     }

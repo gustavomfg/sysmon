@@ -1,13 +1,12 @@
-use crate::system::info::SystemInfo;
 use crate::app::AppState;
-
+use crate::system::info::SystemInfo;
 
 use ratatui::{
+    Frame,
     layout::{Constraint, Direction, Layout},
     style::{Color, Style},
     text::Line,
     widgets::{Block, Borders, Gauge, Paragraph, Sparkline},
-    Frame,
 };
 
 fn usage_color(value: u16) -> Style {
@@ -18,12 +17,19 @@ fn usage_color(value: u16) -> Style {
     }
 }
 
-pub fn draw(
-    frame: &mut Frame,
-    info: &SystemInfo,
-    app: &AppState, 
-) {
+fn format_uptime(seconds: u64) -> String {
+    let days = seconds / 86_400;
+    let hours = (seconds % 86_400) / 3_600;
+    let minutes = (seconds % 3_600) / 60;
 
+    if days > 0 {
+        format!("{days}d {hours}h {minutes}m")
+    } else {
+        format!("{hours}h {minutes}m")
+    }
+}
+
+pub fn draw(frame: &mut Frame, info: &SystemInfo, app: &AppState) {
     let main = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -35,33 +41,29 @@ pub fn draw(
 
     let top = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage(50),
-            Constraint::Percentage(50),
-        ])
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
         .split(main[0]);
 
     let middle = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage(50),
-            Constraint::Percentage(50),
-        ])
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
         .split(main[1]);
 
-    let cpu_layout = Layout::default()
+    let system_layout = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3),
-            Constraint::Length(3),
-        ])
+        .constraints([Constraint::Min(5), Constraint::Length(3)])
         .split(top[0]);
 
-    let cpu_info = Paragraph::new(format!(
-        "{}\nCores: {}",
-        info.cpu_name, info.cpu_cores
+    let system_info = Paragraph::new(format!(
+        "{} | Kernel {}\nCPU: {}\nCores: {} | Processos: {}\nUptime: {}",
+        info.os_name,
+        info.kernel,
+        info.cpu_name,
+        info.cpu_cores,
+        info.processes,
+        format_uptime(info.uptime)
     ))
-    .block(Block::default().title("CPU").borders(Borders::ALL));
+    .block(Block::default().title("SYSTEM").borders(Borders::ALL));
 
     let cpu_percent = info.cpu_usage.clamp(0.0, 100.0) as u16;
 
@@ -79,8 +81,7 @@ pub fn draw(
         None => "GPU não encontrada".to_string(),
     };
 
-    let gpu = Paragraph::new(gpu_text)
-        .block(Block::default().title("GPU").borders(Borders::ALL));
+    let gpu = Paragraph::new(gpu_text).block(Block::default().title("GPU").borders(Borders::ALL));
 
     let ram_percent = if info.total_ram > 0.0 {
         ((info.used_ram / info.total_ram) * 100.0).clamp(0.0, 100.0) as u16
@@ -120,57 +121,43 @@ pub fn draw(
         })
         .collect::<Vec<Line>>();
 
-    let disks = Paragraph::new(disk_lines)
-        .block(Block::default().title("DISKS").borders(Borders::ALL));
+    let disks =
+        Paragraph::new(disk_lines).block(Block::default().title("DISKS").borders(Borders::ALL));
 
-        let cpu_history = Sparkline::default()
-    .block(
-        Block::default()
-            .title("CPU HISTORY")
-            .borders(Borders::ALL)
-    )
-    .data(&app.cpu_history);
+    let cpu_history = Sparkline::default()
+        .block(Block::default().title("CPU HISTORY").borders(Borders::ALL))
+        .data(&app.cpu_history);
 
     let network_lines = info
-    .networks
-    .iter()
-    .map(|net| {
-        Line::from(
-            format!(
-                "{} ↓ {:.2}MB ↑ {:.2}MB",
-                net.interface,
-                net.received,
-                net.transmitted
-            )
-        )
-    })
-    .collect::<Vec<Line>>();
+        .networks
+        .iter()
+        .map(|net| {
+            Line::from(format!(
+                "{} ↓ {:.2}MB/s ↑ {:.2}MB/s",
+                net.interface, net.received_per_sec, net.transmitted_per_sec
+            ))
+        })
+        .collect::<Vec<Line>>();
 
+    let network = Paragraph::new(network_lines)
+        .block(Block::default().title("NETWORK").borders(Borders::ALL));
 
-let network =
-    Paragraph::new(network_lines)
-        .block(
-            Block::default()
-                .title("NETWORK")
-                .borders(Borders::ALL)
-        );
-
-    frame.render_widget(cpu_info, cpu_layout[0]);
-    frame.render_widget(cpu_gauge, cpu_layout[1]);
+    frame.render_widget(system_info, system_layout[0]);
+    frame.render_widget(cpu_gauge, system_layout[1]);
     frame.render_widget(gpu, top[1]);
     frame.render_widget(ram, middle[0]);
     frame.render_widget(processes, middle[1]);
 
     let bottom = Layout::default()
-    .direction(Direction::Horizontal)
-    .constraints([
-        Constraint::Percentage(33),
-        Constraint::Percentage(33),
-        Constraint::Percentage(34),
-    ])
-    .split(main[2]);
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage(33),
+            Constraint::Percentage(33),
+            Constraint::Percentage(34),
+        ])
+        .split(main[2]);
 
-frame.render_widget(disks, bottom[0]);
-frame.render_widget(cpu_history, bottom[1]);
-frame.render_widget(network, bottom[2]);
+    frame.render_widget(disks, bottom[0]);
+    frame.render_widget(cpu_history, bottom[1]);
+    frame.render_widget(network, bottom[2]);
 }
