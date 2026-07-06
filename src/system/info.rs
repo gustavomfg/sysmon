@@ -1,4 +1,5 @@
 use sysinfo::{Disks, System};
+use crate::system::gpu::GpuInfo;
 
 pub struct DiskInfo {
     pub name: String,
@@ -24,6 +25,7 @@ pub struct SystemInfo {
     pub uptime: u64,
     pub disks: Vec<DiskInfo>,
     pub processes_list: Vec<ProcessInfo>,
+    pub gpu: Option<GpuInfo>,
 }
 
 impl SystemInfo {
@@ -75,6 +77,7 @@ impl SystemInfo {
             uptime: System::uptime(),
             disks: disk_infos,
             processes_list,
+            gpu: GpuInfo::get(),
         }
     }
 }
