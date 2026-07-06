@@ -1,3 +1,4 @@
+mod app;
 mod system;
 mod ui;
 
@@ -5,6 +6,8 @@ use std::{
     io,
     time::{Duration, Instant},
 };
+
+use app::AppState;
 
 use crossterm::{
     event::{self, Event, KeyCode},
@@ -30,8 +33,9 @@ fn main() -> io::Result<()> {
     let mut terminal = Terminal::new(backend)?;
 
     let mut sys = System::new_all();
+    let mut app = AppState::new();
 
-    let result = run_app(&mut terminal, &mut sys);
+    let result = run_app(&mut terminal, &mut sys, &mut app);
 
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
@@ -42,6 +46,7 @@ fn main() -> io::Result<()> {
 fn run_app(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     sys: &mut System,
+    app: &mut AppState,
 ) -> io::Result<()> {
     let tick_rate = Duration::from_secs(1);
     let mut last_tick = Instant::now();
@@ -49,8 +54,10 @@ fn run_app(
     loop {
         let info = SystemInfo::get(sys);
 
+        app.update_cpu_history(info.cpu_usage);
+
         terminal.draw(|frame| {
-            ui::dashboard::draw(frame, &info);
+            ui::dashboard::draw(frame, &info, app);
         })?;
 
         let timeout = tick_rate

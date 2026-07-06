@@ -1,10 +1,12 @@
 use crate::system::info::SystemInfo;
+use crate::app::AppState;
+
 
 use ratatui::{
     layout::{Constraint, Direction, Layout},
     style::{Color, Style},
     text::Line,
-    widgets::{Block, Borders, Gauge, Paragraph},
+    widgets::{Block, Borders, Gauge, Paragraph, Sparkline},
     Frame,
 };
 
@@ -16,7 +18,12 @@ fn usage_color(value: u16) -> Style {
     }
 }
 
-pub fn draw(frame: &mut Frame, info: &SystemInfo) {
+pub fn draw(
+    frame: &mut Frame,
+    info: &SystemInfo,
+    app: &AppState, 
+) {
+
     let main = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -116,10 +123,29 @@ pub fn draw(frame: &mut Frame, info: &SystemInfo) {
     let disks = Paragraph::new(disk_lines)
         .block(Block::default().title("DISKS").borders(Borders::ALL));
 
+        let cpu_history = Sparkline::default()
+    .block(
+        Block::default()
+            .title("CPU HISTORY")
+            .borders(Borders::ALL)
+    )
+    .data(&app.cpu_history);
+
     frame.render_widget(cpu_info, cpu_layout[0]);
     frame.render_widget(cpu_gauge, cpu_layout[1]);
     frame.render_widget(gpu, top[1]);
     frame.render_widget(ram, middle[0]);
     frame.render_widget(processes, middle[1]);
-    frame.render_widget(disks, main[2]);
+    
+    let bottom = Layout::default()
+    .direction(Direction::Horizontal)
+    .constraints([
+        Constraint::Percentage(50),
+        Constraint::Percentage(50),
+    ])
+    .split(main[2]);
+
+
+frame.render_widget(disks, bottom[0]);
+frame.render_widget(cpu_history, bottom[1]);
 }
