@@ -5,20 +5,96 @@ use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
-    text::Line,
-    widgets::{Block, Borders, Gauge, Paragraph, Sparkline},
+    text::{Line, Span},
+    widgets::{Block, BorderType, Borders, Padding, Paragraph, Sparkline},
 };
+
+const ACCENT: Color = Color::Cyan;
+const ACCENT_ALT: Color = Color::Magenta;
+const OK: Color = Color::Green;
+const WARN: Color = Color::Yellow;
+const DANGER: Color = Color::Red;
+const BACKGROUND: Color = Color::Black;
+const SURFACE: Color = Color::Black;
+const TEXT: Color = Color::Gray;
 
 fn usage_color(value: u16) -> Style {
     match value {
-        0..=50 => Style::default().fg(Color::Green),
-        51..=80 => Style::default().fg(Color::Yellow),
-        _ => Style::default().fg(Color::Red),
+        0..=50 => Style::default().fg(OK),
+        51..=80 => Style::default().fg(WARN),
+        _ => Style::default().fg(DANGER).add_modifier(Modifier::BOLD),
     }
 }
 
 fn muted() -> Style {
     Style::default().fg(Color::DarkGray)
+}
+
+fn label() -> Style {
+    Style::default().fg(Color::DarkGray)
+}
+
+fn value() -> Style {
+    Style::default().fg(Color::White)
+}
+
+fn brand() -> Style {
+    Style::default()
+        .fg(Color::Black)
+        .bg(ACCENT)
+        .add_modifier(Modifier::BOLD)
+}
+
+fn chip(text: impl Into<String>, style: Style) -> Span<'static> {
+    Span::styled(format!(" {} ", text.into()), style)
+}
+
+fn card(title: impl Into<String>) -> Block<'static> {
+    Block::default()
+        .title(Span::styled(
+            format!("  {}  ", title.into()),
+            Style::default().fg(ACCENT_ALT).add_modifier(Modifier::BOLD),
+        ))
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Color::DarkGray))
+        .style(Style::default().bg(SURFACE))
+        .padding(Padding::horizontal(1))
+}
+
+fn fill(color: Color) -> Block<'static> {
+    Block::default().style(Style::default().bg(color))
+}
+
+fn metric_line(label_text: impl Into<String>, value_text: impl Into<String>) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(label_text.into(), label()),
+        Span::styled(value_text.into(), value()),
+    ])
+}
+
+fn section_header(columns: Vec<(&str, usize)>) -> Line<'static> {
+    Line::from(
+        columns
+            .into_iter()
+            .map(|(text, width)| {
+                Span::styled(
+                    format!("{text:<width$}"),
+                    Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+                )
+            })
+            .collect::<Vec<Span>>(),
+    )
+}
+
+fn meter(value: u16, width: usize) -> Vec<Span<'static>> {
+    let filled = ((value as usize * width) / 100).min(width);
+    vec![
+        Span::styled("[", muted()),
+        Span::styled("#".repeat(filled), usage_color(value)),
+        Span::styled("-".repeat(width - filled), muted()),
+        Span::styled("]", muted()),
+    ]
 }
 
 fn format_uptime(seconds: u64) -> String {
@@ -34,31 +110,53 @@ fn format_uptime(seconds: u64) -> String {
 }
 
 pub fn draw(frame: &mut Frame, info: &SystemInfo, app: &AppState) {
+    frame.render_widget(fill(BACKGROUND), frame.area());
+
     let page = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),
+            Constraint::Length(4),
             Constraint::Min(10),
             Constraint::Length(1),
         ])
+        .margin(1)
+        .spacing(1)
         .split(frame.area());
 
-    let title = Paragraph::new(format!(
-        "Sysmon | CPU {:.1}% | RAM {:.1}/{:.1}GB | Load {:.2} {:.2} {:.2}",
-        info.cpu_usage,
-        info.used_ram,
-        info.total_ram,
-        info.load_average.0,
-        info.load_average.1,
-        info.load_average.2
-    ))
+    for area in page.iter() {
+        frame.render_widget(fill(BACKGROUND), *area);
+    }
+
+    let title = Paragraph::new(Line::from(vec![
+        Span::raw(" "),
+        chip("SYSMON", brand()),
+        Span::raw("  "),
+        chip(
+            format!("CPU {:.1}%", info.cpu_usage),
+            usage_color(info.cpu_usage as u16).add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" "),
+        chip(
+            format!("RAM {:.1}/{:.1}GB", info.used_ram, info.total_ram),
+            usage_color(if info.total_ram > 0.0 {
+                ((info.used_ram / info.total_ram) * 100.0).clamp(0.0, 100.0) as u16
+            } else {
+                0
+            }),
+        ),
+        Span::raw(" "),
+        chip(
+            format!(
+                "LOAD {:.2} {:.2} {:.2}",
+                info.load_average.0, info.load_average.1, info.load_average.2
+            ),
+            muted(),
+        ),
+        Span::raw(" "),
+        chip(format!("UP {}", format_uptime(info.uptime)), value()),
+    ]))
     .alignment(Alignment::Center)
-    .style(
-        Style::default()
-            .fg(Color::Cyan)
-            .add_modifier(Modifier::BOLD),
-    )
-    .block(Block::default().borders(Borders::ALL));
+    .block(card("overview"));
 
     frame.render_widget(title, page[0]);
 
@@ -69,54 +167,91 @@ pub fn draw(frame: &mut Frame, info: &SystemInfo, app: &AppState) {
             Constraint::Percentage(36),
             Constraint::Percentage(30),
         ])
+        .spacing(1)
         .split(page[1]);
+
+    for area in main.iter() {
+        frame.render_widget(fill(BACKGROUND), *area);
+    }
 
     let top = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .constraints([Constraint::Percentage(42), Constraint::Percentage(58)])
+        .spacing(1)
         .split(main[0]);
+
+    for area in top.iter() {
+        frame.render_widget(fill(SURFACE), *area);
+    }
 
     let middle = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .constraints([Constraint::Percentage(44), Constraint::Percentage(56)])
+        .spacing(1)
         .split(main[1]);
+
+    for area in middle.iter() {
+        frame.render_widget(fill(SURFACE), *area);
+    }
 
     let system_layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(5), Constraint::Length(3)])
+        .spacing(1)
         .split(top[0]);
 
-    let system_info = Paragraph::new(format!(
-        "{} | Kernel {}\nCPU: {}\nCores: {} | Processos: {}\nUptime: {} | Load: {:.2} {:.2} {:.2}",
-        info.os_name,
-        info.kernel,
-        info.cpu_name,
-        info.cpu_cores,
-        info.processes,
-        format_uptime(info.uptime),
-        info.load_average.0,
-        info.load_average.1,
-        info.load_average.2
-    ))
-    .block(Block::default().title("SYSTEM").borders(Borders::ALL));
+    for area in system_layout.iter() {
+        frame.render_widget(fill(SURFACE), *area);
+    }
+
+    let system_info = Paragraph::new(vec![
+        metric_line(
+            "OS      ",
+            format!("{}  kernel {}", info.os_name, info.kernel),
+        ),
+        metric_line("CPU     ", info.cpu_name.clone()),
+        metric_line(
+            "THREADS ",
+            format!("{} cores  {} processes", info.cpu_cores, info.processes),
+        ),
+        metric_line(
+            "LOAD    ",
+            format!(
+                "{:.2}  {:.2}  {:.2}",
+                info.load_average.0, info.load_average.1, info.load_average.2
+            ),
+        ),
+    ])
+    .style(Style::default().fg(TEXT).bg(SURFACE))
+    .block(card("System"));
 
     let cpu_percent = info.cpu_usage.clamp(0.0, 100.0) as u16;
 
-    let cpu_gauge = Gauge::default()
-        .block(Block::default().borders(Borders::ALL))
-        .gauge_style(usage_color(cpu_percent))
-        .percent(cpu_percent)
-        .label(format!("{:.2}%", info.cpu_usage));
+    let mut cpu_line = vec![Span::styled("CPU ", label())];
+    cpu_line.extend(meter(cpu_percent, 28));
+    cpu_line.push(Span::styled(
+        format!(" {:>5.1}%", info.cpu_usage),
+        usage_color(cpu_percent),
+    ));
 
-    let gpu_text = match &info.gpu {
-        Some(gpu) => format!(
-            "{}\nTemp: {}\nUso: {}\nVRAM: {}",
-            gpu.name, gpu.temperature, gpu.usage, gpu.memory
-        ),
-        None => "GPU não encontrada".to_string(),
+    let cpu_gauge = Paragraph::new(Line::from(cpu_line))
+        .alignment(Alignment::Center)
+        .style(Style::default().bg(BACKGROUND))
+        .block(card("CPU Usage"));
+
+    let gpu_lines = match &info.gpu {
+        Some(gpu) => vec![
+            Line::styled(gpu.name.clone(), value().add_modifier(Modifier::BOLD)),
+            metric_line("TEMP    ", gpu.temperature.clone()),
+            metric_line("USAGE   ", gpu.usage.clone()),
+            metric_line("VRAM    ", gpu.memory.clone()),
+        ],
+        None => vec![Line::styled("GPU não encontrada", muted())],
     };
 
-    let gpu = Paragraph::new(gpu_text).block(Block::default().title("GPU").borders(Borders::ALL));
+    let gpu = Paragraph::new(gpu_lines)
+        .style(Style::default().bg(SURFACE))
+        .block(card("GPU"));
 
     let ram_percent = if info.total_ram > 0.0 {
         ((info.used_ram / info.total_ram) * 100.0).clamp(0.0, 100.0) as u16
@@ -124,78 +259,113 @@ pub fn draw(frame: &mut Frame, info: &SystemInfo, app: &AppState) {
         0
     };
 
-    let ram = Gauge::default()
-        .block(
-            Block::default()
-                .title(format!(
-                    "RAM {:.1}/{:.1}GB | SWAP {:.1}/{:.1}GB",
-                    info.used_ram, info.total_ram, info.used_swap, info.total_swap
-                ))
-                .borders(Borders::ALL),
-        )
-        .gauge_style(usage_color(ram_percent))
-        .percent(ram_percent)
-        .label(format!("{}%", ram_percent));
+    let mut ram_line = vec![Span::styled("RAM ", label())];
+    ram_line.extend(meter(ram_percent, 28));
+    ram_line.push(Span::styled(
+        format!(" {:>3}%", ram_percent),
+        usage_color(ram_percent),
+    ));
 
-    let process_lines = info
-        .processes_list
-        .iter()
-        .map(|p| {
-            Line::from(format!(
-                "{:<24} {:>6.1}MB {:>5.1}%",
-                p.name, p.memory, p.cpu_usage
-            ))
-        })
-        .collect::<Vec<Line>>();
+    let ram = Paragraph::new(Line::from(ram_line))
+        .alignment(Alignment::Center)
+        .style(Style::default().bg(BACKGROUND))
+        .block(card(format!(
+            "RAM {:.1}/{:.1}GB  Swap {:.1}/{:.1}GB",
+            info.used_ram, info.total_ram, info.used_swap, info.total_swap
+        )));
 
-    let processes = Paragraph::new(process_lines).block(
-        Block::default()
-            .title("TOP MEMORY / CPU")
-            .borders(Borders::ALL),
+    let mut process_lines = vec![section_header(vec![
+        ("PROCESS", 24),
+        ("MEM", 9),
+        ("CPU", 5),
+    ])];
+    process_lines.extend(
+        info.processes_list
+            .iter()
+            .map(|p| {
+                Line::from(vec![
+                    Span::styled(format!("{:<24}", p.name), value()),
+                    Span::styled(format!("{:>7.1}M ", p.memory), label()),
+                    Span::styled(
+                        format!("{:>5.1}%", p.cpu_usage),
+                        usage_color(p.cpu_usage as u16),
+                    ),
+                ])
+            })
+            .collect::<Vec<Line>>(),
     );
 
-    let disk_lines = info
-        .disks
-        .iter()
-        .take(5)
-        .map(|disk| {
-            let used = disk.total_space - disk.available_space;
-            let percent = if disk.total_space > 0.0 {
-                (used / disk.total_space * 100.0).clamp(0.0, 100.0)
-            } else {
-                0.0
-            };
+    let processes = Paragraph::new(process_lines)
+        .style(Style::default().bg(SURFACE))
+        .block(card("Top Processes"));
 
-            Line::from(format!(
-                "{} {} {:.1}/{:.1}GB {:>4.0}%",
-                disk.name, disk.mount_point, used, disk.total_space, percent
-            ))
-        })
-        .collect::<Vec<Line>>();
+    let mut disk_lines = vec![section_header(vec![
+        ("DEVICE", 10),
+        ("MOUNT", 12),
+        ("USED", 12),
+        ("%", 4),
+    ])];
+    disk_lines.extend(
+        info.disks
+            .iter()
+            .take(5)
+            .map(|disk| {
+                let used = disk.total_space - disk.available_space;
+                let percent = if disk.total_space > 0.0 {
+                    (used / disk.total_space * 100.0).clamp(0.0, 100.0)
+                } else {
+                    0.0
+                };
 
-    let disks =
-        Paragraph::new(disk_lines).block(Block::default().title("DISKS").borders(Borders::ALL));
+                Line::from(vec![
+                    Span::styled(format!("{:<10}", disk.name), value()),
+                    Span::styled(format!("{:<12}", disk.mount_point), label()),
+                    Span::styled(format!("{:>5.1}/{:<4.1} ", used, disk.total_space), value()),
+                    Span::styled(format!("{:>4.0}%", percent), usage_color(percent as u16)),
+                ])
+            })
+            .collect::<Vec<Line>>(),
+    );
+
+    let disks = Paragraph::new(disk_lines)
+        .style(Style::default().bg(SURFACE))
+        .block(card("Storage"));
 
     let cpu_history = Sparkline::default()
-        .block(Block::default().title("CPU HISTORY").borders(Borders::ALL))
-        .style(Style::default().fg(Color::Cyan))
+        .block(card("CPU Trend"))
+        .style(Style::default().fg(ACCENT).bg(SURFACE))
+        .absent_value_style(muted())
         .data(&app.cpu_history);
 
-    let network_lines = info
-        .networks
-        .iter()
-        .map(|net| {
-            Line::from(format!(
-                "{} ↓ {:.2}MB/s ↑ {:.2}MB/s",
-                net.interface, net.received_per_sec, net.transmitted_per_sec
-            ))
-        })
-        .collect::<Vec<Line>>();
+    let mut network_lines = vec![section_header(vec![
+        ("IFACE", 14),
+        ("DOWN", 13),
+        ("UP", 12),
+    ])];
+    network_lines.extend(
+        info.networks
+            .iter()
+            .map(|net| {
+                Line::from(vec![
+                    Span::styled(format!("{:<14}", net.interface), value()),
+                    Span::styled(
+                        format!("{:>8.2} MB/s ", net.received_per_sec),
+                        Style::default().fg(OK),
+                    ),
+                    Span::styled(
+                        format!("{:>7.2} MB/s", net.transmitted_per_sec),
+                        Style::default().fg(WARN),
+                    ),
+                ])
+            })
+            .collect::<Vec<Line>>(),
+    );
 
     let network = Paragraph::new(network_lines)
-        .block(Block::default().title("NETWORK").borders(Borders::ALL));
+        .style(Style::default().bg(SURFACE))
+        .block(card("Network"));
 
-    let footer = Paragraph::new("q/Esc/Ctrl+C sair | Atualizacao: 1s | GPU NVIDIA via nvidia-smi")
+    let footer = Paragraph::new("q/Esc/Ctrl+C sair  /  refresh 1s  /  NVIDIA via nvidia-smi")
         .alignment(Alignment::Center)
         .style(muted());
 
@@ -212,7 +382,12 @@ pub fn draw(frame: &mut Frame, info: &SystemInfo, app: &AppState) {
             Constraint::Percentage(33),
             Constraint::Percentage(34),
         ])
+        .spacing(1)
         .split(main[2]);
+
+    for area in bottom.iter() {
+        frame.render_widget(fill(SURFACE), *area);
+    }
 
     frame.render_widget(disks, bottom[0]);
     frame.render_widget(cpu_history, bottom[1]);
