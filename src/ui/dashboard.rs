@@ -3,8 +3,8 @@ use crate::system::info::SystemInfo;
 
 use ratatui::{
     Frame,
-    layout::{Constraint, Direction, Layout},
-    style::{Color, Style},
+    layout::{Alignment, Constraint, Direction, Layout},
+    style::{Color, Modifier, Style},
     text::Line,
     widgets::{Block, Borders, Gauge, Paragraph, Sparkline},
 };
@@ -15,6 +15,10 @@ fn usage_color(value: u16) -> Style {
         51..=80 => Style::default().fg(Color::Yellow),
         _ => Style::default().fg(Color::Red),
     }
+}
+
+fn muted() -> Style {
+    Style::default().fg(Color::DarkGray)
 }
 
 fn format_uptime(seconds: u64) -> String {
@@ -30,14 +34,42 @@ fn format_uptime(seconds: u64) -> String {
 }
 
 pub fn draw(frame: &mut Frame, info: &SystemInfo, app: &AppState) {
+    let page = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Min(10),
+            Constraint::Length(1),
+        ])
+        .split(frame.area());
+
+    let title = Paragraph::new(format!(
+        "Sysmon | CPU {:.1}% | RAM {:.1}/{:.1}GB | Load {:.2} {:.2} {:.2}",
+        info.cpu_usage,
+        info.used_ram,
+        info.total_ram,
+        info.load_average.0,
+        info.load_average.1,
+        info.load_average.2
+    ))
+    .alignment(Alignment::Center)
+    .style(
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    )
+    .block(Block::default().borders(Borders::ALL));
+
+    frame.render_widget(title, page[0]);
+
     let main = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Percentage(35),
-            Constraint::Percentage(35),
+            Constraint::Percentage(34),
+            Constraint::Percentage(36),
             Constraint::Percentage(30),
         ])
-        .split(frame.area());
+        .split(page[1]);
 
     let top = Layout::default()
         .direction(Direction::Horizontal)
@@ -55,13 +87,16 @@ pub fn draw(frame: &mut Frame, info: &SystemInfo, app: &AppState) {
         .split(top[0]);
 
     let system_info = Paragraph::new(format!(
-        "{} | Kernel {}\nCPU: {}\nCores: {} | Processos: {}\nUptime: {}",
+        "{} | Kernel {}\nCPU: {}\nCores: {} | Processos: {}\nUptime: {} | Load: {:.2} {:.2} {:.2}",
         info.os_name,
         info.kernel,
         info.cpu_name,
         info.cpu_cores,
         info.processes,
-        format_uptime(info.uptime)
+        format_uptime(info.uptime),
+        info.load_average.0,
+        info.load_average.1,
+        info.load_average.2
     ))
     .block(Block::default().title("SYSTEM").borders(Borders::ALL));
 
@@ -92,7 +127,10 @@ pub fn draw(frame: &mut Frame, info: &SystemInfo, app: &AppState) {
     let ram = Gauge::default()
         .block(
             Block::default()
-                .title(format!("RAM {:.1}/{:.1}GB", info.used_ram, info.total_ram))
+                .title(format!(
+                    "RAM {:.1}/{:.1}GB | SWAP {:.1}/{:.1}GB",
+                    info.used_ram, info.total_ram, info.used_swap, info.total_swap
+                ))
                 .borders(Borders::ALL),
         )
         .gauge_style(usage_color(ram_percent))
@@ -102,21 +140,35 @@ pub fn draw(frame: &mut Frame, info: &SystemInfo, app: &AppState) {
     let process_lines = info
         .processes_list
         .iter()
-        .map(|p| Line::from(format!("{} {:.1}MB", p.name, p.memory)))
+        .map(|p| {
+            Line::from(format!(
+                "{:<24} {:>6.1}MB {:>5.1}%",
+                p.name, p.memory, p.cpu_usage
+            ))
+        })
         .collect::<Vec<Line>>();
 
-    let processes = Paragraph::new(process_lines)
-        .block(Block::default().title("TOP MEMORY").borders(Borders::ALL));
+    let processes = Paragraph::new(process_lines).block(
+        Block::default()
+            .title("TOP MEMORY / CPU")
+            .borders(Borders::ALL),
+    );
 
     let disk_lines = info
         .disks
         .iter()
+        .take(5)
         .map(|disk| {
             let used = disk.total_space - disk.available_space;
+            let percent = if disk.total_space > 0.0 {
+                (used / disk.total_space * 100.0).clamp(0.0, 100.0)
+            } else {
+                0.0
+            };
 
             Line::from(format!(
-                "{} {} {:.1}/{:.1}GB",
-                disk.name, disk.mount_point, used, disk.total_space
+                "{} {} {:.1}/{:.1}GB {:>4.0}%",
+                disk.name, disk.mount_point, used, disk.total_space, percent
             ))
         })
         .collect::<Vec<Line>>();
@@ -126,6 +178,7 @@ pub fn draw(frame: &mut Frame, info: &SystemInfo, app: &AppState) {
 
     let cpu_history = Sparkline::default()
         .block(Block::default().title("CPU HISTORY").borders(Borders::ALL))
+        .style(Style::default().fg(Color::Cyan))
         .data(&app.cpu_history);
 
     let network_lines = info
@@ -141,6 +194,10 @@ pub fn draw(frame: &mut Frame, info: &SystemInfo, app: &AppState) {
 
     let network = Paragraph::new(network_lines)
         .block(Block::default().title("NETWORK").borders(Borders::ALL));
+
+    let footer = Paragraph::new("q/Esc/Ctrl+C sair | Atualizacao: 1s | GPU NVIDIA via nvidia-smi")
+        .alignment(Alignment::Center)
+        .style(muted());
 
     frame.render_widget(system_info, system_layout[0]);
     frame.render_widget(cpu_gauge, system_layout[1]);
@@ -160,4 +217,5 @@ pub fn draw(frame: &mut Frame, info: &SystemInfo, app: &AppState) {
     frame.render_widget(disks, bottom[0]);
     frame.render_widget(cpu_history, bottom[1]);
     frame.render_widget(network, bottom[2]);
+    frame.render_widget(footer, page[2]);
 }

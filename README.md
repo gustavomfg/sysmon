@@ -27,11 +27,11 @@ Um monitor de sistema no terminal feito em Rust, com interface TUI leve, atualiz
 
 - Dashboard TUI usando `ratatui` e `crossterm`.
 - Uso geral de CPU com histórico visual.
-- Informações de sistema: OS, kernel, uptime, cores e quantidade de processos.
-- RAM usada/total com barra de progresso.
-- Top 5 processos por uso de memória.
+- Informações de sistema: OS, kernel, uptime, cores, load average e quantidade de processos.
+- RAM e swap usados/totais com barra de progresso.
+- Top 5 processos por uso de memória, exibindo também CPU por processo.
 - Discos montados com espaço usado/total.
-- Rede por interface em `MB/s`.
+- Rede por interface em `MB/s`, priorizando as interfaces com mais tráfego.
 - GPU NVIDIA via `nvidia-smi`, quando disponível.
 - Saída segura com restauração do terminal.
 
@@ -46,7 +46,7 @@ Um monitor de sistema no terminal feito em Rust, com interface TUI leve, atualiz
 Clone o repositório:
 
 ```bash
-git https://github.com/guhdev-java/sysmon.git
+git clone https://github.com/guhdev-java/sysmon.git
 cd sysmon
 ```
 
