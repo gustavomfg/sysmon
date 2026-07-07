@@ -5,8 +5,9 @@ use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
+    symbols,
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, Padding, Paragraph, Sparkline},
+    widgets::{Axis, Block, BorderType, Borders, Chart, Dataset, GraphType, Padding, Paragraph},
 };
 
 const ACCENT: Color = Color::Cyan;
@@ -194,6 +195,16 @@ pub fn draw(frame: &mut Frame, info: &SystemInfo, app: &AppState) {
         frame.render_widget(fill(SURFACE), *area);
     }
 
+    let middle_left = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(3), Constraint::Min(5)])
+        .spacing(1)
+        .split(middle[0]);
+
+    for area in middle_left.iter() {
+        frame.render_widget(fill(SURFACE), *area);
+    }
+
     let system_layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(5), Constraint::Length(3)])
@@ -331,11 +342,35 @@ pub fn draw(frame: &mut Frame, info: &SystemInfo, app: &AppState) {
         .style(Style::default().bg(SURFACE))
         .block(card("Storage"));
 
-    let cpu_history = Sparkline::default()
-        .block(card("CPU Trend"))
-        .style(Style::default().fg(ACCENT).bg(SURFACE))
-        .absent_value_style(muted())
-        .data(&app.cpu_history);
+    let cpu_points = app
+        .cpu_history
+        .iter()
+        .enumerate()
+        .map(|(index, value)| (index as f64, *value as f64))
+        .collect::<Vec<(f64, f64)>>();
+    let cpu_x_max = cpu_points.len().saturating_sub(1).max(1) as f64;
+    let cpu_history = Chart::new(vec![
+        Dataset::default()
+            .name("usage")
+            .marker(symbols::Marker::Braille)
+            .graph_type(GraphType::Line)
+            .style(Style::default().fg(ACCENT).add_modifier(Modifier::BOLD))
+            .data(&cpu_points),
+    ])
+    .block(card(format!("CPU Trend  {:.1}%", info.cpu_usage)))
+    .style(Style::default().bg(SURFACE))
+    .x_axis(
+        Axis::default()
+            .style(muted())
+            .bounds([0.0, cpu_x_max])
+            .labels(vec![Span::raw("60s"), Span::raw("now")]),
+    )
+    .y_axis(
+        Axis::default()
+            .style(muted())
+            .bounds([0.0, 100.0])
+            .labels(vec![Span::raw("0"), Span::raw("50"), Span::raw("100")]),
+    );
 
     let mut network_lines = vec![section_header(vec![
         ("IFACE", 14),
@@ -372,16 +407,12 @@ pub fn draw(frame: &mut Frame, info: &SystemInfo, app: &AppState) {
     frame.render_widget(system_info, system_layout[0]);
     frame.render_widget(cpu_gauge, system_layout[1]);
     frame.render_widget(gpu, top[1]);
-    frame.render_widget(ram, middle[0]);
+    frame.render_widget(ram, middle_left[0]);
     frame.render_widget(processes, middle[1]);
 
     let bottom = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage(33),
-            Constraint::Percentage(33),
-            Constraint::Percentage(34),
-        ])
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
         .spacing(1)
         .split(main[2]);
 
@@ -389,8 +420,8 @@ pub fn draw(frame: &mut Frame, info: &SystemInfo, app: &AppState) {
         frame.render_widget(fill(SURFACE), *area);
     }
 
-    frame.render_widget(disks, bottom[0]);
-    frame.render_widget(cpu_history, bottom[1]);
-    frame.render_widget(network, bottom[2]);
+    frame.render_widget(disks, middle_left[1]);
+    frame.render_widget(cpu_history, bottom[0]);
+    frame.render_widget(network, bottom[1]);
     frame.render_widget(footer, page[2]);
 }
