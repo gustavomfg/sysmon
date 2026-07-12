@@ -46,7 +46,7 @@ Um monitor de sistema no terminal feito em Rust, com interface TUI leve, atualiz
 Clone o repositório:
 
 ```bash
-git clone https://github.com/guhdev-java/sysmon.git
+git clone https://github.com/gustavomfg/sysmon.git
 cd sysmon
 ```
 
