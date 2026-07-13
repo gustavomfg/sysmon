@@ -18,9 +18,7 @@ use crossterm::{
 
 use ratatui::{Terminal, backend::CrosstermBackend};
 
-use sysinfo::{Networks, System};
-
-use system::info::SystemInfo;
+use system::info::SystemInfoCollector;
 
 struct TerminalGuard;
 
@@ -63,17 +61,15 @@ fn main() -> io::Result<()> {
     let mut terminal = Terminal::new(backend)?;
     terminal.clear()?;
 
-    let mut sys = System::new_all();
-    let mut networks = Networks::new_with_refreshed_list();
+    let mut collector = SystemInfoCollector::new();
     let mut app = AppState::new();
 
-    run_app(&mut terminal, &mut sys, &mut networks, &mut app)
+    run_app(&mut terminal, &mut collector, &mut app)
 }
 
 fn run_app(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    sys: &mut System,
-    networks: &mut Networks,
+    collector: &mut SystemInfoCollector,
     app: &mut AppState,
 ) -> io::Result<()> {
     let tick_rate = Duration::from_secs(1);
@@ -81,7 +77,7 @@ fn run_app(
 
     loop {
         if last_tick.elapsed() >= tick_rate {
-            let info = SystemInfo::get(sys, networks);
+            let info = collector.collect();
 
             app.update_cpu_history(info.cpu_usage);
 

@@ -1,8 +1,21 @@
-use std::cmp::Ordering;
+use std::{cmp::Ordering, time::Duration};
 
-use crate::system::gpu::GpuInfo;
+use crate::system::gpu::{GpuCollector, GpuInfo};
 use crate::system::network::NetworkInfo;
-use sysinfo::{Disks, Networks, System};
+use sysinfo::{
+    CpuRefreshKind, Disks, MemoryRefreshKind, Networks, ProcessRefreshKind, RefreshKind, System,
+};
+
+const DISK_LIST_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
+const GPU_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
+
+pub struct SystemInfoCollector {
+    system: System,
+    networks: Networks,
+    disks: Disks,
+    gpus: GpuCollector,
+    last_disk_list_refresh: std::time::Instant,
+}
 
 pub struct DiskInfo {
     pub name: String,
@@ -36,14 +49,32 @@ pub struct SystemInfo {
     pub networks: Vec<NetworkInfo>,
 }
 
-impl SystemInfo {
-    pub fn get(system: &mut System, networks: &mut Networks) -> Self {
-        system.refresh_all();
-        networks.refresh(true);
+impl SystemInfoCollector {
+    pub fn new() -> Self {
+        Self {
+            system: System::new_with_specifics(system_refresh_kind()),
+            networks: Networks::new_with_refreshed_list(),
+            disks: Disks::new_with_refreshed_list(),
+            gpus: GpuCollector::new(GPU_REFRESH_INTERVAL),
+            last_disk_list_refresh: std::time::Instant::now(),
+        }
+    }
 
-        let disks = Disks::new_with_refreshed_list();
+    pub fn collect(&mut self) -> SystemInfo {
+        self.system.refresh_specifics(system_refresh_kind());
+        self.networks.refresh(true);
 
-        let disk_infos = disks
+        if self.last_disk_list_refresh.elapsed() >= DISK_LIST_REFRESH_INTERVAL {
+            self.disks.refresh(true);
+            self.last_disk_list_refresh = std::time::Instant::now();
+        } else {
+            for disk in self.disks.list_mut() {
+                disk.refresh();
+            }
+        }
+
+        let disk_infos = self
+            .disks
             .iter()
             .map(|disk| DiskInfo {
                 name: disk.name().to_string_lossy().to_string(),
@@ -53,7 +84,8 @@ impl SystemInfo {
             })
             .collect();
 
-        let mut processes_list = system
+        let mut processes_list = self
+            .system
             .processes()
             .values()
             .map(|process| ProcessInfo {
@@ -69,27 +101,35 @@ impl SystemInfo {
 
         let load_average = System::load_average();
 
-        Self {
+        SystemInfo {
             os_name: System::name().unwrap_or("Desconhecido".to_string()),
             kernel: System::kernel_version().unwrap_or("Desconhecido".to_string()),
-            cpu_name: system
+            cpu_name: self
+                .system
                 .cpus()
                 .first()
                 .map(|cpu| cpu.brand().to_string())
                 .unwrap_or("Desconhecido".to_string()),
-            cpu_cores: system.cpus().len(),
-            cpu_usage: system.global_cpu_usage(),
-            total_ram: system.total_memory() as f64 / 1024.0 / 1024.0 / 1024.0,
-            used_ram: system.used_memory() as f64 / 1024.0 / 1024.0 / 1024.0,
-            total_swap: system.total_swap() as f64 / 1024.0 / 1024.0 / 1024.0,
-            used_swap: system.used_swap() as f64 / 1024.0 / 1024.0 / 1024.0,
-            processes: system.processes().len(),
+            cpu_cores: self.system.cpus().len(),
+            cpu_usage: self.system.global_cpu_usage(),
+            total_ram: self.system.total_memory() as f64 / 1024.0 / 1024.0 / 1024.0,
+            used_ram: self.system.used_memory() as f64 / 1024.0 / 1024.0 / 1024.0,
+            total_swap: self.system.total_swap() as f64 / 1024.0 / 1024.0 / 1024.0,
+            used_swap: self.system.used_swap() as f64 / 1024.0 / 1024.0 / 1024.0,
+            processes: self.system.processes().len(),
             uptime: System::uptime(),
             load_average: (load_average.one, load_average.five, load_average.fifteen),
             disks: disk_infos,
             processes_list,
-            gpus: GpuInfo::get_all(),
-            networks: NetworkInfo::get(networks),
+            gpus: self.gpus.get().to_vec(),
+            networks: NetworkInfo::get(&self.networks),
         }
     }
+}
+
+fn system_refresh_kind() -> RefreshKind {
+    RefreshKind::nothing()
+        .with_cpu(CpuRefreshKind::nothing().with_cpu_usage())
+        .with_memory(MemoryRefreshKind::everything())
+        .with_processes(ProcessRefreshKind::nothing().with_cpu().with_memory())
 }

@@ -1,10 +1,43 @@
-use std::process::Command;
+use std::{
+    process::Command,
+    time::{Duration, Instant},
+};
 
+#[derive(Clone)]
 pub struct GpuInfo {
     pub name: String,
     pub temperature: String,
     pub usage: String,
     pub memory: String,
+}
+
+pub struct GpuCollector {
+    cached: Vec<GpuInfo>,
+    last_refresh: Option<Instant>,
+    refresh_interval: Duration,
+}
+
+impl GpuCollector {
+    pub fn new(refresh_interval: Duration) -> Self {
+        Self {
+            cached: Vec::new(),
+            last_refresh: None,
+            refresh_interval,
+        }
+    }
+
+    pub fn get(&mut self) -> &[GpuInfo] {
+        let should_refresh = self
+            .last_refresh
+            .is_none_or(|last_refresh| last_refresh.elapsed() >= self.refresh_interval);
+
+        if should_refresh {
+            self.cached = GpuInfo::get_all();
+            self.last_refresh = Some(Instant::now());
+        }
+
+        &self.cached
+    }
 }
 
 impl GpuInfo {
