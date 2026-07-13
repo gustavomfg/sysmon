@@ -33,6 +33,7 @@ Um monitor de sistema no terminal feito em Rust, com interface TUI leve, atualiz
 - Discos montados com espaço usado/total.
 - Rede por interface em `MB/s`, priorizando as interfaces com mais tráfego.
 - GPUs NVIDIA via `nvidia-smi`, quando disponível, exibindo todas as placas detectadas.
+- Layout responsivo, com aviso quando o terminal não possui o tamanho mínimo necessário.
 - Saída segura com restauração do terminal.
 
 ## Requisitos
@@ -98,7 +99,7 @@ A coleta principal vem da crate `sysinfo`. Para GPUs, o app chama `nvidia-smi`, 
 
 - GPUs são detectadas apenas em placas NVIDIA com `nvidia-smi` disponível.
 - A leitura de rede divide o delta de bytes pelo intervalo real entre atualizações e apresenta a taxa em `MB/s` decimal.
-- O layout é otimizado para terminais médios/grandes; janelas muito pequenas podem cortar texto.
+- O layout ajusta a proporção dos painéis conforme a largura; abaixo do tamanho mínimo, o app exibe um aviso em vez de cortar o dashboard.
 
 ## Desenvolvimento
 
@@ -108,6 +109,7 @@ Comandos úteis:
 cargo fmt
 cargo check
 cargo clippy -- -D warnings
+cargo test
 ```
 
 Build limpo, se necessário:
