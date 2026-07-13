@@ -1,5 +1,6 @@
 use crate::app::AppState;
 use crate::system::info::SystemInfo;
+use crate::ui::{COMPACT_DASHBOARD_WIDTH, MIN_DASHBOARD_HEIGHT, MIN_DASHBOARD_WIDTH};
 
 use ratatui::{
     Frame,
@@ -7,7 +8,9 @@ use ratatui::{
     style::{Color, Modifier, Style},
     symbols,
     text::{Line, Span},
-    widgets::{Axis, Block, BorderType, Borders, Chart, Dataset, GraphType, Padding, Paragraph},
+    widgets::{
+        Axis, Block, BorderType, Borders, Chart, Dataset, GraphType, Padding, Paragraph, Wrap,
+    },
 };
 
 const ACCENT: Color = Color::Cyan;
@@ -123,8 +126,124 @@ fn disk_usage(total: f64, available: f64) -> (f64, f64) {
     (used, usage_percent(used, total))
 }
 
+fn fit(text: &str, width: usize) -> String {
+    let value = text.chars().take(width).collect::<String>();
+    format!("{value:<width$}")
+}
+
+fn gpu_lines(info: &SystemInfo) -> Vec<Line<'static>> {
+    if info.gpus.is_empty() {
+        return vec![Line::styled("GPU não encontrada", muted())];
+    }
+
+    info.gpus
+        .iter()
+        .enumerate()
+        .flat_map(|(index, gpu)| {
+            [
+                Line::styled(
+                    format!("GPU {}  {}", index + 1, gpu.name),
+                    value().add_modifier(Modifier::BOLD),
+                ),
+                metric_line(
+                    "  ",
+                    format!(
+                        "Temp {}  Uso {}  VRAM {}",
+                        gpu.temperature, gpu.usage, gpu.memory
+                    ),
+                ),
+            ]
+        })
+        .collect()
+}
+
+fn process_lines(info: &SystemInfo, area_width: u16) -> Vec<Line<'static>> {
+    let process_width = usize::from(area_width.saturating_sub(20)).clamp(8, 24);
+    let mut lines = vec![section_header(vec![
+        ("PROCESS", process_width),
+        ("MEM", 9),
+        ("CPU", 5),
+    ])];
+
+    lines.extend(info.processes_list.iter().map(|process| {
+        Line::from(vec![
+            Span::styled(fit(&process.name, process_width), value()),
+            Span::styled(format!("{:>7.1}M ", process.memory), label()),
+            Span::styled(
+                format!("{:>5.1}%", process.cpu_usage),
+                usage_color(process.cpu_usage as u16),
+            ),
+        ])
+    }));
+    lines
+}
+
+fn storage_lines(info: &SystemInfo, area_width: u16) -> Vec<Line<'static>> {
+    let mount_width = usize::from(area_width.saturating_sub(32)).clamp(6, 12);
+    let mut lines = vec![section_header(vec![
+        ("DEVICE", 10),
+        ("MOUNT", mount_width),
+        ("USED", 12),
+        ("%", 4),
+    ])];
+
+    lines.extend(info.disks.iter().take(5).map(|disk| {
+        let (used, percent) = disk_usage(disk.total_space, disk.available_space);
+        Line::from(vec![
+            Span::styled(fit(&disk.name, 10), value()),
+            Span::styled(fit(&disk.mount_point, mount_width), label()),
+            Span::styled(format!("{:>5.1}/{:<4.1} ", used, disk.total_space), value()),
+            Span::styled(format!("{:>4.0}%", percent), usage_color(percent as u16)),
+        ])
+    }));
+    lines
+}
+
+fn network_lines(info: &SystemInfo, area_width: u16) -> Vec<Line<'static>> {
+    let interface_width = usize::from(area_width.saturating_sub(29)).clamp(7, 14);
+    let mut lines = vec![section_header(vec![
+        ("IFACE", interface_width),
+        ("DOWN", 13),
+        ("UP", 12),
+    ])];
+
+    lines.extend(info.networks.iter().map(|network| {
+        Line::from(vec![
+            Span::styled(fit(&network.interface, interface_width), value()),
+            Span::styled(
+                format!("{:>8.2} MB/s ", network.received_per_sec),
+                Style::default().fg(OK),
+            ),
+            Span::styled(
+                format!("{:>7.2} MB/s", network.transmitted_per_sec),
+                Style::default().fg(WARN),
+            ),
+        ])
+    }));
+    lines
+}
+
+fn draw_minimum_size_message(frame: &mut Frame) {
+    let area = frame.area();
+    let message = Paragraph::new(format!(
+        "Janela muito pequena: {}x{}.\nO Sysmon requer ao menos {}x{}.",
+        area.width, area.height, MIN_DASHBOARD_WIDTH, MIN_DASHBOARD_HEIGHT
+    ))
+    .alignment(Alignment::Center)
+    .wrap(Wrap { trim: true })
+    .block(card("Sysmon"));
+    frame.render_widget(message, area);
+}
+
 pub fn draw(frame: &mut Frame, info: &SystemInfo, app: &AppState) {
     frame.render_widget(fill(BACKGROUND), frame.area());
+
+    if frame.area().width < MIN_DASHBOARD_WIDTH || frame.area().height < MIN_DASHBOARD_HEIGHT {
+        draw_minimum_size_message(frame);
+        return;
+    }
+
+    let compact = frame.area().width < COMPACT_DASHBOARD_WIDTH;
 
     let page = Layout::default()
         .direction(Direction::Vertical)
@@ -186,7 +305,11 @@ pub fn draw(frame: &mut Frame, info: &SystemInfo, app: &AppState) {
 
     let top = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(42), Constraint::Percentage(58)])
+        .constraints(if compact {
+            [Constraint::Percentage(50), Constraint::Percentage(50)]
+        } else {
+            [Constraint::Percentage(42), Constraint::Percentage(58)]
+        })
         .spacing(1)
         .split(main[0]);
 
@@ -196,7 +319,11 @@ pub fn draw(frame: &mut Frame, info: &SystemInfo, app: &AppState) {
 
     let middle = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(44), Constraint::Percentage(56)])
+        .constraints(if compact {
+            [Constraint::Percentage(50), Constraint::Percentage(50)]
+        } else {
+            [Constraint::Percentage(44), Constraint::Percentage(56)]
+        })
         .spacing(1)
         .split(main[1]);
 
@@ -259,31 +386,7 @@ pub fn draw(frame: &mut Frame, info: &SystemInfo, app: &AppState) {
         .style(Style::default().bg(BACKGROUND))
         .block(card("CPU Usage"));
 
-    let gpu_lines = if info.gpus.is_empty() {
-        vec![Line::styled("GPU não encontrada", muted())]
-    } else {
-        info.gpus
-            .iter()
-            .enumerate()
-            .flat_map(|(index, gpu)| {
-                [
-                    Line::styled(
-                        format!("GPU {}  {}", index + 1, gpu.name),
-                        value().add_modifier(Modifier::BOLD),
-                    ),
-                    metric_line(
-                        "  ",
-                        format!(
-                            "Temp {}  Uso {}  VRAM {}",
-                            gpu.temperature, gpu.usage, gpu.memory
-                        ),
-                    ),
-                ]
-            })
-            .collect()
-    };
-
-    let gpu = Paragraph::new(gpu_lines)
+    let gpu = Paragraph::new(gpu_lines(info))
         .style(Style::default().bg(SURFACE))
         .block(card("GPU"));
 
@@ -304,55 +407,11 @@ pub fn draw(frame: &mut Frame, info: &SystemInfo, app: &AppState) {
             info.used_ram, info.total_ram, info.used_swap, info.total_swap
         )));
 
-    let mut process_lines = vec![section_header(vec![
-        ("PROCESS", 24),
-        ("MEM", 9),
-        ("CPU", 5),
-    ])];
-    process_lines.extend(
-        info.processes_list
-            .iter()
-            .map(|p| {
-                Line::from(vec![
-                    Span::styled(format!("{:<24}", p.name), value()),
-                    Span::styled(format!("{:>7.1}M ", p.memory), label()),
-                    Span::styled(
-                        format!("{:>5.1}%", p.cpu_usage),
-                        usage_color(p.cpu_usage as u16),
-                    ),
-                ])
-            })
-            .collect::<Vec<Line>>(),
-    );
-
-    let processes = Paragraph::new(process_lines)
+    let processes = Paragraph::new(process_lines(info, middle[1].width))
         .style(Style::default().bg(SURFACE))
         .block(card("Top Processes"));
 
-    let mut disk_lines = vec![section_header(vec![
-        ("DEVICE", 10),
-        ("MOUNT", 12),
-        ("USED", 12),
-        ("%", 4),
-    ])];
-    disk_lines.extend(
-        info.disks
-            .iter()
-            .take(5)
-            .map(|disk| {
-                let (used, percent) = disk_usage(disk.total_space, disk.available_space);
-
-                Line::from(vec![
-                    Span::styled(format!("{:<10}", disk.name), value()),
-                    Span::styled(format!("{:<12}", disk.mount_point), label()),
-                    Span::styled(format!("{:>5.1}/{:<4.1} ", used, disk.total_space), value()),
-                    Span::styled(format!("{:>4.0}%", percent), usage_color(percent as u16)),
-                ])
-            })
-            .collect::<Vec<Line>>(),
-    );
-
-    let disks = Paragraph::new(disk_lines)
+    let disks = Paragraph::new(storage_lines(info, middle_left[1].width))
         .style(Style::default().bg(SURFACE))
         .block(card("Storage"));
 
@@ -386,34 +445,6 @@ pub fn draw(frame: &mut Frame, info: &SystemInfo, app: &AppState) {
             .labels(vec![Span::raw("0"), Span::raw("50"), Span::raw("100")]),
     );
 
-    let mut network_lines = vec![section_header(vec![
-        ("IFACE", 14),
-        ("DOWN", 13),
-        ("UP", 12),
-    ])];
-    network_lines.extend(
-        info.networks
-            .iter()
-            .map(|net| {
-                Line::from(vec![
-                    Span::styled(format!("{:<14}", net.interface), value()),
-                    Span::styled(
-                        format!("{:>8.2} MB/s ", net.received_per_sec),
-                        Style::default().fg(OK),
-                    ),
-                    Span::styled(
-                        format!("{:>7.2} MB/s", net.transmitted_per_sec),
-                        Style::default().fg(WARN),
-                    ),
-                ])
-            })
-            .collect::<Vec<Line>>(),
-    );
-
-    let network = Paragraph::new(network_lines)
-        .style(Style::default().bg(SURFACE))
-        .block(card("Network"));
-
     let footer = Paragraph::new("q/Esc/Ctrl+C sair  /  refresh 1s  /  NVIDIA via nvidia-smi")
         .alignment(Alignment::Center)
         .style(muted());
@@ -426,13 +457,21 @@ pub fn draw(frame: &mut Frame, info: &SystemInfo, app: &AppState) {
 
     let bottom = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .constraints(if compact {
+            [Constraint::Percentage(45), Constraint::Percentage(55)]
+        } else {
+            [Constraint::Percentage(50), Constraint::Percentage(50)]
+        })
         .spacing(1)
         .split(main[2]);
 
     for area in bottom.iter() {
         frame.render_widget(fill(SURFACE), *area);
     }
+
+    let network = Paragraph::new(network_lines(info, bottom[1].width))
+        .style(Style::default().bg(SURFACE))
+        .block(card("Network"));
 
     frame.render_widget(disks, middle_left[1]);
     frame.render_widget(cpu_history, bottom[0]);
@@ -488,6 +527,26 @@ mod tests {
                 .collect::<String>();
             assert!(rendered.contains("SYSMON"));
         }
+    }
+
+    #[test]
+    fn explains_the_minimum_size_in_small_terminals() {
+        let backend = TestBackend::new(60, 20);
+        let mut terminal = Terminal::new(backend).expect("test terminal should be created");
+
+        terminal
+            .draw(|frame| draw(frame, &sample_system_info(), &AppState::new()))
+            .expect("minimum-size message should render");
+
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(rendered.contains("Janela muito pequena"));
+        assert!(rendered.contains("80x24"));
     }
 
     fn sample_system_info() -> SystemInfo {

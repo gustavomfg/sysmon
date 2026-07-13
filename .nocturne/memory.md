@@ -25,3 +25,7 @@ Decisões, arquitetura e informações aprendidas pelo agente.
 - ✓ Adicionar cobertura automatizada para estado, parsing e transformações — accepted em 12/07/2026
 
 - ✓ Adicionar cobertura automatizada para estado, parsing e transformações — applied em 12/07/2026
+
+- ✓ Dividir o dashboard em componentes menores e responsivos — accepted em 12/07/2026
+
+- ✓ Dividir o dashboard em componentes menores e responsivos — applied em 12/07/2026
