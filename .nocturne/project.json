@@ -1,0 +1,10 @@
+{
+  "name": "rust-system-monitor",
+  "stack": [
+    "Rust"
+  ],
+  "primaryLanguage": "Rust",
+  "commands": {
+    "test": "cargo test"
+  }
+}
