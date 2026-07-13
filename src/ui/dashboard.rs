@@ -250,14 +250,28 @@ pub fn draw(frame: &mut Frame, info: &SystemInfo, app: &AppState) {
         .style(Style::default().bg(BACKGROUND))
         .block(card("CPU Usage"));
 
-    let gpu_lines = match &info.gpu {
-        Some(gpu) => vec![
-            Line::styled(gpu.name.clone(), value().add_modifier(Modifier::BOLD)),
-            metric_line("TEMP    ", gpu.temperature.clone()),
-            metric_line("USAGE   ", gpu.usage.clone()),
-            metric_line("VRAM    ", gpu.memory.clone()),
-        ],
-        None => vec![Line::styled("GPU não encontrada", muted())],
+    let gpu_lines = if info.gpus.is_empty() {
+        vec![Line::styled("GPU não encontrada", muted())]
+    } else {
+        info.gpus
+            .iter()
+            .enumerate()
+            .flat_map(|(index, gpu)| {
+                [
+                    Line::styled(
+                        format!("GPU {}  {}", index + 1, gpu.name),
+                        value().add_modifier(Modifier::BOLD),
+                    ),
+                    metric_line(
+                        "  ",
+                        format!(
+                            "Temp {}  Uso {}  VRAM {}",
+                            gpu.temperature, gpu.usage, gpu.memory
+                        ),
+                    ),
+                ]
+            })
+            .collect()
     };
 
     let gpu = Paragraph::new(gpu_lines)

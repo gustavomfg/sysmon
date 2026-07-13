@@ -32,7 +32,7 @@ pub struct SystemInfo {
     pub load_average: (f64, f64, f64),
     pub disks: Vec<DiskInfo>,
     pub processes_list: Vec<ProcessInfo>,
-    pub gpu: Option<GpuInfo>,
+    pub gpus: Vec<GpuInfo>,
     pub networks: Vec<NetworkInfo>,
 }
 
@@ -88,7 +88,7 @@ impl SystemInfo {
             load_average: (load_average.one, load_average.five, load_average.fifteen),
             disks: disk_infos,
             processes_list,
-            gpu: GpuInfo::get(),
+            gpus: GpuInfo::get_all(),
             networks: NetworkInfo::get(networks),
         }
     }

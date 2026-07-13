@@ -32,7 +32,7 @@ Um monitor de sistema no terminal feito em Rust, com interface TUI leve, atualiz
 - Top 5 processos por uso de memória, exibindo também CPU por processo.
 - Discos montados com espaço usado/total.
 - Rede por interface em `MB/s`, priorizando as interfaces com mais tráfego.
-- GPU NVIDIA via `nvidia-smi`, quando disponível.
+- GPUs NVIDIA via `nvidia-smi`, quando disponível, exibindo todas as placas detectadas.
 - Saída segura com restauração do terminal.
 
 ## Requisitos
@@ -92,11 +92,11 @@ sysmon
 
 O app atualiza as métricas em intervalos de 1 segundo. Eventos de mouse não são capturados, evitando picos falsos de CPU ao mover ou rolar o mouse no terminal.
 
-A coleta principal vem da crate `sysinfo`. Para GPU, o app chama `nvidia-smi` e exibe os dados quando o comando está disponível e retorna com sucesso.
+A coleta principal vem da crate `sysinfo`. Para GPUs, o app chama `nvidia-smi`, valida as métricas retornadas e exibe todas as placas com dados válidos quando o comando está disponível e retorna com sucesso. Uma linha inválida não impede a exibição das demais GPUs.
 
 ## Limitações
 
-- GPU é detectada apenas em placas NVIDIA com `nvidia-smi` disponível.
+- GPUs são detectadas apenas em placas NVIDIA com `nvidia-smi` disponível.
 - A leitura de rede mostra o delta por atualização, apresentado como `MB/s` aproximado.
 - O layout é otimizado para terminais médios/grandes; janelas muito pequenas podem cortar texto.
 
