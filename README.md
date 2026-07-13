@@ -126,4 +126,4 @@ cargo build --release
 
 ## Licença
 
-Defina uma licença antes de publicar oficialmente. MIT ou Apache-2.0 são opções comuns para projetos Rust.
+Este projeto é disponibilizado sob a licença MIT.

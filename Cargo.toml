@@ -2,8 +2,14 @@
 name = "sysmon"
 version = "0.1.3"
 edition = "2024"
+rust-version = "1.95"
+description = "Monitor de sistema em tempo real com interface de terminal"
+repository = "https://github.com/guhdev-java/sysmon"
+license = "MIT"
+keywords = ["monitor", "system", "terminal", "tui"]
+categories = ["command-line-utilities"]
 
 [dependencies]
-crossterm = "0.29.0"
-ratatui = "0.30.2"
-sysinfo = "0.39.5"
+crossterm = { version = "0.29.0", default-features = false, features = ["events"] }
+ratatui = { version = "0.30.2", default-features = false, features = ["crossterm_0_29"] }
+sysinfo = { version = "0.39.5", default-features = false, features = ["disk", "network", "system"] }
