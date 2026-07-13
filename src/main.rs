@@ -77,7 +77,7 @@ fn run_app(
 
     loop {
         if last_tick.elapsed() >= tick_rate {
-            let info = collector.collect();
+            let info = collector.collect(Instant::now());
 
             app.update_cpu_history(info.cpu_usage);
 

@@ -1,4 +1,7 @@
-use std::{cmp::Ordering, time::Duration};
+use std::{
+    cmp::Ordering,
+    time::{Duration, Instant},
+};
 
 use crate::system::gpu::{GpuCollector, GpuInfo};
 use crate::system::network::NetworkInfo;
@@ -14,7 +17,8 @@ pub struct SystemInfoCollector {
     networks: Networks,
     disks: Disks,
     gpus: GpuCollector,
-    last_disk_list_refresh: std::time::Instant,
+    last_disk_list_refresh: Instant,
+    last_network_refresh: Option<Instant>,
 }
 
 pub struct DiskInfo {
@@ -56,13 +60,21 @@ impl SystemInfoCollector {
             networks: Networks::new_with_refreshed_list(),
             disks: Disks::new_with_refreshed_list(),
             gpus: GpuCollector::new(GPU_REFRESH_INTERVAL),
-            last_disk_list_refresh: std::time::Instant::now(),
+            last_disk_list_refresh: Instant::now(),
+            last_network_refresh: None,
         }
     }
 
-    pub fn collect(&mut self) -> SystemInfo {
-        self.system.refresh_specifics(system_refresh_kind());
+    pub fn collect(&mut self, collected_at: Instant) -> SystemInfo {
+        let network_interval = self
+            .last_network_refresh
+            .map_or(Duration::ZERO, |previous| {
+                collected_at.saturating_duration_since(previous)
+            });
         self.networks.refresh(true);
+        self.last_network_refresh = Some(collected_at);
+
+        self.system.refresh_specifics(system_refresh_kind());
 
         if self.last_disk_list_refresh.elapsed() >= DISK_LIST_REFRESH_INTERVAL {
             self.disks.refresh(true);
@@ -122,7 +134,7 @@ impl SystemInfoCollector {
             disks: disk_infos,
             processes_list,
             gpus: self.gpus.get().to_vec(),
-            networks: NetworkInfo::get(&self.networks),
+            networks: NetworkInfo::get(&self.networks, network_interval),
         }
     }
 }

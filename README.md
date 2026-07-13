@@ -97,7 +97,7 @@ A coleta principal vem da crate `sysinfo`. Para GPUs, o app chama `nvidia-smi`, 
 ## Limitações
 
 - GPUs são detectadas apenas em placas NVIDIA com `nvidia-smi` disponível.
-- A leitura de rede mostra o delta por atualização, apresentado como `MB/s` aproximado.
+- A leitura de rede divide o delta de bytes pelo intervalo real entre atualizações e apresenta a taxa em `MB/s` decimal.
 - O layout é otimizado para terminais médios/grandes; janelas muito pequenas podem cortar texto.
 
 ## Desenvolvimento
