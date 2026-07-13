@@ -119,4 +119,17 @@ mod tests {
         assert_eq!(gpus.len(), 1);
         assert_eq!(gpus[0].name, "NVIDIA, Experimental GPU");
     }
+
+    #[test]
+    fn rejects_each_invalid_metric_and_empty_names() {
+        for line in [
+            ", 45, 25, 2048",
+            "GPU, invalid, 25, 2048",
+            "GPU, 45, invalid, 2048",
+            "GPU, 45, 101, 2048",
+            "GPU, 45, 25, invalid",
+        ] {
+            assert!(GpuInfo::parse_output(line).is_empty(), "accepted {line}");
+        }
+    }
 }

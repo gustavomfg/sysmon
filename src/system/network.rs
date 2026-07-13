@@ -19,18 +19,22 @@ impl NetworkInfo {
             })
             .collect::<Vec<Self>>();
 
-        interfaces.sort_by(|a, b| {
-            let a_total = a.received_per_sec + a.transmitted_per_sec;
-            let b_total = b.received_per_sec + b.transmitted_per_sec;
-
-            b_total
-                .partial_cmp(&a_total)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-
-        interfaces.truncate(5);
+        sort_and_limit(&mut interfaces);
         interfaces
     }
+}
+
+fn sort_and_limit(interfaces: &mut Vec<NetworkInfo>) {
+    interfaces.sort_by(|a, b| {
+        let a_total = a.received_per_sec + a.transmitted_per_sec;
+        let b_total = b.received_per_sec + b.transmitted_per_sec;
+
+        b_total
+            .partial_cmp(&a_total)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    interfaces.truncate(5);
 }
 
 fn bytes_per_second(bytes: u64, interval: Duration) -> f64 {
@@ -47,7 +51,7 @@ fn bytes_per_second(bytes: u64, interval: Duration) -> f64 {
 mod tests {
     use std::time::Duration;
 
-    use super::bytes_per_second;
+    use super::{NetworkInfo, bytes_per_second, sort_and_limit};
 
     #[test]
     fn calculates_decimal_megabytes_over_the_real_interval() {
@@ -59,5 +63,22 @@ mod tests {
     #[test]
     fn returns_zero_when_there_is_no_previous_sample() {
         assert_eq!(bytes_per_second(1_000_000, Duration::ZERO), 0.0);
+    }
+
+    #[test]
+    fn orders_interfaces_by_total_traffic_and_limits_the_result() {
+        let mut interfaces = (0..7)
+            .map(|index| NetworkInfo {
+                interface: format!("net{index}"),
+                received_per_sec: index as f64,
+                transmitted_per_sec: index as f64,
+            })
+            .collect();
+
+        sort_and_limit(&mut interfaces);
+
+        assert_eq!(interfaces.len(), 5);
+        assert_eq!(interfaces[0].interface, "net6");
+        assert_eq!(interfaces[4].interface, "net2");
     }
 }

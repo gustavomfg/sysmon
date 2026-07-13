@@ -21,3 +21,7 @@ Decisões, arquitetura e informações aprendidas pelo agente.
 - ✓ Calcular tráfego de rede usando o intervalo real — accepted em 12/07/2026
 
 - ✓ Calcular tráfego de rede usando o intervalo real — applied em 12/07/2026
+
+- ✓ Adicionar cobertura automatizada para estado, parsing e transformações — accepted em 12/07/2026
+
+- ✓ Adicionar cobertura automatizada para estado, parsing e transformações — applied em 12/07/2026

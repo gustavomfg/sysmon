@@ -110,6 +110,19 @@ fn format_uptime(seconds: u64) -> String {
     }
 }
 
+fn usage_percent(used: f64, total: f64) -> f64 {
+    if total > 0.0 {
+        (used / total * 100.0).clamp(0.0, 100.0)
+    } else {
+        0.0
+    }
+}
+
+fn disk_usage(total: f64, available: f64) -> (f64, f64) {
+    let used = (total - available).max(0.0);
+    (used, usage_percent(used, total))
+}
+
 pub fn draw(frame: &mut Frame, info: &SystemInfo, app: &AppState) {
     frame.render_widget(fill(BACKGROUND), frame.area());
 
@@ -139,11 +152,7 @@ pub fn draw(frame: &mut Frame, info: &SystemInfo, app: &AppState) {
         Span::raw(" "),
         chip(
             format!("RAM {:.1}/{:.1}GB", info.used_ram, info.total_ram),
-            usage_color(if info.total_ram > 0.0 {
-                ((info.used_ram / info.total_ram) * 100.0).clamp(0.0, 100.0) as u16
-            } else {
-                0
-            }),
+            usage_color(usage_percent(info.used_ram, info.total_ram) as u16),
         ),
         Span::raw(" "),
         chip(
@@ -278,11 +287,7 @@ pub fn draw(frame: &mut Frame, info: &SystemInfo, app: &AppState) {
         .style(Style::default().bg(SURFACE))
         .block(card("GPU"));
 
-    let ram_percent = if info.total_ram > 0.0 {
-        ((info.used_ram / info.total_ram) * 100.0).clamp(0.0, 100.0) as u16
-    } else {
-        0
-    };
+    let ram_percent = usage_percent(info.used_ram, info.total_ram) as u16;
 
     let mut ram_line = vec![Span::styled("RAM ", label())];
     ram_line.extend(meter(ram_percent, 28));
@@ -335,12 +340,7 @@ pub fn draw(frame: &mut Frame, info: &SystemInfo, app: &AppState) {
             .iter()
             .take(5)
             .map(|disk| {
-                let used = disk.total_space - disk.available_space;
-                let percent = if disk.total_space > 0.0 {
-                    (used / disk.total_space * 100.0).clamp(0.0, 100.0)
-                } else {
-                    0.0
-                };
+                let (used, percent) = disk_usage(disk.total_space, disk.available_space);
 
                 Line::from(vec![
                     Span::styled(format!("{:<10}", disk.name), value()),
@@ -438,4 +438,76 @@ pub fn draw(frame: &mut Frame, info: &SystemInfo, app: &AppState) {
     frame.render_widget(cpu_history, bottom[0]);
     frame.render_widget(network, bottom[1]);
     frame.render_widget(footer, page[2]);
+}
+
+#[cfg(test)]
+mod tests {
+    use ratatui::{Terminal, backend::TestBackend};
+
+    use super::{disk_usage, draw, format_uptime, usage_percent};
+    use crate::{app::AppState, system::info::SystemInfo};
+
+    #[test]
+    fn formats_uptime_with_and_without_days() {
+        assert_eq!(format_uptime(3_661), "1h 1m");
+        assert_eq!(format_uptime(90_061), "1d 1h 1m");
+    }
+
+    #[test]
+    fn handles_zero_and_out_of_range_usage_values() {
+        assert_eq!(usage_percent(5.0, 0.0), 0.0);
+        assert_eq!(usage_percent(-1.0, 10.0), 0.0);
+        assert_eq!(usage_percent(12.0, 10.0), 100.0);
+    }
+
+    #[test]
+    fn handles_empty_disks_without_division_by_zero() {
+        assert_eq!(disk_usage(0.0, 0.0), (0.0, 0.0));
+    }
+
+    #[test]
+    fn renders_dashboard_at_representative_terminal_sizes() {
+        let info = sample_system_info();
+        let mut app = AppState::new();
+        app.update_cpu_history(info.cpu_usage);
+
+        for (width, height) in [(80, 24), (120, 40)] {
+            let backend = TestBackend::new(width, height);
+            let mut terminal = Terminal::new(backend).expect("test terminal should be created");
+
+            terminal
+                .draw(|frame| draw(frame, &info, &app))
+                .expect("dashboard should render");
+
+            let rendered = terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect::<String>();
+            assert!(rendered.contains("SYSMON"));
+        }
+    }
+
+    fn sample_system_info() -> SystemInfo {
+        SystemInfo {
+            os_name: "Linux".to_string(),
+            kernel: "6.x".to_string(),
+            cpu_name: "Test CPU".to_string(),
+            cpu_cores: 8,
+            cpu_usage: 42.0,
+            total_ram: 16.0,
+            used_ram: 8.0,
+            total_swap: 4.0,
+            used_swap: 1.0,
+            processes: 100,
+            uptime: 90_061,
+            load_average: (0.5, 0.4, 0.3),
+            disks: Vec::new(),
+            processes_list: Vec::new(),
+            gpus: Vec::new(),
+            networks: Vec::new(),
+        }
+    }
 }
