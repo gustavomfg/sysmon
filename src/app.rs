@@ -1,10 +1,14 @@
 use std::time::Duration;
 
 use crate::{
+    action::Action,
     animation::Tween,
+    command_palette::{Command, CommandPaletteState},
+    focus::{FocusState, FocusTarget},
     history::{History, Metric},
     system::info::SystemInfo,
     theme::Theme,
+    timeline::Timeline,
 };
 
 pub struct AppState {
@@ -13,9 +17,13 @@ pub struct AppState {
     theme: Theme,
     cpu_tween: Tween,
     memory_tween: Tween,
+    palette: CommandPaletteState,
+    focus: FocusState,
+    timeline: Timeline,
 }
 
 const HISTORY_LIMIT: usize = 60;
+const TIMELINE_LIMIT: usize = 20;
 const ANIMATION_DURATION: Duration = Duration::from_millis(250);
 
 impl AppState {
@@ -30,6 +38,13 @@ impl AppState {
             theme: Theme::default(),
             cpu_tween: Tween::new(0.0, ANIMATION_DURATION, reduced_motion),
             memory_tween: Tween::new(0.0, ANIMATION_DURATION, reduced_motion),
+            palette: CommandPaletteState::new(),
+            focus: FocusState::default(),
+            timeline: {
+                let mut timeline = Timeline::new(TIMELINE_LIMIT);
+                timeline.record("SysMon started");
+                timeline
+            },
         }
     }
 
@@ -84,6 +99,66 @@ impl AppState {
         self.cpu_tween.is_active() || self.memory_tween.is_active()
     }
 
+    pub fn palette(&self) -> &CommandPaletteState {
+        &self.palette
+    }
+
+    pub fn timeline(&self) -> &Timeline {
+        &self.timeline
+    }
+
+    pub fn is_focused(&self, target: FocusTarget) -> bool {
+        self.focus.target() == Some(target)
+    }
+
+    pub fn focus_active(&self) -> bool {
+        self.focus.target().is_some()
+    }
+
+    pub fn dispatch(&mut self, action: Action) -> bool {
+        match action {
+            Action::Quit => return true,
+            Action::OpenPalette => {
+                if !self.palette.is_open() {
+                    self.palette.open();
+                    self.timeline.record("Command Palette opened");
+                }
+            }
+            Action::ClosePalette => {
+                if self.palette.is_open() {
+                    self.palette.close();
+                    self.timeline.record("Command Palette closed");
+                }
+            }
+            Action::PaletteUp => self.palette.move_selection(-1),
+            Action::PaletteDown => self.palette.move_selection(1),
+            Action::PaletteBackspace => self.palette.backspace(),
+            Action::PaletteCharacter(character) => self.palette.insert(character),
+            Action::PaletteSubmit => {
+                if let Some(command) = self.palette.selected_command() {
+                    self.palette.close();
+                    self.execute_command(command);
+                }
+            }
+            Action::FocusNext => {
+                let target = self.focus.next();
+                self.timeline.record(format!("Focus: {}", target.label()));
+            }
+            Action::FocusPrevious => {
+                let target = self.focus.previous();
+                self.timeline.record(format!("Focus: {}", target.label()));
+            }
+            Action::ExitFocus => {
+                if self.focus_active() {
+                    self.focus.clear();
+                    self.timeline.record("Focus mode off");
+                }
+            }
+        }
+
+        false
+    }
+
     fn record_history(&mut self, snapshot: &SystemInfo) {
         self.history.record(
             Metric::Memory,
@@ -122,6 +197,14 @@ impl AppState {
         };
         self.history.record(Metric::Gpu, gpu_usage);
     }
+
+    fn execute_command(&mut self, command: Command) {
+        self.timeline.record(format!(
+            "{} unavailable: {}",
+            command.label(),
+            command.unavailable_reason()
+        ));
+    }
 }
 
 fn memory_usage_percent(used: f64, total: f64) -> f64 {
@@ -135,7 +218,7 @@ fn memory_usage_percent(used: f64, total: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::{AppState, HISTORY_LIMIT};
-    use crate::{history::Metric, system::info::SystemInfo};
+    use crate::{action::Action, focus::FocusTarget, history::Metric, system::info::SystemInfo};
 
     #[test]
     fn keeps_only_the_latest_sixty_cpu_samples() {
@@ -160,6 +243,29 @@ mod tests {
         }
 
         assert_eq!(app.history().samples(Metric::Cpu), &[0.0, 43.0, 100.0]);
+    }
+
+    #[test]
+    fn dispatches_palette_commands_and_focus_actions_to_state() {
+        let mut app = AppState::new();
+
+        assert!(app.dispatch(Action::Quit));
+        app.dispatch(Action::FocusNext);
+        assert!(app.is_focused(FocusTarget::Overview));
+        app.dispatch(Action::OpenPalette);
+        assert!(app.palette().is_open());
+        for _ in 0..5 {
+            app.dispatch(Action::PaletteDown);
+        }
+        app.dispatch(Action::PaletteSubmit);
+        assert!(!app.palette().is_open());
+        assert!(
+            app.timeline()
+                .events()
+                .last()
+                .unwrap()
+                .contains("Open Config")
+        );
     }
 
     fn snapshot(cpu_usage: f32) -> SystemInfo {
