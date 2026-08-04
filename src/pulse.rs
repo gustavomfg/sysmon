@@ -207,9 +207,10 @@ impl PulseModel {
         }
 
         self.elapsed = self.elapsed.saturating_add(delta);
-        self.intensity.update(delta)
-            || self.volatility.update(delta)
-            || self.is_ambient_active(delta)
+        let intensity_changed = self.intensity.update(delta);
+        let volatility_changed = self.volatility.update(delta);
+
+        intensity_changed || volatility_changed || self.is_ambient_active(delta)
     }
 
     fn is_ambient_active(&self, delta: Duration) -> bool {
@@ -385,6 +386,32 @@ mod tests {
         assert_eq!(reduced.breath(), 0.5);
         assert_eq!(reduced.phase(), 0.0);
         assert!(!reduced.is_active());
+    }
+
+    #[test]
+    fn updates_intensity_and_volatility_during_the_same_tick() {
+        let mut pulse = PulseModel::new(false);
+        pulse.set_input(PulseInput {
+            cpu: 0.1,
+            memory: 0.1,
+            gpu: None,
+            network: 0.0,
+            load: 0.0,
+            volatility: 0.0,
+        });
+        pulse.set_input(PulseInput {
+            cpu: 0.9,
+            memory: 0.8,
+            gpu: None,
+            network: 0.2,
+            load: 0.7,
+            volatility: 1.0,
+        });
+
+        pulse.update(Duration::from_millis(100));
+
+        assert!(pulse.intensity() > 0.0);
+        assert!(pulse.volatility() > 0.0);
     }
 
     fn snapshot(cpu_usage: f32, total_ram: f64, used_ram: f64) -> SystemInfo {
