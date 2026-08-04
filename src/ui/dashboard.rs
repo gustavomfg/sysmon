@@ -161,7 +161,7 @@ mod tests {
         let mut app = AppState::new();
         app.update(info);
 
-        for (width, height) in [(80, 24), (120, 40)] {
+        for (width, height) in [(80, 24), (120, 40), (160, 40)] {
             let backend = TestBackend::new(width, height);
             let mut terminal = Terminal::new(backend).expect("test terminal should be created");
 
@@ -189,7 +189,7 @@ mod tests {
         app.update(sample_system_info());
         app.dispatch(Action::OpenPalette);
 
-        let backend = TestBackend::new(120, 40);
+        let backend = TestBackend::new(160, 40);
         let mut terminal = Terminal::new(backend).expect("test terminal should be created");
         terminal
             .draw(|frame| draw_app(frame, &app))
@@ -207,6 +207,30 @@ mod tests {
         assert!(rendered.contains("Toggle GPU Widget"));
         assert!(rendered.contains("Open Settings"));
         assert!(rendered.contains("Toggle Memory Widget"));
+    }
+
+    #[test]
+    fn renders_process_and_config_overlays_on_widescreen() {
+        for (query, expected) in [("search", "Search Process"), ("settings", "Settings")] {
+            let mut app = AppState::new();
+            app.update(sample_system_info());
+            open_command(&mut app, query);
+
+            let backend = TestBackend::new(160, 40);
+            let mut terminal = Terminal::new(backend).expect("test terminal should be created");
+            terminal
+                .draw(|frame| draw_app(frame, &app))
+                .expect("overlay should render on widescreen");
+
+            let rendered = terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect::<String>();
+            assert!(rendered.contains(expected));
+        }
     }
 
     #[test]
@@ -251,5 +275,13 @@ mod tests {
             gpus: Vec::new(),
             networks: Vec::new(),
         }
+    }
+
+    fn open_command(app: &mut AppState, query: &str) {
+        app.dispatch(Action::OpenPalette);
+        for character in query.chars() {
+            app.dispatch(Action::PaletteCharacter(character));
+        }
+        app.dispatch(Action::PaletteSubmit);
     }
 }
