@@ -1,7 +1,7 @@
 use crate::{
     system::info::SystemInfo,
     theme::Theme,
-    ui::renderer::{card, fit, section_header, usage_color, value},
+    ui::renderer::{fit, panel, section_header, usage_color, value},
 };
 
 use ratatui::{
@@ -65,7 +65,7 @@ pub(crate) fn draw(
 ) {
     let processes = Paragraph::new(lines(info, area.width, theme, selected_process))
         .style(Style::default().bg(theme.surface))
-        .block(card(theme, "Top Processes", focused));
+        .block(panel(theme, "Top Processes", focused));
 
     frame.render_widget(processes, area);
 }

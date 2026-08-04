@@ -1,7 +1,7 @@
 use crate::{
     system::info::SystemInfo,
     theme::Theme,
-    ui::renderer::{card, fit, section_header, value},
+    ui::renderer::{fit, panel, section_header, value},
 };
 
 use ratatui::{
@@ -43,7 +43,7 @@ pub(crate) fn draw(
 ) {
     let network = Paragraph::new(lines(info, area.width, theme))
         .style(Style::default().bg(theme.surface))
-        .block(card(theme, "Network", focused));
+        .block(panel(theme, "Network", focused));
 
     frame.render_widget(network, area);
 }

@@ -58,6 +58,39 @@ pub(crate) fn card(theme: &Theme, title: impl Into<String>, focused: bool) -> Bl
         .padding(Padding::horizontal(1))
 }
 
+pub(crate) fn panel(theme: &Theme, title: impl Into<String>, focused: bool) -> Block<'static> {
+    Block::default()
+        .title(Span::styled(
+            format!("  {}  ", title.into()),
+            Style::default()
+                .fg(theme.primary)
+                .add_modifier(Modifier::BOLD),
+        ))
+        .borders(Borders::BOTTOM)
+        .border_style(Style::default().fg(if focused {
+            theme.border_focused
+        } else {
+            theme.border
+        }))
+        .style(Style::default().bg(theme.surface))
+        .padding(Padding::horizontal(1))
+}
+
+pub(crate) fn centered_overlay(
+    area: ratatui::layout::Rect,
+    max_width: u16,
+    max_height: u16,
+) -> ratatui::layout::Rect {
+    let width = area.width.saturating_sub(4).min(max_width);
+    let height = area.height.saturating_sub(4).min(max_height);
+    ratatui::layout::Rect {
+        x: area.x + area.width.saturating_sub(width) / 2,
+        y: area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    }
+}
+
 pub(crate) fn fill(color: Color) -> Block<'static> {
     Block::default().style(Style::default().bg(color))
 }

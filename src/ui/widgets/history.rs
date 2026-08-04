@@ -2,7 +2,7 @@ use crate::{
     app::AppState,
     history::Metric,
     theme::Theme,
-    ui::renderer::{card, muted},
+    ui::renderer::{muted, panel},
 };
 
 use ratatui::{
@@ -40,7 +40,7 @@ pub(crate) fn draw(
             )
             .data(&cpu_points),
     ])
-    .block(card(
+    .block(panel(
         theme,
         format!("CPU Trend  {:.1}%", app.cpu_usage()),
         focused,

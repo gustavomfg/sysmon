@@ -2,7 +2,7 @@ use crate::{
     app::AppState,
     command_palette::CommandStatus,
     theme::Theme,
-    ui::renderer::{card, fit},
+    ui::renderer::{card, centered_overlay, fit},
 };
 
 use ratatui::{
@@ -14,7 +14,7 @@ use ratatui::{
 };
 
 pub(crate) fn draw(frame: &mut Frame, area: Rect, app: &AppState, theme: &Theme) {
-    let popup = centered_rect(area);
+    let popup = centered_overlay(area, 72, 18);
     frame.render_widget(Clear, popup);
 
     let mut lines = vec![Line::from(Span::styled(
@@ -69,15 +69,4 @@ pub(crate) fn draw(frame: &mut Frame, area: Rect, app: &AppState, theme: &Theme)
         .style(Style::default().bg(theme.surface_alt))
         .block(card(theme, "Command Palette", true));
     frame.render_widget(palette, popup);
-}
-
-fn centered_rect(area: Rect) -> Rect {
-    let width = area.width.saturating_sub(4).min(72);
-    let height = area.height.saturating_sub(4).min(18);
-    Rect {
-        x: area.x + area.width.saturating_sub(width) / 2,
-        y: area.y + area.height.saturating_sub(height) / 2,
-        width,
-        height,
-    }
 }

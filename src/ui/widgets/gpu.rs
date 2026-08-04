@@ -1,7 +1,7 @@
 use crate::{
     system::info::SystemInfo,
     theme::Theme,
-    ui::renderer::{card, metric_line, muted, value},
+    ui::renderer::{metric_line, muted, panel, value},
 };
 
 use ratatui::{
@@ -47,7 +47,7 @@ pub(crate) fn draw(
 ) {
     let gpu = Paragraph::new(lines(info, theme))
         .style(Style::default().bg(theme.surface))
-        .block(card(theme, "GPU", focused));
+        .block(panel(theme, "GPU", focused));
 
     frame.render_widget(gpu, area);
 }
