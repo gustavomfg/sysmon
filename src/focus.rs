@@ -52,36 +52,38 @@ impl FocusState {
         self.target
     }
 
-    pub fn next(&mut self) -> FocusTarget {
+    pub fn next_from(&mut self, targets: &[FocusTarget]) -> Option<FocusTarget> {
+        if targets.is_empty() {
+            self.clear();
+            return None;
+        }
+
         let next = match self.target {
-            None => FocusTarget::ALL[0],
-            Some(target) => {
-                let index = FocusTarget::ALL
-                    .iter()
-                    .position(|candidate| *candidate == target)
-                    .unwrap_or(0);
-                FocusTarget::ALL[(index + 1) % FocusTarget::ALL.len()]
-            }
+            None => targets[0],
+            Some(target) => match targets.iter().position(|candidate| *candidate == target) {
+                Some(index) => targets[(index + 1) % targets.len()],
+                None => targets[0],
+            },
         };
         self.target = Some(next);
-        next
+        Some(next)
     }
 
-    pub fn previous(&mut self) -> FocusTarget {
+    pub fn previous_from(&mut self, targets: &[FocusTarget]) -> Option<FocusTarget> {
+        if targets.is_empty() {
+            self.clear();
+            return None;
+        }
+
         let previous = match self.target {
-            None => *FocusTarget::ALL
-                .last()
-                .expect("focus targets are not empty"),
-            Some(target) => {
-                let index = FocusTarget::ALL
-                    .iter()
-                    .position(|candidate| *candidate == target)
-                    .unwrap_or(0);
-                FocusTarget::ALL[(index + FocusTarget::ALL.len() - 1) % FocusTarget::ALL.len()]
-            }
+            None => *targets.last().expect("focus targets are not empty"),
+            Some(target) => match targets.iter().position(|candidate| *candidate == target) {
+                Some(index) => targets[(index + targets.len() - 1) % targets.len()],
+                None => *targets.last().expect("focus targets are not empty"),
+            },
         };
         self.target = Some(previous);
-        previous
+        Some(previous)
     }
 
     pub fn clear(&mut self) {
@@ -101,10 +103,22 @@ mod tests {
     fn cycles_focus_forward_and_backward() {
         let mut focus = FocusState::default();
 
-        assert_eq!(focus.next(), FocusTarget::Overview);
-        assert_eq!(focus.next(), FocusTarget::System);
-        assert_eq!(focus.previous(), FocusTarget::Overview);
+        assert_eq!(
+            focus.next_from(&FocusTarget::ALL),
+            Some(FocusTarget::Overview)
+        );
+        assert_eq!(
+            focus.next_from(&FocusTarget::ALL),
+            Some(FocusTarget::System)
+        );
+        assert_eq!(
+            focus.previous_from(&FocusTarget::ALL),
+            Some(FocusTarget::Overview)
+        );
         focus.clear();
-        assert_eq!(focus.previous(), FocusTarget::Network);
+        assert_eq!(
+            focus.previous_from(&FocusTarget::ALL),
+            Some(FocusTarget::Network)
+        );
     }
 }

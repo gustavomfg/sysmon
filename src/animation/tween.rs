@@ -76,6 +76,15 @@ impl Tween {
         self.elapsed = Duration::ZERO;
     }
 
+    pub fn set_reduced_motion(&mut self, reduced_motion: bool) {
+        self.reduced_motion = reduced_motion;
+        if reduced_motion {
+            self.current = self.target;
+            self.start = self.target;
+            self.elapsed = Duration::ZERO;
+        }
+    }
+
     pub fn update(&mut self, delta: Duration) -> bool {
         if !self.is_active() {
             return false;
