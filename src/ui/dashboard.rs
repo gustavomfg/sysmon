@@ -33,18 +33,14 @@ fn draw_with_theme(
 ) {
     frame.render_widget(fill(theme.background), frame.area());
 
-    let Some(layout) = DashboardLayout::new(frame.area()) else {
+    let Some(layout) = DashboardLayout::new(frame.area(), app.widget_visibility()) else {
         widgets::overview::draw_minimum_size_message(frame, theme);
         return;
     };
 
-    for area in layout.page.iter().copied() {
-        frame.render_widget(fill(theme.background), area);
-    }
-
     widgets::overview::draw(
         frame,
-        layout.page[0],
+        layout.header,
         info,
         app.cpu_usage(),
         app.memory_usage_percent(),
@@ -52,109 +48,81 @@ fn draw_with_theme(
         app.is_focused(FocusTarget::Overview),
     );
 
-    for area in layout.main.iter().copied() {
-        frame.render_widget(fill(theme.background), area);
-    }
-
-    for area in layout.top.iter().copied() {
-        frame.render_widget(fill(theme.surface), area);
-    }
-
-    for area in layout.middle.iter().copied() {
-        frame.render_widget(fill(theme.surface), area);
-    }
-
-    for area in layout.middle_left.iter().copied() {
-        frame.render_widget(fill(theme.surface), area);
-    }
-
-    for area in layout.system.iter().copied() {
-        frame.render_widget(fill(theme.surface), area);
-    }
+    widgets::pulse::draw(frame, layout.pulse, app, theme, false);
 
     widgets::system::draw_info(
         frame,
-        layout.system[0],
+        layout.system,
         info,
         theme,
         app.is_focused(FocusTarget::System),
     );
     widgets::cpu::draw(
         frame,
-        layout.system[1],
+        layout.cpu,
         app.cpu_usage(),
         theme,
         app.is_focused(FocusTarget::Cpu),
     );
-    if app.widget_visible(WidgetId::Gpu) {
-        widgets::gpu::draw(
-            frame,
-            layout.top[1],
-            info,
-            theme,
-            app.is_focused(FocusTarget::Gpu),
-        );
-    } else {
-        frame.render_widget(fill(theme.background), layout.top[1]);
+    if app.widget_visible(WidgetId::Gpu)
+        && let Some(area) = layout.gpu
+    {
+        widgets::gpu::draw(frame, area, info, theme, app.is_focused(FocusTarget::Gpu));
     }
-    if app.widget_visible(WidgetId::Memory) {
+    if app.widget_visible(WidgetId::Memory)
+        && let Some(area) = layout.memory
+    {
         widgets::memory::draw(
             frame,
-            layout.middle_left[0],
+            area,
             info,
             app.memory_usage_percent(),
             theme,
             app.is_focused(FocusTarget::Memory),
         );
-    } else {
-        frame.render_widget(fill(theme.background), layout.middle_left[0]);
     }
     widgets::processes::draw(
         frame,
-        layout.middle[1],
+        layout.processes,
         info,
         theme,
         app.is_focused(FocusTarget::Processes),
         app.selected_process(),
     );
 
-    for area in layout.bottom.iter().copied() {
-        frame.render_widget(fill(theme.surface), area);
-    }
-
     widgets::storage::draw(
         frame,
-        layout.middle_left[1],
+        layout.storage,
         info,
         theme,
         app.is_focused(FocusTarget::Storage),
     );
     widgets::history::draw(
         frame,
-        layout.bottom[0],
+        layout.history,
         app,
         theme,
         app.is_focused(FocusTarget::History),
     );
-    if app.widget_visible(WidgetId::Network) {
+    if app.widget_visible(WidgetId::Network)
+        && let Some(area) = layout.network
+    {
         widgets::network::draw(
             frame,
-            layout.bottom[1],
+            area,
             info,
             theme,
             app.is_focused(FocusTarget::Network),
         );
-    } else {
-        frame.render_widget(fill(theme.background), layout.bottom[1]);
     }
     widgets::timeline::draw(
         frame,
-        layout.bottom[2],
+        layout.timeline,
         app.timeline(),
         theme,
         app.is_focused(FocusTarget::Timeline),
     );
-    widgets::footer::draw(frame, layout.page[2], theme, app.refresh_interval());
+    widgets::footer::draw(frame, layout.footer, theme, app.refresh_interval());
 }
 
 #[cfg(test)]
@@ -209,6 +177,7 @@ mod tests {
                 .map(|cell| cell.symbol())
                 .collect::<String>();
             assert!(rendered.contains("SYSMON"));
+            assert!(rendered.contains("System Pulse"));
             assert!(rendered.contains("CPU Trend"));
             assert!(rendered.contains("Timeline"));
         }
