@@ -161,7 +161,16 @@ mod tests {
         let mut app = AppState::new();
         app.update(info);
 
-        for (width, height) in [(80, 24), (120, 40), (160, 40)] {
+        for (width, height) in [
+            (80, 24),
+            (90, 30),
+            (100, 30),
+            (120, 32),
+            (120, 40),
+            (140, 40),
+            (160, 40),
+            (180, 50),
+        ] {
             let backend = TestBackend::new(width, height);
             let mut terminal = Terminal::new(backend).expect("test terminal should be created");
 

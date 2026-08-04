@@ -8,10 +8,12 @@ use crate::{
 use ratatui::{
     Frame,
     layout::Rect,
-    style::{Color, Modifier, Style},
+    style::{Color, Style},
     text::{Line, Span},
     widgets::Paragraph,
 };
+
+const TAU: f32 = std::f32::consts::TAU;
 
 const BRAILLE_DOTS: [(u16, u16, u8); 8] = [
     (0, 0, 0),
@@ -24,79 +26,191 @@ const BRAILLE_DOTS: [(u16, u16, u8); 8] = [
     (1, 3, 7),
 ];
 
-const CURVE_SAMPLES: usize = 28;
+const FLOW_LAYERS: usize = 4;
 
-const TRAJECTORIES: [Trajectory; 4] = [
-    Trajectory {
-        control_points: [(0.05, 0.82), (0.12, 0.36), (0.60, 0.12), (0.96, 0.26)],
-        phase: 0.20,
-        speed: 0.72,
-        depth: 0.34,
-        thickness: 0.72,
-    },
-    Trajectory {
-        control_points: [(0.16, 0.02), (0.58, 0.14), (0.32, 0.82), (0.90, 0.98)],
-        phase: 1.80,
-        speed: 1.03,
-        depth: 0.58,
-        thickness: 0.88,
-    },
-    Trajectory {
-        control_points: [(0.00, 0.45), (0.24, 0.92), (0.78, 0.10), (1.00, 0.68)],
-        phase: 3.40,
-        speed: 1.27,
-        depth: 0.86,
-        thickness: 1.00,
-    },
-    Trajectory {
-        control_points: [(0.48, 1.00), (0.10, 0.65), (0.82, 0.32), (0.56, 0.00)],
-        phase: 5.10,
-        speed: 0.57,
-        depth: 0.70,
-        thickness: 0.78,
-    },
-];
-
-const PARTICLE_SEEDS: [f32; 12] = [
-    0.03, 0.13, 0.22, 0.31, 0.43, 0.52, 0.61, 0.69, 0.77, 0.84, 0.91, 0.97,
-];
-
-#[derive(Debug, Clone, Copy)]
-struct Trajectory {
-    control_points: [(f32, f32); 4],
-    phase: f32,
-    speed: f32,
-    depth: f32,
-    thickness: f32,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PulsePreset {
+    Compact,
+    Standard,
+    Widescreen,
+    LargeWidescreen,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
+#[derive(Debug, Clone, Copy)]
+struct PresetParameters {
+    streams: usize,
+    trail_steps: usize,
+    step_size: f32,
+    density: f32,
+    particle_stride: usize,
+    margin: f32,
+}
+
+impl PulsePreset {
+    fn parameters(self) -> PresetParameters {
+        match self {
+            Self::Compact => PresetParameters {
+                streams: 12,
+                trail_steps: 34,
+                step_size: 0.025,
+                density: 0.68,
+                particle_stride: 15,
+                margin: 0.08,
+            },
+            Self::Standard => PresetParameters {
+                streams: 20,
+                trail_steps: 48,
+                step_size: 0.022,
+                density: 0.78,
+                particle_stride: 13,
+                margin: 0.06,
+            },
+            Self::Widescreen => PresetParameters {
+                streams: 28,
+                trail_steps: 64,
+                step_size: 0.019,
+                density: 0.86,
+                particle_stride: 11,
+                margin: 0.045,
+            },
+            Self::LargeWidescreen => PresetParameters {
+                streams: 36,
+                trail_steps: 76,
+                step_size: 0.017,
+                density: 0.92,
+                particle_stride: 10,
+                margin: 0.035,
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
 struct EnergySample {
     energy: f32,
     layer: usize,
     depth: f32,
-    particle: bool,
-    particle_intensity: f32,
 }
 
-#[derive(Debug, Clone, Copy, Default)]
-struct ParticlePoint {
-    layer: usize,
-    depth: f32,
-    intensity: f32,
-    x: f32,
-    y: f32,
+impl Default for EnergySample {
+    fn default() -> Self {
+        Self {
+            energy: 0.0,
+            layer: 0,
+            depth: 0.0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct FieldFrame {
+    width: usize,
+    height: usize,
+    dot_aspect: f32,
+    samples: Vec<EnergySample>,
+}
+
+impl FieldFrame {
+    fn new(width: usize, height: usize, braille: bool) -> Self {
+        let width = width.max(1);
+        let height = height.max(1);
+        let dot_aspect = if braille { 1.0 } else { 1.8 };
+
+        Self {
+            width,
+            height,
+            dot_aspect,
+            samples: vec![EnergySample::default(); width * height],
+        }
+    }
+
+    fn sample(&self, x: usize, y: usize) -> EnergySample {
+        let x = x.min(self.width - 1);
+        let y = y.min(self.height - 1);
+        self.samples[y * self.width + x]
+    }
+
+    fn deposit(
+        &mut self,
+        position: (f32, f32),
+        energy: f32,
+        radius: f32,
+        layer: usize,
+        depth: f32,
+    ) {
+        let center_x = position.0.clamp(0.0, 1.0) * (self.width.saturating_sub(1) as f32);
+        let center_y = position.1.clamp(0.0, 1.0) * (self.height.saturating_sub(1) as f32);
+        let radius = radius.max(0.25);
+        let left = (center_x - radius).floor().max(0.0) as usize;
+        let right = (center_x + radius)
+            .ceil()
+            .min(self.width.saturating_sub(1) as f32) as usize;
+        let top = (center_y - radius).floor().max(0.0) as usize;
+        let bottom = (center_y + radius)
+            .ceil()
+            .min(self.height.saturating_sub(1) as f32) as usize;
+
+        for y in top..=bottom {
+            for x in left..=right {
+                let distance = ((x as f32 - center_x).powi(2)
+                    + ((y as f32 - center_y) * self.dot_aspect).powi(2))
+                .sqrt();
+                let falloff = (1.0 - distance / (radius * self.dot_aspect.max(1.0))).max(0.0);
+                if falloff <= 0.0 {
+                    continue;
+                }
+
+                let contribution = energy * falloff * 0.72;
+                let index = y * self.width + x;
+                let current = self.samples[index];
+                self.samples[index].energy = (current.energy + contribution * 0.62).clamp(0.0, 1.0);
+                if contribution >= current.energy {
+                    self.samples[index].layer = layer;
+                    self.samples[index].depth = depth;
+                }
+            }
+        }
+    }
+
+    fn deposit_segment(
+        &mut self,
+        start: (f32, f32),
+        end: (f32, f32),
+        energy: f32,
+        radius: f32,
+        layer: usize,
+        depth: f32,
+    ) {
+        let wraps_horizontally = (end.0 - start.0).abs() > 0.5;
+        let length =
+            ((end.0 - start.0) * self.width as f32).hypot((end.1 - start.1) * self.height as f32);
+        let subdivisions = if wraps_horizontally {
+            1
+        } else {
+            length.ceil().clamp(2.0, 6.0) as usize
+        };
+
+        for step in 0..=subdivisions {
+            let progress = step as f32 / subdivisions as f32;
+            let position = (
+                start.0 + (end.0 - start.0) * progress,
+                start.1 + (end.1 - start.1) * progress,
+            );
+            let local_energy = if step == 0 { energy } else { energy * 0.68 };
+            self.deposit(position, local_energy, radius, layer, depth);
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
-struct FieldFrame {
-    trajectory_points: [[(f32, f32); CURVE_SAMPLES + 1]; TRAJECTORIES.len()],
-    trajectory_count: usize,
-    particles: [ParticlePoint; PARTICLE_SEEDS.len()],
-    particle_count: usize,
-    particle_radius_scale: f32,
-    visual_intensity_scale: f32,
-    field_time: f32,
+struct StreamSpec {
+    seed: (f32, f32),
+    target_y: f32,
+    phase: f32,
+    speed: f32,
+    direction: f32,
+    layer: usize,
+    depth: f32,
 }
 
 pub(crate) fn draw(frame: &mut Frame, area: Rect, app: &AppState, theme: &Theme, focused: bool) {
@@ -125,17 +239,8 @@ fn uses_braille(area: Rect) -> bool {
 fn braille_lines(area: Rect, pulse: &PulseModel, theme: &Theme) -> Vec<Line<'static>> {
     let width = usize::from(area.width.saturating_sub(4)).max(1);
     let height = usize::from(area.height.saturating_sub(2)).max(1);
-    let logical_width = width * 2;
-    let logical_height = height * 4;
+    let field = field_for_area(width, height, true, pulse);
     let health = pulse.health();
-    let time = animation_time(pulse);
-    let field = build_field(
-        logical_width as f32,
-        logical_height as f32,
-        health,
-        time,
-        pulse,
-    );
 
     (0..height)
         .map(|cell_y| {
@@ -145,13 +250,13 @@ fn braille_lines(area: Rect, pulse: &PulseModel, theme: &Theme) -> Vec<Line<'sta
                 let mut strongest = EnergySample::default();
 
                 for (dot_x, dot_y, bit) in BRAILLE_DOTS {
-                    let x = (cell_x * 2 + usize::from(dot_x)) as f32;
-                    let y = (cell_y * 4 + usize::from(dot_y)) as f32;
-                    let sample = sample_at(x, y, health, &field);
-                    if sample.energy > 0.25 {
+                    let x = cell_x * 2 + usize::from(dot_x);
+                    let y = cell_y * 4 + usize::from(dot_y);
+                    let sample = field.sample(x, y);
+                    if sample.energy > 0.05 {
                         mask |= 1 << bit;
                     }
-                    if sample.energy > strongest.energy || sample.particle {
+                    if sample.energy > strongest.energy {
                         strongest = sample;
                     }
                 }
@@ -170,17 +275,14 @@ fn braille_lines(area: Rect, pulse: &PulseModel, theme: &Theme) -> Vec<Line<'sta
 fn unicode_lines(area: Rect, pulse: &PulseModel, theme: &Theme) -> Vec<Line<'static>> {
     let width = usize::from(area.width.saturating_sub(4)).max(1);
     let height = usize::from(area.height.saturating_sub(2)).max(1);
-    let logical_height = height * 2;
+    let field = field_for_area(width, height, false, pulse);
     let health = pulse.health();
-    let time = animation_time(pulse);
-    let field = build_field(width as f32, logical_height as f32, health, time, pulse);
 
     (0..height)
         .map(|cell_y| {
             let spans = (0..width)
                 .map(|cell_x| {
-                    let sample =
-                        sample_at(cell_x as f32, (cell_y * 2) as f32 + 0.5, health, &field);
+                    let sample = field.sample(cell_x * 2 + 1, cell_y * 2 + 1);
                     let symbol = unicode_symbol(sample);
                     Span::styled(symbol.to_string(), sample_style(theme, health, sample))
                 })
@@ -198,210 +300,245 @@ fn animation_time(pulse: &PulseModel) -> f32 {
     }
 }
 
-fn active_trajectory_count(health: PulseHealth, pulse: &PulseModel) -> usize {
-    let count = (2.0 + health.density() * 2.0).round() as usize;
-    if pulse.reduced_motion() {
-        count.clamp(2, 3)
+fn field_for_area(width: usize, height: usize, braille: bool, pulse: &PulseModel) -> FieldFrame {
+    let grid_width = width.saturating_mul(2);
+    let grid_height = if braille {
+        height.saturating_mul(4)
     } else {
-        count.clamp(2, TRAJECTORIES.len())
-    }
+        height.saturating_mul(2)
+    };
+    let preset = preset_for(width, height);
+    build_field(
+        grid_width.max(1),
+        grid_height.max(1),
+        braille,
+        preset,
+        pulse.health(),
+        animation_time(pulse),
+        pulse,
+    )
 }
 
-fn particle_count(health: PulseHealth, pulse: &PulseModel) -> usize {
-    if pulse.reduced_motion() {
-        2
+fn preset_for(width: usize, height: usize) -> PulsePreset {
+    if width <= 36 || height <= 9 {
+        PulsePreset::Compact
+    } else if width >= 120 && height >= 24 {
+        PulsePreset::LargeWidescreen
+    } else if width >= 70 && height >= 14 {
+        PulsePreset::Widescreen
     } else {
-        (4.0 + health.density() * 8.0).round() as usize
+        PulsePreset::Standard
     }
-    .clamp(2, PARTICLE_SEEDS.len())
 }
 
 fn build_field(
-    width: f32,
-    height: f32,
+    width: usize,
+    height: usize,
+    braille: bool,
+    preset: PulsePreset,
     health: PulseHealth,
     time: f32,
     pulse: &PulseModel,
 ) -> FieldFrame {
-    let trajectory_count = active_trajectory_count(health, pulse);
-    let breathing = pulse.breath();
-    let phase = pulse.phase();
-    let field_time = time + phase * 0.05 + pulse.input().volatility * 0.02;
-    let breathing_scale = if pulse.reduced_motion() {
+    let mut field = FieldFrame::new(width, height, braille);
+    let parameters = preset.parameters();
+    let active_streams = active_stream_count(parameters.streams, health, pulse);
+    let trail_steps = active_trail_steps(parameters.trail_steps, pulse);
+    let domain_aspect = domain_aspect(width, height, braille);
+    let motion = if pulse.reduced_motion() { 0.0 } else { 1.0 };
+    let breathing = if pulse.reduced_motion() {
         1.0
     } else {
-        0.95 + breathing * 0.10
+        0.975 + (pulse.breath() - 0.5) * 0.10
     };
-    let mut field = FieldFrame {
-        trajectory_points: [[(0.0, 0.0); CURVE_SAMPLES + 1]; TRAJECTORIES.len()],
-        trajectory_count,
-        particles: [ParticlePoint::default(); PARTICLE_SEEDS.len()],
-        particle_count: particle_count(health, pulse),
-        particle_radius_scale: if pulse.reduced_motion() { 0.75 } else { 1.0 },
-        visual_intensity_scale: if pulse.reduced_motion() { 0.72 } else { 1.0 },
-        field_time,
-    };
+    let input = pulse.input();
+    let field_time = time + pulse.phase() * 0.025 + input.network * 0.018 + input.load * 0.012;
 
-    for (index, trajectory) in TRAJECTORIES.iter().take(trajectory_count).enumerate() {
-        for sample_index in 0..=CURVE_SAMPLES {
-            let progress = sample_index as f32 / CURVE_SAMPLES as f32;
-            let point = trajectory_point(
-                progress,
-                width,
-                height,
-                *trajectory,
-                health,
-                field_time + breathing * 0.02,
-                pulse,
-            );
-            field.trajectory_points[index][sample_index] =
-                breathe_point(point, width, height, breathing_scale);
-        }
-    }
-
-    for (index, seed) in PARTICLE_SEEDS.iter().take(field.particle_count).enumerate() {
-        let layer = index % trajectory_count;
-        let trajectory = TRAJECTORIES[layer];
-        let direction = if index % 4 == 0 { -1.0 } else { 1.0 };
-        let speed = (0.035 + index as f32 * 0.004) * (0.76 + health.speed() * 0.20) * direction;
-        let progress = (*seed + time * speed).rem_euclid(1.0);
-        let (x, y) = trajectory_point(
-            progress, width, height, trajectory, health, field_time, pulse,
-        );
-        let (x, y) = breathe_point((x, y), width, height, breathing_scale);
-        let intensity = 0.62 + ((index as f32 * 1.73 + trajectory.phase).sin() * 0.5 + 0.5) * 0.38;
-        field.particles[index] = ParticlePoint {
-            layer,
-            depth: trajectory.depth,
-            intensity,
-            x,
-            y,
+    for stream_index in 0..active_streams {
+        let stream = stream_spec(stream_index, active_streams, parameters.margin);
+        let lead_steps = if pulse.reduced_motion() {
+            0
+        } else {
+            ((field_time * stream.speed * 23.0 + stream.phase * 7.0).rem_euclid(160.0)) as usize
         };
+        let mut position = advect_steps(
+            stream.seed,
+            lead_steps,
+            stream,
+            field_time,
+            health,
+            domain_aspect,
+            parameters.step_size,
+        );
+
+        for trail_index in 0..trail_steps {
+            let progress = trail_index as f32 / trail_steps.max(1) as f32;
+            let rhythm = ((trail_index as f32 * 0.83 + stream.phase * 1.7).sin() * 0.5) + 0.5;
+            let taper = 0.68 + (1.0 - progress) * 0.32;
+            let layer_weight = 0.72 + stream.depth * 0.28;
+            let energy = (0.12 + health.density() * parameters.density * 0.31 + rhythm * 0.12)
+                * layer_weight
+                * (0.90 + health.amplitude() * 0.10)
+                * (0.86 + health.pressure().clamp(0.0, 1.0) * 0.14)
+                * taper;
+            let highlight =
+                trail_index % parameters.particle_stride == stream_index % 3 && rhythm > 0.68;
+            let energy = if highlight { energy + 0.28 } else { energy };
+            let radius = if highlight {
+                1.25
+            } else {
+                1.0 + stream.depth * 0.25
+            };
+            let next_position = advect_steps(
+                position,
+                1,
+                stream,
+                field_time + progress * 0.12,
+                health,
+                domain_aspect,
+                parameters.step_size,
+            );
+            let start = breathe_position(position, breathing, motion);
+            let end = breathe_position(next_position, breathing, motion);
+            field.deposit_segment(start, end, energy, radius, stream.layer, stream.depth);
+            position = next_position;
+        }
     }
 
     field
 }
 
-fn sample_at(x: f32, y: f32, health: PulseHealth, field: &FieldFrame) -> EnergySample {
-    let mut strongest = EnergySample::default();
-    let curve_thickness =
-        (0.65 + health.density() * 0.42 + health.pressure() * 0.10) * field.visual_intensity_scale;
-
-    for (index, trajectory) in TRAJECTORIES.iter().take(field.trajectory_count).enumerate() {
-        for (sample_index, &(curve_x, curve_y)) in field.trajectory_points[index].iter().enumerate()
-        {
-            let distance = (x - curve_x).hypot(y - curve_y);
-            let progress = sample_index as f32 / CURVE_SAMPLES as f32;
-            let local_density = density_cluster(progress, *trajectory, field.field_time);
-            let thickness = (trajectory.thickness * curve_thickness * local_density
-                + trajectory.depth * 0.75)
-                .max(0.8);
-            let energy = smoothstep(1.0 - distance / (thickness + 2.1))
-                * (0.50 + trajectory.depth * 0.50)
-                * local_density
-                * field.visual_intensity_scale;
-            if energy > strongest.energy {
-                strongest = EnergySample {
-                    energy,
-                    layer: index,
-                    depth: trajectory.depth,
-                    particle: false,
-                    particle_intensity: 0.0,
-                };
-            }
-        }
-    }
-
-    for particle in &field.particles[..field.particle_count] {
-        let radius = (0.75 + particle.depth * 0.95) * field.particle_radius_scale;
-        if (x - particle.x).hypot(y - particle.y) <= radius
-            && particle.intensity > strongest.particle_intensity
-        {
-            strongest.layer = particle.layer;
-            strongest.depth = particle.depth;
-            strongest.particle = true;
-            strongest.energy = strongest
-                .energy
-                .max((0.68 + particle.intensity * 0.20) * field.visual_intensity_scale);
-            strongest.particle_intensity = particle.intensity;
-        }
-    }
-
-    strongest
+fn active_stream_count(base: usize, health: PulseHealth, pulse: &PulseModel) -> usize {
+    let density_factor = 0.72 + health.density() * 0.28;
+    let reduced_factor = if pulse.reduced_motion() { 0.68 } else { 1.0 };
+    ((base as f32 * density_factor * reduced_factor).round() as usize).max(FLOW_LAYERS)
 }
 
-fn trajectory_point(
-    progress: f32,
-    width: f32,
-    height: f32,
-    trajectory: Trajectory,
-    health: PulseHealth,
+fn active_trail_steps(base: usize, pulse: &PulseModel) -> usize {
+    if pulse.reduced_motion() {
+        (base * 3 / 4).max(12)
+    } else {
+        base
+    }
+}
+
+fn domain_aspect(width: usize, height: usize, braille: bool) -> f32 {
+    let dot_aspect = if braille { 1.0 } else { 1.8 };
+    (height as f32 / width.max(1) as f32 * dot_aspect).clamp(0.22, 3.5)
+}
+
+fn stream_spec(index: usize, count: usize, margin: f32) -> StreamSpec {
+    let layer = index % FLOW_LAYERS;
+    let lane = index / FLOW_LAYERS;
+    let lane_count = count.div_ceil(FLOW_LAYERS).max(1);
+    let lane_position = (lane as f32 + 0.5) / lane_count as f32;
+    let jitter = hash01(index * 29 + 7) - 0.5;
+    let upper = layer < 2;
+    let center = if upper { 0.31 } else { 0.69 };
+    let spread = if upper { 0.28 } else { 0.26 };
+    let seed_y =
+        (center + (lane_position - 0.5) * spread + jitter * 0.035).clamp(margin, 1.0 - margin);
+    let from_left = layer.is_multiple_of(2);
+    let phase = hash01(index * 41 + 13) * TAU;
+
+    StreamSpec {
+        seed: (if from_left { margin } else { 1.0 - margin }, seed_y),
+        target_y: center + jitter * 0.02,
+        phase,
+        speed: 0.78 + hash01(index * 53 + 19) * 0.34,
+        direction: if from_left { 1.0 } else { -1.0 },
+        layer,
+        depth: 0.27 + layer as f32 * 0.18 + hash01(index * 67 + 23) * 0.10,
+    }
+}
+
+fn advect_steps(
+    mut position: (f32, f32),
+    steps: usize,
+    stream: StreamSpec,
     time: f32,
-    pulse: &PulseModel,
+    health: PulseHealth,
+    aspect: f32,
+    step_size: f32,
 ) -> (f32, f32) {
-    let progress = progress.clamp(0.0, 1.0);
-    let base = cubic_bezier(trajectory.control_points, progress);
-    let movement = if pulse.reduced_motion() { 0.0 } else { 1.0 };
-    let dynamic_scale = health.amplitude() * (0.80 + health.volatility() * 0.40);
-    let edge_falloff = (progress * (1.0 - progress) * 4.0).sqrt();
-    let curl =
-        (progress * std::f32::consts::TAU * 1.7 + trajectory.phase + time * trajectory.speed).sin();
-    let counter_curl = (progress * std::f32::consts::TAU * 0.73 - trajectory.phase * 1.3
-        + time * trajectory.speed * 0.61)
-        .cos();
-    let drift = (time * 0.19 + trajectory.phase).sin();
-    let turbulence = 0.012 + health.volatility() * 0.040;
-
-    let x = base.0 * width
-        + movement
-            * (curl * width * turbulence * (0.6 + trajectory.depth * 0.5)
-                + drift * width * 0.012 * edge_falloff);
-    let y = base.1 * height
-        + movement
-            * dynamic_scale
-            * (counter_curl * height * turbulence * 1.8
-                + curl * height * 0.018 * trajectory.depth
-                + drift * height * 0.015 * edge_falloff);
-
-    (x.clamp(0.0, width), y.clamp(0.0, height))
+    for step in 0..steps {
+        let vector = flow_vector(position, stream, time + step as f32 * 0.011, health, aspect);
+        position.0 = (position.0 + vector.0 * step_size).rem_euclid(1.0);
+        position.1 += vector.1 * step_size;
+        position.1 = reflect(position.1, 0.025, 0.975);
+    }
+    position
 }
 
-fn breathe_point(point: (f32, f32), width: f32, height: f32, scale: f32) -> (f32, f32) {
+fn flow_vector(
+    position: (f32, f32),
+    stream: StreamSpec,
+    time: f32,
+    health: PulseHealth,
+    aspect: f32,
+) -> (f32, f32) {
+    let phase = stream.phase + time * (0.06 + health.volatility() * 0.08);
+    let braid_phase = TAU * (position.0 * 0.83 + position.1 * 0.61) + phase;
+    let bend_phase = TAU * (position.0 * 0.47 - position.1 * 0.92) - phase * 0.63;
+    let mut vx = stream.direction * (0.54 + braid_phase.sin() * 0.10);
+    let mut vy = braid_phase.cos() * (0.12 + health.amplitude() * 0.035)
+        + (stream.target_y - position.1) * 0.16;
+
+    vx += bend_phase.cos() * 0.055 * stream.direction;
+    vy += bend_phase.sin() * (0.09 + health.volatility() * 0.10);
+
+    let vortices = [
+        (0.30, 0.34, 1.0, 0.035),
+        (0.68, 0.66, -1.0, 0.041),
+        (0.52, 0.50, 1.0 - stream.layer as f32 * 0.40, 0.026),
+    ];
+    for (center_x, center_y, rotation, strength) in vortices {
+        let dx = position.0 - center_x;
+        let dy = (position.1 - center_y) * aspect;
+        let radius_squared = (dx * dx + dy * dy).max(0.018);
+        let influence = strength * rotation / (radius_squared + 0.065);
+        vx += -dy * influence;
+        vy += dx * influence / aspect.max(0.2);
+    }
+
+    let length = vx.hypot(vy).max(0.001);
+    (vx / length, vy / length)
+}
+
+fn breathe_position(position: (f32, f32), scale: f32, motion: f32) -> (f32, f32) {
+    let scale = 1.0 + (scale - 1.0) * motion;
     (
-        (width * 0.5 + (point.0 - width * 0.5) * scale).clamp(0.0, width),
-        (height * 0.5 + (point.1 - height * 0.5) * scale).clamp(0.0, height),
+        (0.5 + (position.0 - 0.5) * scale).clamp(0.015, 0.985),
+        (0.5 + (position.1 - 0.5) * scale).clamp(0.015, 0.985),
     )
 }
 
-fn density_cluster(progress: f32, trajectory: Trajectory, time: f32) -> f32 {
-    let first_center = 0.22 + trajectory.depth * 0.10;
-    let second_center = (0.73 - trajectory.depth * 0.08 + time * 0.006).rem_euclid(1.0);
-    let first = (-((progress - first_center) / 0.13).powi(2)).exp();
-    let second = (-((progress - second_center) / 0.18).powi(2)).exp();
-    (0.62 + first * 0.58 + second * 0.42).clamp(0.58, 1.55)
+fn reflect(value: f32, low: f32, high: f32) -> f32 {
+    if value < low {
+        low + (low - value)
+    } else if value > high {
+        high - (value - high)
+    } else {
+        value
+    }
+    .clamp(low, high)
 }
 
-fn cubic_bezier(points: [(f32, f32); 4], progress: f32) -> (f32, f32) {
-    let inverse = 1.0 - progress;
-    let first = inverse * inverse * inverse;
-    let second = 3.0 * inverse * inverse * progress;
-    let third = 3.0 * inverse * progress * progress;
-    let fourth = progress * progress * progress;
-
-    (
-        points[0].0 * first + points[1].0 * second + points[2].0 * third + points[3].0 * fourth,
-        points[0].1 * first + points[1].1 * second + points[2].1 * third + points[3].1 * fourth,
-    )
+fn hash01(value: usize) -> f32 {
+    let mut hash = value as u32;
+    hash = hash.wrapping_mul(0x045d_9f3b);
+    hash ^= hash >> 16;
+    hash = hash.wrapping_mul(0x045d_9f3b);
+    hash ^= hash >> 16;
+    (hash as f32) / u32::MAX as f32
 }
 
 fn unicode_symbol(sample: EnergySample) -> char {
-    if sample.particle {
+    if sample.energy > 0.55 {
         '•'
-    } else if sample.energy > 0.72 {
-        '●'
-    } else if sample.energy > 0.42 {
+    } else if sample.energy > 0.28 {
         '∙'
-    } else if sample.energy > 0.20 {
+    } else if sample.energy > 0.12 {
         '·'
     } else {
         ' '
@@ -410,28 +547,15 @@ fn unicode_symbol(sample: EnergySample) -> char {
 
 fn sample_style(theme: &Theme, health: PulseHealth, sample: EnergySample) -> Style {
     let base = health_color(theme, health.intensity());
-    let layer_tint = match sample.layer % 3 {
+    let layer_tint = match sample.layer % FLOW_LAYERS {
         0 => theme.secondary,
         1 => theme.primary,
-        _ => theme.pulse_medium,
+        2 => theme.pulse_medium,
+        _ => theme.pulse_high,
     };
     let color = blend_color(base, layer_tint, 0.10 + sample.depth * 0.20);
-    let brightness = (0.28
-        + sample.depth * 0.32
-        + sample.energy * 0.40
-        + if sample.particle {
-            0.10 + sample.particle_intensity * 0.20
-        } else {
-            0.0
-        })
-    .clamp(0.0, 1.0);
-    let style = Style::default().fg(scale_color(color, brightness));
-
-    if sample.particle && sample.particle_intensity > 0.80 {
-        style.add_modifier(Modifier::BOLD)
-    } else {
-        style
-    }
+    let brightness = (0.26 + sample.depth * 0.34 + sample.energy * 0.44).clamp(0.0, 1.0);
+    Style::default().fg(scale_color(color, brightness))
 }
 
 fn health_color(theme: &Theme, intensity: f32) -> Color {
@@ -483,41 +607,15 @@ fn scale_color(color: Color, brightness: f32) -> Color {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
-
     use ratatui::layout::Rect;
 
     use super::{
-        TRAJECTORIES, braille_lines, build_field, sample_at, trajectory_point, unicode_lines,
-        uses_braille,
+        EnergySample, PulsePreset, braille_lines, build_field, field_for_area, preset_for,
+        unicode_lines, uses_braille,
     };
     use crate::{pulse::PulseModel, theme::Theme};
 
-    #[test]
-    fn selects_braille_for_a_usable_pulse_area() {
-        assert!(uses_braille(Rect::new(0, 0, 32, 10)));
-        assert!(!uses_braille(Rect::new(0, 0, 20, 6)));
-    }
-
-    #[test]
-    fn renders_both_terminal_native_field_variants() {
-        let mut pulse = PulseModel::new(false);
-        pulse.set_input(crate::pulse::PulseInput {
-            cpu: 0.6,
-            memory: 0.7,
-            gpu: None,
-            network: 0.3,
-            load: 0.4,
-            volatility: 0.2,
-        });
-        let theme = Theme::default();
-
-        assert!(!braille_lines(Rect::new(0, 0, 32, 10), &pulse, &theme).is_empty());
-        assert!(!unicode_lines(Rect::new(0, 0, 20, 6), &pulse, &theme).is_empty());
-    }
-
-    #[test]
-    fn trajectories_change_direction_and_cross_the_field() {
+    fn pulse() -> PulseModel {
         let mut pulse = PulseModel::new(false);
         pulse.set_input(crate::pulse::PulseInput {
             cpu: 0.6,
@@ -527,79 +625,105 @@ mod tests {
             load: 0.5,
             volatility: 0.2,
         });
-        let health = pulse.health();
-        let vertical_motion = TRAJECTORIES
-            .iter()
-            .filter(|trajectory| {
-                let start = trajectory_point(0.12, 64.0, 32.0, **trajectory, health, 0.0, &pulse);
-                let end = trajectory_point(0.88, 64.0, 32.0, **trajectory, health, 0.0, &pulse);
-                (start.1 - end.1).abs() > 4.0
-            })
-            .count();
-        assert!(vertical_motion >= 3);
-
-        let mut close_pairs = 0;
-        for (first, first_trajectory) in TRAJECTORIES.iter().enumerate() {
-            for second_trajectory in TRAJECTORIES.iter().skip(first + 1) {
-                let intersects = (0..=20).any(|step| {
-                    let progress = step as f32 / 20.0;
-                    let one = trajectory_point(
-                        progress,
-                        64.0,
-                        32.0,
-                        *first_trajectory,
-                        health,
-                        0.0,
-                        &pulse,
-                    );
-                    let two = trajectory_point(
-                        progress,
-                        64.0,
-                        32.0,
-                        *second_trajectory,
-                        health,
-                        0.0,
-                        &pulse,
-                    );
-                    (one.0 - two.0).hypot(one.1 - two.1) < 5.0
-                });
-                close_pairs += usize::from(intersects);
-            }
-        }
-        assert!(close_pairs >= 2);
+        pulse
     }
 
     #[test]
-    fn particle_positions_are_deterministic_for_the_same_time() {
-        let mut pulse = PulseModel::new(false);
-        pulse.set_input(crate::pulse::PulseInput {
-            cpu: 0.8,
-            memory: 0.8,
-            gpu: Some(0.5),
-            network: 0.4,
-            load: 0.6,
-            volatility: 0.3,
-        });
-        pulse.update(Duration::from_millis(120));
-        let health = pulse.health();
-        let field = build_field(32.0, 20.0, health, pulse.time_seconds(), &pulse);
-        let first = sample_at(16.0, 10.0, health, &field);
-        let second = sample_at(16.0, 10.0, health, &field);
+    fn selects_braille_for_a_usable_pulse_area() {
+        assert!(uses_braille(Rect::new(0, 0, 32, 10)));
+        assert!(!uses_braille(Rect::new(0, 0, 20, 6)));
+    }
 
+    #[test]
+    fn selects_intentional_compositions_for_representative_areas() {
+        assert_eq!(preset_for(30, 8), PulsePreset::Compact);
+        assert_eq!(preset_for(50, 12), PulsePreset::Standard);
+        assert_eq!(preset_for(80, 20), PulsePreset::Widescreen);
+        assert_eq!(preset_for(140, 40), PulsePreset::LargeWidescreen);
+    }
+
+    #[test]
+    fn renders_both_terminal_native_field_variants() {
+        let pulse = pulse();
+        let theme = Theme::default();
+
+        let braille = braille_lines(Rect::new(0, 0, 32, 10), &pulse, &theme);
+        let unicode = unicode_lines(Rect::new(0, 0, 20, 6), &pulse, &theme);
+        let field = field_for_area(28, 8, true, &pulse);
+        assert!(!braille.is_empty());
+        assert!(!unicode.is_empty());
+        assert!(
+            field
+                .samples
+                .iter()
+                .filter(|sample| sample.energy > 0.05)
+                .count()
+                > 32
+        );
+        assert!(braille.iter().any(|line| {
+            line.spans.iter().any(|span| {
+                span.content
+                    .chars()
+                    .any(|character| character != '\u{2800}')
+            })
+        }));
+        assert!(unicode.iter().any(|line| {
+            line.spans
+                .iter()
+                .any(|span| span.content.chars().any(|character| character != ' '))
+        }));
+    }
+
+    #[test]
+    fn field_is_deterministic_bounded_and_spatially_non_uniform() {
+        let pulse = pulse();
+        let first = field_for_area(80, 20, true, &pulse);
+        let second = field_for_area(80, 20, true, &pulse);
         assert_eq!(first, second);
-        let intensities = field.particles[..field.particle_count]
-            .iter()
-            .map(|particle| particle.intensity)
-            .collect::<Vec<_>>();
-        let minimum = intensities.iter().copied().fold(f32::INFINITY, f32::min);
-        let maximum = intensities
-            .iter()
-            .copied()
-            .fold(f32::NEG_INFINITY, f32::max);
-        assert!(maximum - minimum > 0.10);
+        assert!(first.samples.iter().any(|sample| sample.energy > 0.0));
+        assert!(first.samples.iter().any(|sample| sample.energy > 0.35));
+        assert!(first.samples.iter().any(|sample| sample.energy < 0.05));
+        assert!(
+            first
+                .samples
+                .iter()
+                .all(|sample| (0.0..=1.0).contains(&sample.energy))
+        );
+    }
 
-        let particle_is_visible = (0..32)
-            .any(|x| (0..20).any(|y| sample_at(x as f32, y as f32, health, &field).particle));
-        assert!(particle_is_visible);
+    #[test]
+    fn moving_field_changes_while_reduced_motion_is_stable() {
+        let pulse = pulse();
+        let preset = preset_for(80, 20);
+        let health = pulse.health();
+        let first = build_field(160, 80, true, preset, health, 0.0, &pulse);
+        let later = build_field(160, 80, true, preset, health, 1.0, &pulse);
+        assert_ne!(first, later);
+
+        let mut reduced = pulse;
+        reduced.set_reduced_motion(true);
+        let reduced_first = field_for_area(80, 20, true, &reduced);
+        let reduced_later = field_for_area(80, 20, true, &reduced);
+        assert_eq!(reduced_first, reduced_later);
+    }
+
+    #[test]
+    fn energy_samples_have_a_safe_default() {
+        assert_eq!(EnergySample::default().energy, 0.0);
+    }
+
+    #[test]
+    fn rasterizes_segments_between_particle_positions() {
+        let mut field = super::FieldFrame::new(48, 24, true);
+        field.deposit_segment((0.18, 0.5), (0.38, 0.5), 0.5, 1.0, 0, 0.5);
+
+        assert!(
+            field
+                .samples
+                .iter()
+                .filter(|sample| sample.energy > 0.05)
+                .count()
+                > 3
+        );
     }
 }
