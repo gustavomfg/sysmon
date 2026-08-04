@@ -22,7 +22,7 @@ pub(crate) fn draw_minimum_size_message(frame: &mut Frame, theme: &Theme) {
     ))
     .alignment(Alignment::Center)
     .wrap(Wrap { trim: true })
-    .block(card(theme, "Sysmon"));
+    .block(card(theme, "Sysmon", false));
     frame.render_widget(message, area);
 }
 
@@ -33,6 +33,7 @@ pub(crate) fn draw(
     cpu_usage: f64,
     memory_percent: f64,
     theme: &Theme,
+    focused: bool,
 ) {
     let memory_used = info.total_ram * memory_percent.clamp(0.0, 100.0) / 100.0;
     let title = Paragraph::new(Line::from(vec![
@@ -60,7 +61,7 @@ pub(crate) fn draw(
         chip(format!("UP {}", format_uptime(info.uptime)), value(theme)),
     ]))
     .alignment(Alignment::Center)
-    .block(card(theme, "overview"));
+    .block(card(theme, "overview", focused));
 
     frame.render_widget(title, area);
 }

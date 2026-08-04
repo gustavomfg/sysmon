@@ -39,7 +39,7 @@ pub(crate) fn chip(text: impl Into<String>, style: Style) -> Span<'static> {
     Span::styled(format!(" {} ", text.into()), style)
 }
 
-pub(crate) fn card(theme: &Theme, title: impl Into<String>) -> Block<'static> {
+pub(crate) fn card(theme: &Theme, title: impl Into<String>, focused: bool) -> Block<'static> {
     Block::default()
         .title(Span::styled(
             format!("  {}  ", title.into()),
@@ -49,7 +49,11 @@ pub(crate) fn card(theme: &Theme, title: impl Into<String>) -> Block<'static> {
         ))
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(theme.border))
+        .border_style(Style::default().fg(if focused {
+            theme.border_focused
+        } else {
+            theme.border
+        }))
         .style(Style::default().bg(theme.surface))
         .padding(Padding::horizontal(1))
 }

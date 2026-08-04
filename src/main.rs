@@ -1,8 +1,12 @@
+mod action;
 mod animation;
 mod app;
+mod command_palette;
+mod focus;
 mod history;
 mod system;
 mod theme;
+mod timeline;
 mod ui;
 
 use std::{
@@ -10,6 +14,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use action::Action;
 use app::AppState;
 
 use crossterm::{
@@ -45,16 +50,40 @@ impl Drop for TerminalGuard {
     }
 }
 
-fn should_quit(event: Event) -> bool {
-    matches!(
-        event,
-        Event::Key(key)
-            if key.kind == KeyEventKind::Press
-                && (key.code == KeyCode::Char('q')
-                    || key.code == KeyCode::Esc
-                    || (key.code == KeyCode::Char('c')
-                        && key.modifiers.contains(KeyModifiers::CONTROL)))
-    )
+fn action_for_event(event: Event, palette_open: bool, focus_active: bool) -> Option<Action> {
+    let Event::Key(key) = event else {
+        return None;
+    };
+
+    if key.kind != KeyEventKind::Press {
+        return None;
+    }
+
+    if palette_open {
+        return match key.code {
+            KeyCode::Esc => Some(Action::ClosePalette),
+            KeyCode::Up => Some(Action::PaletteUp),
+            KeyCode::Down => Some(Action::PaletteDown),
+            KeyCode::Backspace => Some(Action::PaletteBackspace),
+            KeyCode::Enter => Some(Action::PaletteSubmit),
+            KeyCode::Char(character) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                Some(Action::PaletteCharacter(character))
+            }
+            _ => None,
+        };
+    }
+
+    match key.code {
+        KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            Some(Action::OpenPalette)
+        }
+        KeyCode::Tab => Some(Action::FocusNext),
+        KeyCode::BackTab => Some(Action::FocusPrevious),
+        KeyCode::Esc if focus_active => Some(Action::ExitFocus),
+        KeyCode::Esc | KeyCode::Char('q') => Some(Action::Quit),
+        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => Some(Action::Quit),
+        _ => None,
+    }
 }
 
 fn main() -> io::Result<()> {
@@ -123,8 +152,13 @@ fn run_app(
 
         if event::poll(timeout)? {
             loop {
-                if should_quit(event::read()?) {
-                    return Ok(());
+                if let Some(action) =
+                    action_for_event(event::read()?, app.palette().is_open(), app.focus_active())
+                {
+                    if app.dispatch(action) {
+                        return Ok(());
+                    }
+                    render_pending = true;
                 }
 
                 if !event::poll(Duration::ZERO)? {

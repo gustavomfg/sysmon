@@ -13,7 +13,13 @@ use ratatui::{
     widgets::{Axis, Chart, Dataset, GraphType},
 };
 
-pub(crate) fn draw(frame: &mut Frame, area: ratatui::layout::Rect, app: &AppState, theme: &Theme) {
+pub(crate) fn draw(
+    frame: &mut Frame,
+    area: ratatui::layout::Rect,
+    app: &AppState,
+    theme: &Theme,
+    focused: bool,
+) {
     let cpu_points = app
         .history()
         .samples(Metric::Cpu)
@@ -34,7 +40,11 @@ pub(crate) fn draw(frame: &mut Frame, area: ratatui::layout::Rect, app: &AppStat
             )
             .data(&cpu_points),
     ])
-    .block(card(theme, format!("CPU Trend  {:.1}%", app.cpu_usage())))
+    .block(card(
+        theme,
+        format!("CPU Trend  {:.1}%", app.cpu_usage()),
+        focused,
+    ))
     .style(Style::default().bg(theme.surface))
     .x_axis(
         Axis::default()

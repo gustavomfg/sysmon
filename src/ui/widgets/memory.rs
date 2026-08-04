@@ -18,6 +18,7 @@ pub(crate) fn draw(
     info: &SystemInfo,
     memory_percent: f64,
     theme: &Theme,
+    focused: bool,
 ) {
     let ram_percent = memory_percent.clamp(0.0, 100.0) as u16;
 
@@ -37,6 +38,7 @@ pub(crate) fn draw(
                 "RAM {:.1}/{:.1}GB  Swap {:.1}/{:.1}GB",
                 info.used_ram, info.total_ram, info.used_swap, info.total_swap
             ),
+            focused,
         ));
 
     frame.render_widget(ram, area);

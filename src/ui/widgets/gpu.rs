@@ -43,10 +43,11 @@ pub(crate) fn draw(
     area: ratatui::layout::Rect,
     info: &SystemInfo,
     theme: &Theme,
+    focused: bool,
 ) {
     let gpu = Paragraph::new(lines(info, theme))
         .style(Style::default().bg(theme.surface))
-        .block(card(theme, "GPU"));
+        .block(card(theme, "GPU", focused));
 
     frame.render_widget(gpu, area);
 }

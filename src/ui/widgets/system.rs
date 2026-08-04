@@ -11,6 +11,7 @@ pub(crate) fn draw_info(
     area: ratatui::layout::Rect,
     info: &SystemInfo,
     theme: &Theme,
+    focused: bool,
 ) {
     let system_info = Paragraph::new(vec![
         metric_line(
@@ -34,7 +35,7 @@ pub(crate) fn draw_info(
         ),
     ])
     .style(Style::default().fg(theme.text).bg(theme.surface))
-    .block(card(theme, "System"));
+    .block(card(theme, "System", focused));
 
     frame.render_widget(system_info, area);
 }

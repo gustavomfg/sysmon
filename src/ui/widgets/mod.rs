@@ -1,3 +1,4 @@
+pub(crate) mod command_palette;
 pub(crate) mod cpu;
 pub(crate) mod footer;
 pub(crate) mod gpu;
@@ -8,3 +9,4 @@ pub(crate) mod overview;
 pub(crate) mod processes;
 pub(crate) mod storage;
 pub(crate) mod system;
+pub(crate) mod timeline;

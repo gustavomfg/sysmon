@@ -39,10 +39,11 @@ pub(crate) fn draw(
     area: ratatui::layout::Rect,
     info: &SystemInfo,
     theme: &Theme,
+    focused: bool,
 ) {
     let network = Paragraph::new(lines(info, area.width, theme))
         .style(Style::default().bg(theme.surface))
-        .block(card(theme, "Network"));
+        .block(card(theme, "Network", focused));
 
     frame.render_widget(network, area);
 }

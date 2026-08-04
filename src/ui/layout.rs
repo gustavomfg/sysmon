@@ -9,7 +9,7 @@ pub(crate) struct DashboardLayout {
     pub(crate) middle: [Rect; 2],
     pub(crate) middle_left: [Rect; 2],
     pub(crate) system: [Rect; 2],
-    pub(crate) bottom: [Rect; 2],
+    pub(crate) bottom: [Rect; 3],
 }
 
 impl DashboardLayout {
@@ -75,11 +75,11 @@ impl DashboardLayout {
 
         let bottom = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints(if compact {
-                [Constraint::Percentage(45), Constraint::Percentage(55)]
-            } else {
-                [Constraint::Percentage(50), Constraint::Percentage(50)]
-            })
+            .constraints([
+                Constraint::Percentage(40),
+                Constraint::Percentage(30),
+                Constraint::Percentage(30),
+            ])
             .spacing(1)
             .split(main[2]);
 
@@ -90,7 +90,7 @@ impl DashboardLayout {
             middle: [middle[0], middle[1]],
             middle_left: [middle_left[0], middle_left[1]],
             system: [system[0], system[1]],
-            bottom: [bottom[0], bottom[1]],
+            bottom: [bottom[0], bottom[1], bottom[2]],
         })
     }
 }

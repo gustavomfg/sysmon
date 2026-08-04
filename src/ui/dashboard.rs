@@ -1,4 +1,5 @@
 use crate::app::AppState;
+use crate::focus::FocusTarget;
 use crate::theme::Theme;
 
 use ratatui::Frame;
@@ -10,6 +11,10 @@ pub fn draw_app(frame: &mut Frame, app: &AppState) {
         draw_with_theme(frame, info, app, app.theme());
     } else {
         frame.render_widget(fill(app.theme().background), frame.area());
+    }
+
+    if app.palette().is_open() {
+        widgets::command_palette::draw(frame, frame.area(), app, app.theme());
     }
 }
 
@@ -37,6 +42,7 @@ fn draw_with_theme(
         app.cpu_usage(),
         app.memory_usage_percent(),
         theme,
+        app.is_focused(FocusTarget::Overview),
     );
 
     for area in layout.main.iter().copied() {
@@ -59,25 +65,75 @@ fn draw_with_theme(
         frame.render_widget(fill(theme.surface), area);
     }
 
-    widgets::system::draw_info(frame, layout.system[0], info, theme);
-    widgets::cpu::draw(frame, layout.system[1], app.cpu_usage(), theme);
-    widgets::gpu::draw(frame, layout.top[1], info, theme);
+    widgets::system::draw_info(
+        frame,
+        layout.system[0],
+        info,
+        theme,
+        app.is_focused(FocusTarget::System),
+    );
+    widgets::cpu::draw(
+        frame,
+        layout.system[1],
+        app.cpu_usage(),
+        theme,
+        app.is_focused(FocusTarget::Cpu),
+    );
+    widgets::gpu::draw(
+        frame,
+        layout.top[1],
+        info,
+        theme,
+        app.is_focused(FocusTarget::Gpu),
+    );
     widgets::memory::draw(
         frame,
         layout.middle_left[0],
         info,
         app.memory_usage_percent(),
         theme,
+        app.is_focused(FocusTarget::Memory),
     );
-    widgets::processes::draw(frame, layout.middle[1], info, theme);
+    widgets::processes::draw(
+        frame,
+        layout.middle[1],
+        info,
+        theme,
+        app.is_focused(FocusTarget::Processes),
+    );
 
     for area in layout.bottom.iter().copied() {
         frame.render_widget(fill(theme.surface), area);
     }
 
-    widgets::storage::draw(frame, layout.middle_left[1], info, theme);
-    widgets::history::draw(frame, layout.bottom[0], app, theme);
-    widgets::network::draw(frame, layout.bottom[1], info, theme);
+    widgets::storage::draw(
+        frame,
+        layout.middle_left[1],
+        info,
+        theme,
+        app.is_focused(FocusTarget::Storage),
+    );
+    widgets::history::draw(
+        frame,
+        layout.bottom[0],
+        app,
+        theme,
+        app.is_focused(FocusTarget::History),
+    );
+    widgets::network::draw(
+        frame,
+        layout.bottom[1],
+        info,
+        theme,
+        app.is_focused(FocusTarget::Network),
+    );
+    widgets::timeline::draw(
+        frame,
+        layout.bottom[2],
+        app.timeline(),
+        theme,
+        app.is_focused(FocusTarget::Timeline),
+    );
     widgets::footer::draw(frame, layout.page[2], theme);
 }
 
@@ -87,6 +143,7 @@ mod tests {
 
     use super::draw_app;
     use crate::{
+        action::Action,
         app::AppState,
         system::info::SystemInfo,
         ui::renderer::{disk_usage, format_uptime, usage_percent},
@@ -133,7 +190,32 @@ mod tests {
                 .collect::<String>();
             assert!(rendered.contains("SYSMON"));
             assert!(rendered.contains("CPU Trend"));
+            assert!(rendered.contains("Timeline"));
         }
+    }
+
+    #[test]
+    fn renders_the_command_palette_overlay_with_documented_commands() {
+        let mut app = AppState::new();
+        app.update(sample_system_info());
+        app.dispatch(Action::OpenPalette);
+
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).expect("test terminal should be created");
+        terminal
+            .draw(|frame| draw_app(frame, &app))
+            .expect("command palette should render");
+
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(rendered.contains("Command Palette"));
+        assert!(rendered.contains("Toggle GPU"));
+        assert!(rendered.contains("Open Config"));
     }
 
     #[test]
