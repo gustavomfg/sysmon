@@ -39,11 +39,12 @@ enum PulsePreset {
 
 #[derive(Debug, Clone, Copy)]
 struct PresetParameters {
-    streams: usize,
-    trail_steps: usize,
+    particles: usize,
+    advection_steps: usize,
+    splat_stride: usize,
     step_size: f32,
     density: f32,
-    particle_stride: usize,
+    splat_radius: f32,
     margin: f32,
     virtual_margin: f32,
     diffusion_passes: usize,
@@ -53,41 +54,45 @@ impl PulsePreset {
     fn parameters(self) -> PresetParameters {
         match self {
             Self::Compact => PresetParameters {
-                streams: 12,
-                trail_steps: 34,
+                particles: 44,
+                advection_steps: 22,
+                splat_stride: 2,
                 step_size: 0.025,
                 density: 0.68,
-                particle_stride: 15,
+                splat_radius: 0.82,
                 margin: 0.08,
                 virtual_margin: 0.16,
                 diffusion_passes: 1,
             },
             Self::Standard => PresetParameters {
-                streams: 20,
-                trail_steps: 48,
+                particles: 72,
+                advection_steps: 30,
+                splat_stride: 2,
                 step_size: 0.022,
                 density: 0.78,
-                particle_stride: 13,
+                splat_radius: 0.76,
                 margin: 0.06,
                 virtual_margin: 0.20,
                 diffusion_passes: 2,
             },
             Self::Widescreen => PresetParameters {
-                streams: 28,
-                trail_steps: 64,
+                particles: 112,
+                advection_steps: 38,
+                splat_stride: 2,
                 step_size: 0.019,
                 density: 0.86,
-                particle_stride: 11,
+                splat_radius: 0.72,
                 margin: 0.045,
                 virtual_margin: 0.24,
                 diffusion_passes: 2,
             },
             Self::LargeWidescreen => PresetParameters {
-                streams: 36,
-                trail_steps: 76,
+                particles: 152,
+                advection_steps: 46,
+                splat_stride: 2,
                 step_size: 0.017,
                 density: 0.92,
-                particle_stride: 10,
+                splat_radius: 0.68,
                 margin: 0.035,
                 virtual_margin: 0.27,
                 diffusion_passes: 3,
@@ -251,6 +256,23 @@ impl FieldFrame {
             let local_energy = if step == 0 { energy } else { energy * 0.68 };
             self.deposit(position, local_energy, radius, layer, depth);
         }
+
+        if (start.0 - end.0).abs() > f32::EPSILON {
+            for boundary in [0.0, 1.0] {
+                if (start.0 - boundary) * (end.0 - boundary) <= 0.0 {
+                    let progress = (boundary - start.0) / (end.0 - start.0);
+                    if (0.0..=1.0).contains(&progress) {
+                        self.deposit(
+                            (boundary, start.1 + (end.1 - start.1) * progress),
+                            energy * 0.82,
+                            radius,
+                            layer,
+                            depth,
+                        );
+                    }
+                }
+            }
+        }
     }
 
     fn diffuse(&mut self, passes: usize, amount: f32) {
@@ -298,22 +320,152 @@ impl FieldFrame {
 }
 
 #[derive(Debug, Clone, Copy)]
-struct StreamSpec {
-    seed: (f32, f32),
+struct Particle {
+    position: (f32, f32),
     phase: f32,
-    speed: f32,
     direction: f32,
-    layer: usize,
     depth: f32,
-    edge_span: bool,
+    layer: usize,
+    edge: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
-struct FlowGeometry {
+struct FlowLobe {
+    center: (f32, f32),
+    strength: f32,
+    falloff: f32,
+}
+
+const FLOW_LOBES: usize = 6;
+
+#[derive(Debug, Clone, Copy)]
+struct FlowField {
     aspect: f32,
-    step_size: f32,
-    virtual_margin: f32,
     core: CoreState,
+    lobes: [FlowLobe; FLOW_LOBES],
+    network_bias: f32,
+}
+
+impl FlowField {
+    fn new(
+        aspect: f32,
+        time: f32,
+        health: PulseHealth,
+        pulse: &PulseModel,
+        core: CoreState,
+    ) -> Self {
+        let input = pulse.input();
+        let anchors = [
+            (0.16, 0.24, 0.73, 1.65),
+            (0.34, 0.72, -0.51, 1.85),
+            (0.52, 0.37, 0.39, 2.10),
+            (0.68, 0.68, -0.62, 1.45),
+            (0.84, 0.31, 0.47, 1.75),
+            (0.90, 0.76, -0.36, 1.60),
+        ];
+        let lobes = std::array::from_fn(|index| {
+            let (anchor_x, anchor_y, speed, falloff) = anchors[index];
+            let phase = hash01(index * 83 + 17) * TAU;
+            let drift = time * (0.018 + health.volatility() * 0.014) * speed + phase;
+            FlowLobe {
+                center: (
+                    (anchor_x + drift.sin() * 0.045 + (core.position.0 - 0.5) * 0.14)
+                        .clamp(0.04, 0.96),
+                    (anchor_y + (drift * 0.83).cos() * 0.065 + (core.position.1 - 0.5) * 0.12)
+                        .clamp(0.04, 0.96),
+                ),
+                strength: (0.72 + health.density() * 0.42 + input.gpu.unwrap_or(0.0) * 0.08)
+                    * if index % 2 == 0 { 1.0 } else { -0.82 },
+                falloff,
+            }
+        });
+
+        Self {
+            aspect,
+            core,
+            lobes,
+            network_bias: (input.network - 0.25).clamp(-0.25, 0.75),
+        }
+    }
+
+    fn velocity(&self, position: (f32, f32)) -> (f32, f32) {
+        let mut gradient_x = 0.0;
+        let mut gradient_y = 0.0;
+        for lobe in self.lobes {
+            let dx = position.0 - lobe.center.0;
+            let dy = (position.1 - lobe.center.1) * self.aspect;
+            let potential = lobe.strength * (-lobe.falloff * (dx * dx + dy * dy)).exp();
+            gradient_x += potential * -2.0 * lobe.falloff * dx;
+            gradient_y += potential * -2.0 * lobe.falloff * dy;
+        }
+
+        let mut vx = gradient_y * 0.18 + 0.72 + self.network_bias * 0.20;
+        let mut vy = -gradient_x * 0.18 / self.aspect.max(0.2);
+        let dx = self.core.position.0 - position.0;
+        let dy = (self.core.position.1 - position.1) * self.aspect;
+        let distance = dx.hypot(dy);
+        let capture_radius = self.core.radius * (5.2 + self.core.breath * 0.7);
+        let capture = (1.0 - smoothstep(distance / capture_radius.max(0.001))).clamp(0.0, 1.0);
+        let breathing = 0.92 + self.core.breath * 0.16;
+        let pull = self.core.pull * capture * breathing * 4.0;
+        vx += dx * pull;
+        vy += dy * pull;
+
+        let swirl = self.core.pull * capture * 0.12;
+        vx += -dy * swirl;
+        vy += dx * swirl;
+
+        let exit = smoothstep(
+            (distance - self.core.radius * (0.80 + self.core.breath * 0.12))
+                / (self.core.radius * 2.4),
+        );
+        vx += self.core.reconnection * exit * 0.18;
+        vy += (self.core.position.1 - position.1) * self.core.reconnection * exit * 0.04;
+
+        let edge_force = if position.0 < 0.14 {
+            smoothstep((0.14 - position.0) / 0.20)
+        } else if position.0 > 0.86 {
+            smoothstep((position.0 - 0.86) / 0.20)
+        } else {
+            0.0
+        };
+        vx += edge_force * 0.42;
+
+        let length = vx.hypot(vy).max(0.001);
+        (vx / length, vy / length)
+    }
+
+    fn convergence(&self, position: (f32, f32), direction: f32) -> (f32, f32, f32) {
+        let to_core = (
+            self.core.position.0 - position.0,
+            (self.core.position.1 - position.1) * self.aspect,
+        );
+        let distance = to_core.0.hypot(to_core.1);
+        let influence_radius = self.core.radius * (4.2 + self.core.breath * 0.7);
+        let proximity = (1.0 - smoothstep(distance / influence_radius.max(0.001))).clamp(0.0, 1.0);
+        let velocity = self.velocity(position);
+        let velocity = (velocity.0 * direction, velocity.1 * direction);
+        let toward = if distance > 0.001 {
+            ((velocity.0 * to_core.0 + velocity.1 * to_core.1) / distance).max(0.0)
+        } else {
+            1.0
+        };
+        let away = if distance > 0.001 {
+            ((velocity.0 * -to_core.0 + velocity.1 * -to_core.1) / distance).max(0.0)
+        } else {
+            0.0
+        };
+        let compression =
+            (proximity * (0.24 + toward * 0.76) * self.core.compression).clamp(0.0, 1.0);
+        let outside_core = smoothstep(
+            (distance - self.core.radius * (1.0 + self.core.breath * 0.18))
+                / (self.core.radius * 2.2),
+        );
+        let reconnection =
+            (outside_core * away * (0.22 + proximity * 0.78) * self.core.reconnection)
+                .clamp(0.0, 1.0);
+        (proximity, compression, reconnection)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -324,13 +476,6 @@ struct CoreState {
     reconnection: f32,
     compression: f32,
     breath: f32,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct CoreInfluence {
-    proximity: f32,
-    compression: f32,
-    reconnection: f32,
 }
 
 pub(crate) fn draw(frame: &mut Frame, area: Rect, app: &AppState, theme: &Theme, focused: bool) {
@@ -490,234 +635,290 @@ fn build_field(
 ) -> FieldFrame {
     let mut field = FieldFrame::new(width, height, braille);
     let parameters = preset.parameters();
-    let active_streams = active_stream_count(parameters.streams, health, pulse);
-    let base_trail_steps = active_trail_steps(parameters.trail_steps, pulse);
     let field_time =
         time + pulse.phase() * 0.025 + pulse.input().network * 0.018 + pulse.input().load * 0.012;
     let core = core_state(field_time, health, pulse);
-    let geometry = FlowGeometry {
-        aspect: domain_aspect(width, height, braille),
-        step_size: parameters.step_size,
-        virtual_margin: parameters.virtual_margin,
-        core,
-    };
-    let motion = if pulse.reduced_motion() { 0.0 } else { 1.0 };
-    let breathing = if pulse.reduced_motion() {
-        1.0
-    } else {
-        0.975 + (pulse.breath() - 0.5) * 0.10
-    };
+    let aspect = domain_aspect(width, height, braille);
+    let flow = FlowField::new(aspect, field_time, health, pulse, core);
+    let particle_count = active_particle_count(parameters.particles, health, pulse);
 
-    for stream_index in 0..active_streams {
-        let stream = stream_spec(
-            stream_index,
-            active_streams,
-            parameters.margin,
-            parameters.virtual_margin,
-        );
-        let trail_steps = if stream.edge_span {
-            edge_span_steps(
-                base_trail_steps,
-                parameters.step_size,
-                parameters.virtual_margin,
-            )
-        } else {
-            base_trail_steps
-        };
-        let lead_steps = if pulse.reduced_motion() {
+    for particle_index in 0..particle_count {
+        let particle = particle_spec(particle_index, particle_count, parameters.margin);
+        let lead_steps = if particle.edge || pulse.reduced_motion() {
             0
         } else {
-            ((field_time * stream.speed * 23.0 + stream.phase * 7.0).rem_euclid(160.0)) as usize
+            ((field_time * (0.65 + particle.depth * 0.55) * 15.0 + particle.phase * 11.0)
+                .rem_euclid(92.0)) as usize
         };
-        let mut position = advect_steps(
-            stream.seed,
+        let mut position = advect_position(
+            particle.position,
+            particle.direction,
             lead_steps,
-            stream,
-            field_time,
-            health,
-            geometry,
+            &flow,
+            parameters.step_size,
+            parameters.virtual_margin,
         );
 
-        for trail_index in 0..trail_steps {
-            let progress = trail_index as f32 / trail_steps.max(1) as f32;
-            let influence = core_influence(position, stream, field_time, health, geometry);
-            let rhythm = ((trail_index as f32 * 0.83 + stream.phase * 1.7).sin() * 0.5) + 0.5;
-            let taper = 0.68 + (1.0 - progress) * 0.32;
-            let layer_weight = 0.72 + stream.depth * 0.28;
-            let field_presence = (0.90
-                + influence.compression * (0.72 + core.breath * 0.14)
-                + influence.reconnection * 0.16)
-                .clamp(0.0, 1.45);
-            let energy = (0.12 + health.density() * parameters.density * 0.31 + rhythm * 0.12)
-                * layer_weight
-                * (0.90 + health.amplitude() * 0.10)
-                * (0.86 + health.pressure().clamp(0.0, 1.0) * 0.14)
-                * field_presence
-                * taper;
-            let highlight =
-                trail_index % parameters.particle_stride == stream_index % 3 && rhythm > 0.68;
-            let energy = if highlight {
-                energy + 0.13 + influence.compression * 0.22
-            } else {
-                energy
-            };
-            let radius = if highlight {
-                0.90 + influence.compression * 0.65
-            } else {
-                0.86 + stream.depth * 0.22 + influence.compression * 0.52
-            };
-            let depth = (stream.depth
-                * (0.56 + influence.proximity * 0.28 + influence.compression * 0.28))
-                .clamp(0.0, 1.0);
-            let next_position = advect_steps(
+        for step in 0..parameters.advection_steps {
+            let next_position = advect_position(
                 position,
+                particle.direction,
                 1,
-                stream,
-                field_time + progress * 0.12,
-                health,
-                geometry,
+                &flow,
+                parameters.step_size,
+                parameters.virtual_margin,
             );
-            let start = breathe_position(position, breathing, motion);
-            let end = breathe_position(next_position, breathing, motion);
-            field.deposit_segment(start, end, energy, radius, stream.layer, depth);
+            if step % parameters.splat_stride == 0 {
+                let (_, compression, reconnection) = flow.convergence(position, particle.direction);
+                let rhythm = ((step as f32 * 0.71 + particle.phase).sin() * 0.5) + 0.5;
+                let presence =
+                    (0.54 + compression * (0.92 + core.breath * 0.12) + reconnection * 0.18)
+                        .clamp(0.0, 1.55);
+                let edge_boost = if particle.edge { 2.40 } else { 1.0 };
+                let energy =
+                    (0.075 + health.density() * parameters.density * 0.12 + rhythm * 0.045)
+                        * (0.86 + health.amplitude() * 0.14)
+                        * presence
+                        * edge_boost;
+                let glint = hash01(particle_index * 97 + step * 13) > 0.91;
+                let energy = if glint {
+                    energy + 0.065 + compression * 0.12
+                } else {
+                    energy
+                };
+                let radius = parameters.splat_radius
+                    + particle.depth * 0.16
+                    + compression * 0.52
+                    + if particle.edge { 0.42 } else { 0.0 }
+                    + if glint { 0.18 } else { 0.0 };
+                let depth = (particle.depth * (0.46 + compression * 0.36 + reconnection * 0.18))
+                    .clamp(0.0, 1.0);
+                field.deposit_segment(
+                    position,
+                    next_position,
+                    energy,
+                    radius,
+                    particle.layer,
+                    depth,
+                );
+            }
             position = next_position;
         }
     }
 
-    let diffusion_amount = 0.18 + health.density() * 0.08;
-    apply_discharges(&mut field, health, field_time, pulse, geometry);
+    let diffusion_amount = 0.13 + health.density() * 0.07;
     field.diffuse(parameters.diffusion_passes, diffusion_amount);
+
+    let convergence = detect_convergence(&field, &flow, health);
+    illuminate_convergence(&mut field, &flow, convergence);
+    field.diffuse(1, 0.07 + convergence.score * 0.05);
+    apply_reconnection(&mut field, &flow, convergence, parameters.step_size);
+    apply_discharges(
+        &mut field,
+        &flow,
+        convergence,
+        health,
+        field_time,
+        pulse,
+        parameters.step_size,
+    );
 
     field
 }
 
-fn active_stream_count(base: usize, health: PulseHealth, pulse: &PulseModel) -> usize {
+fn active_particle_count(base: usize, health: PulseHealth, pulse: &PulseModel) -> usize {
     let density_factor = 0.72 + health.density() * 0.28;
     let reduced_factor = if pulse.reduced_motion() { 0.68 } else { 1.0 };
-    ((base as f32 * density_factor * reduced_factor).round() as usize).max(FLOW_LAYERS)
+    ((base as f32 * density_factor * reduced_factor).round() as usize).max(12)
 }
 
-fn active_trail_steps(base: usize, pulse: &PulseModel) -> usize {
-    if pulse.reduced_motion() {
-        (base * 3 / 4).max(12)
+fn particle_spec(index: usize, count: usize, margin: f32) -> Particle {
+    let edge = index < count.min(16);
+    let from_left = index.is_multiple_of(2);
+    let x = if edge {
+        if from_left {
+            -0.045 - hash01(index * 19 + 3) * 0.020
+        } else {
+            1.045 + hash01(index * 23 + 5) * 0.020
+        }
     } else {
-        base
+        margin + hash01(index * 31 + 11) * (1.0 - margin * 2.0)
+    };
+    let y = (0.10 + hash01(index * 43 + 17) * 0.80 + (hash01(index * 59 + 29) - 0.5) * 0.08)
+        .clamp(margin, 1.0 - margin);
+
+    Particle {
+        position: (x, y),
+        phase: hash01(index * 71 + 13) * TAU,
+        direction: if edge {
+            if from_left { 1.0 } else { -1.0 }
+        } else if index.is_multiple_of(3) {
+            -1.0
+        } else {
+            1.0
+        },
+        depth: 0.14 + hash01(index * 67 + 23) * 0.82,
+        layer: index % FLOW_LAYERS,
+        edge,
     }
 }
 
-fn core_influence(
-    position: (f32, f32),
-    stream: StreamSpec,
-    time: f32,
+fn advect_position(
+    mut position: (f32, f32),
+    direction: f32,
+    steps: usize,
+    flow: &FlowField,
+    step_size: f32,
+    virtual_margin: f32,
+) -> (f32, f32) {
+    for _ in 0..steps {
+        let velocity = flow.velocity(position);
+        position.0 = wrap_virtual(
+            position.0 + velocity.0 * step_size * direction,
+            virtual_margin,
+        );
+        position.1 += velocity.1 * step_size * direction;
+        position.1 = reflect(position.1, 0.025, 0.975);
+    }
+    position
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ConvergenceState {
+    density: f32,
+    score: f32,
+}
+
+fn detect_convergence(
+    field: &FieldFrame,
+    flow: &FlowField,
     health: PulseHealth,
-    geometry: FlowGeometry,
-) -> CoreInfluence {
-    let core = geometry.core;
-    let to_core = (
-        core.position.0 - position.0,
-        (core.position.1 - position.1) * geometry.aspect,
-    );
-    let distance = to_core.0.hypot(to_core.1);
-    let influence_radius = core.radius * (4.2 + core.breath * 0.7);
-    let proximity = (1.0 - smoothstep(distance / influence_radius.max(0.001))).clamp(0.0, 1.0);
+) -> ConvergenceState {
+    let density = field.local_energy(flow.core.position, 5.0);
+    let field_score = smoothstep((density - 0.006) / 0.022);
+    let pressure = smoothstep((health.pressure() - 0.25) / 0.55);
+    ConvergenceState {
+        density,
+        score: (field_score * (0.72 + pressure * 0.28)).clamp(0.0, 1.0),
+    }
+}
 
-    let flow = flow_vector(position, time, health, geometry.aspect, core);
-    let velocity = (flow.0 * stream.direction, flow.1 * stream.direction);
-    let to_core_alignment = if distance > 0.001 {
-        ((velocity.0 * to_core.0 + velocity.1 * to_core.1) / distance).max(0.0)
-    } else {
-        1.0
-    };
-    let from_core_alignment = if distance > 0.001 {
-        ((velocity.0 * -to_core.0 + velocity.1 * -to_core.1) / distance).max(0.0)
-    } else {
-        0.0
-    };
-    let compression = (proximity
-        * (0.26 + to_core_alignment * 0.74)
-        * core.compression
-        * (0.88 + health.pressure() * 0.12))
-        .clamp(0.0, 1.0);
-    let outside_core =
-        smoothstep((distance - core.radius * (1.0 + core.breath * 0.18)) / (core.radius * 2.2));
-    let reconnection =
-        (outside_core * from_core_alignment * (0.22 + proximity * 0.78) * core.reconnection)
-            .clamp(0.0, 1.0);
+fn illuminate_convergence(field: &mut FieldFrame, flow: &FlowField, convergence: ConvergenceState) {
+    if convergence.score <= 0.0 {
+        return;
+    }
 
-    CoreInfluence {
-        proximity,
-        compression,
-        reconnection,
+    let density_factor = 0.80 + smoothstep(convergence.density / 0.06) * 0.20;
+    for y in 0..field.height {
+        for x in 0..field.width {
+            let index = y * field.width + x;
+            let mut sample = field.samples[index];
+            if sample.energy <= FIELD_THRESHOLD {
+                continue;
+            }
+            let position = (
+                x as f32 / field.width.saturating_sub(1).max(1) as f32,
+                y as f32 / field.height.saturating_sub(1).max(1) as f32,
+            );
+            let forward = flow.convergence(position, 1.0);
+            let reverse = flow.convergence(position, -1.0);
+            let local_convergence = forward.1.max(reverse.1);
+            let gain =
+                sample.energy * local_convergence * convergence.score * density_factor * 0.24;
+            sample.energy = (sample.energy + gain).clamp(0.0, 1.0);
+            sample.depth =
+                (sample.depth + local_convergence * convergence.score * 0.16).clamp(0.0, 1.0);
+            field.samples[index] = sample;
+        }
+    }
+}
+
+fn apply_reconnection(
+    field: &mut FieldFrame,
+    flow: &FlowField,
+    convergence: ConvergenceState,
+    step_size: f32,
+) {
+    if convergence.score < 0.16 {
+        return;
+    }
+
+    for branch in 0..3 {
+        let branch_angle = (branch as f32 - 1.0) * 0.62;
+        let mut position = flow.core.position;
+        for step in 0..5 {
+            let velocity = rotate(
+                flow.velocity(position),
+                branch_angle * (1.0 - step as f32 * 0.16),
+            );
+            position = (
+                position.0 + velocity.0 * step_size * 1.15,
+                position.1 + velocity.1 * step_size * 1.15,
+            );
+            if !(0.0..=1.0).contains(&position.0) {
+                break;
+            }
+            field.deposit(
+                position,
+                convergence.score * (0.055 - step as f32 * 0.006),
+                0.46 + convergence.score * 0.22,
+                FLOW_LAYERS,
+                0.92,
+            );
+        }
     }
 }
 
 fn apply_discharges(
     field: &mut FieldFrame,
+    flow: &FlowField,
+    convergence: ConvergenceState,
     health: PulseHealth,
     time: f32,
     pulse: &PulseModel,
-    geometry: FlowGeometry,
+    step_size: f32,
 ) {
-    let discharge = discharge_strength(field, health, time, pulse, geometry);
-    if discharge < 0.08 {
+    if pulse.reduced_motion() || health.volatility() < 0.06 || convergence.score < 0.42 {
         return;
     }
 
-    let core = geometry.core;
-
-    field.deposit(
-        core.position,
-        discharge * 0.50,
-        0.85 + discharge * 1.0,
-        FLOW_LAYERS,
-        1.0,
-    );
-    let flow = flow_vector(core.position, time, health, geometry.aspect, core);
-    let flow_angle = flow.1.atan2(flow.0);
-    for branch in 0..3 {
-        let branch_angle =
-            flow_angle + (branch as f32 - 1.0) * 0.70 + (time * 0.13 + core.breath).sin() * 0.12;
-        let length = 0.028 + discharge * (0.030 + branch as f32 * 0.006);
-        let endpoint = (
-            core.position.0 + branch_angle.cos() * length,
-            core.position.1 + branch_angle.sin() * length,
-        );
-        field.deposit_segment(
-            core.position,
-            endpoint,
-            discharge * (0.17 - branch as f32 * 0.022),
-            0.50,
-            FLOW_LAYERS,
-            1.0,
-        );
-    }
-}
-
-fn discharge_strength(
-    field: &FieldFrame,
-    health: PulseHealth,
-    time: f32,
-    pulse: &PulseModel,
-    geometry: FlowGeometry,
-) -> f32 {
-    if pulse.reduced_motion() || health.volatility() < 0.06 {
-        return 0.0;
-    }
-
-    let core = geometry.core;
     let volatility = smoothstep((health.volatility() - 0.06) / 0.34);
-    let convergence = field.local_energy(core.position, 4.0);
-    let node_energy = smoothstep((convergence - 0.12) / 0.24)
-        * smoothstep((core.compression - 0.68) / 0.22)
-        * volatility;
-    let cadence = ((time * 1.12 + core.breath * 1.7).sin() * 0.5) + 0.5;
-    let burst = smoothstep((cadence - 0.76) / 0.24);
-    node_energy * burst
+    let cadence = ((time * 1.12 + flow.core.breath * 1.7).sin() * 0.5) + 0.5;
+    let burst = smoothstep((cadence - 0.78) / 0.22);
+    let discharge = convergence.score * volatility * burst;
+    if discharge < 0.10 {
+        return;
+    }
+
+    for branch in 0..2 {
+        let branch_angle = if branch == 0 { -0.48 } else { 0.48 };
+        let mut position = flow.core.position;
+        for step in 0..4 {
+            let velocity = rotate(
+                flow.velocity(position),
+                branch_angle * (1.0 - step as f32 * 0.2),
+            );
+            position = (
+                position.0 + velocity.0 * step_size * (1.15 + discharge * 0.25),
+                position.1 + velocity.1 * step_size * (1.15 + discharge * 0.25),
+            );
+            field.deposit(
+                position,
+                discharge * (0.065 - step as f32 * 0.012),
+                0.40,
+                FLOW_LAYERS,
+                1.0,
+            );
+        }
+    }
 }
 
-fn edge_span_steps(base: usize, step_size: f32, virtual_margin: f32) -> usize {
-    let required_length = 1.65 + virtual_margin * 2.0;
-    base.max((required_length / step_size).ceil() as usize)
+fn rotate(vector: (f32, f32), angle: f32) -> (f32, f32) {
+    let (sin, cos) = angle.sin_cos();
+    (
+        vector.0 * cos - vector.1 * sin,
+        vector.0 * sin + vector.1 * cos,
+    )
 }
 
 fn domain_aspect(width: usize, height: usize, braille: bool) -> f32 {
@@ -725,117 +926,15 @@ fn domain_aspect(width: usize, height: usize, braille: bool) -> f32 {
     (height as f32 / width.max(1) as f32 * dot_aspect).clamp(0.22, 3.5)
 }
 
-fn stream_spec(index: usize, count: usize, margin: f32, virtual_margin: f32) -> StreamSpec {
-    let layer = index % FLOW_LAYERS;
-    let lane = index / FLOW_LAYERS;
-    let lane_count = count.div_ceil(FLOW_LAYERS).max(1);
-    let lane_position = (lane as f32 + 0.5) / lane_count as f32;
-    let jitter = hash01(index * 29 + 7) - 0.5;
-    let upper = layer < 2;
-    let center = if upper { 0.31 } else { 0.69 };
-    let spread = if upper { 0.28 } else { 0.26 };
-    let seed_y =
-        (center + (lane_position - 0.5) * spread + jitter * 0.035).clamp(margin, 1.0 - margin);
-    let from_left = layer.is_multiple_of(2);
-    let phase = hash01(index * 41 + 13) * TAU;
-    let edge_offset = hash01(index * 71 + 31) * 0.035;
-
-    StreamSpec {
-        seed: (
-            if from_left {
-                -virtual_margin - edge_offset
-            } else {
-                1.0 + virtual_margin + edge_offset
-            },
-            seed_y,
-        ),
-        phase,
-        speed: 0.78 + hash01(index * 53 + 19) * 0.34,
-        direction: if from_left { 1.0 } else { -1.0 },
-        layer,
-        depth: 0.27 + layer as f32 * 0.18 + hash01(index * 67 + 23) * 0.10,
-        edge_span: index < FLOW_LAYERS,
-    }
-}
-
-fn advect_steps(
-    mut position: (f32, f32),
-    steps: usize,
-    stream: StreamSpec,
-    time: f32,
-    health: PulseHealth,
-    geometry: FlowGeometry,
-) -> (f32, f32) {
-    for step in 0..steps {
-        let vector = flow_vector(
-            position,
-            time + step as f32 * 0.011,
-            health,
-            geometry.aspect,
-            geometry.core,
-        );
-        let direction = stream.direction;
-        position.0 = wrap_virtual(
-            position.0 + vector.0 * geometry.step_size * direction,
-            geometry.virtual_margin,
-        );
-        position.1 += vector.1 * geometry.step_size * direction;
-        position.1 = reflect(position.1, 0.025, 0.975);
-    }
-    position
-}
-
 fn wrap_virtual(value: f32, margin: f32) -> f32 {
     let span = 1.0 + margin * 2.0;
-    (value + margin).rem_euclid(span) - margin
-}
-
-fn flow_vector(
-    position: (f32, f32),
-    time: f32,
-    health: PulseHealth,
-    aspect: f32,
-    core: CoreState,
-) -> (f32, f32) {
-    let phase = time * (0.06 + health.volatility() * 0.08);
-    let braid_phase = TAU * (position.0 * 0.83 + position.1 * 0.61) + phase;
-    let bend_phase = TAU * (position.0 * 0.47 - position.1 * 0.92) - phase * 0.63;
-    let mut vx = 0.54 + braid_phase.sin() * 0.10;
-    let mut vy =
-        braid_phase.cos() * (0.12 + health.amplitude() * 0.035) + (0.5 - position.1) * 0.10;
-
-    vx += bend_phase.cos() * 0.055;
-    vy += bend_phase.sin() * (0.09 + health.volatility() * 0.10);
-
-    let dx = core.position.0 - position.0;
-    let dy = (core.position.1 - position.1) * aspect;
-    let distance = dx.hypot(dy);
-    let capture_radius = core.radius * (4.2 + core.breath * 0.7);
-    let capture = (1.0 - smoothstep(distance / capture_radius.max(0.001))).clamp(0.0, 1.0);
-    let breathing = 0.92 + core.breath * 0.16;
-    let pull = core.pull * capture * breathing;
-    vx += dx * pull;
-    vy += dy * pull;
-
-    let swirl = core.pull * capture * 0.12;
-    vx += -dy * swirl;
-    vy += dx * swirl;
-
-    let reconnection =
-        smoothstep((distance - core.radius * (0.80 + core.breath * 0.12)) / (core.radius * 2.4));
-    vx += core.reconnection * reconnection * 0.18;
-    vy += (core.position.1 - position.1) * core.reconnection * reconnection * 0.04;
-
-    let length = vx.hypot(vy).max(0.001);
-    (vx / length, vy / length)
-}
-
-fn breathe_position(position: (f32, f32), scale: f32, motion: f32) -> (f32, f32) {
-    let scale = 1.0 + (scale - 1.0) * motion;
-    (
-        0.5 + (position.0 - 0.5) * scale,
-        (0.5 + (position.1 - 0.5) * scale).clamp(0.015, 0.985),
-    )
+    if value < -margin {
+        1.0 + margin - (-margin - value).rem_euclid(span)
+    } else if value > 1.0 + margin {
+        -margin + (value - (1.0 + margin)).rem_euclid(span)
+    } else {
+        value
+    }
 }
 
 fn reflect(value: f32, low: f32, high: f32) -> f32 {
@@ -937,9 +1036,9 @@ mod tests {
     use ratatui::layout::Rect;
 
     use super::{
-        EnergySample, FIELD_THRESHOLD, FieldFrame, FlowGeometry, PulsePreset, braille_lines,
-        build_field, core_state, discharge_strength, domain_aspect, field_for_area, preset_for,
-        unicode_lines, uses_braille,
+        ConvergenceState, EnergySample, FIELD_THRESHOLD, FieldFrame, FlowField, PulsePreset,
+        apply_discharges, braille_lines, build_field, core_state, detect_convergence,
+        domain_aspect, field_for_area, preset_for, unicode_lines, uses_braille,
     };
     use crate::{
         pulse::{HealthState, PulseInput, PulseModel},
@@ -1054,11 +1153,14 @@ mod tests {
         let core = core_state(0.0, health, &pulse);
         let near = field.local_energy(core.position, 7.0);
         let distant = field.local_energy((0.10, 0.18), 7.0);
-
+        let flow = FlowField::new(domain_aspect(240, 120, true), 0.0, health, &pulse, core);
+        let convergence = detect_convergence(&field, &flow, health);
         assert!(
             near > distant,
             "core density {near} should exceed distant density {distant}"
         );
+        assert!(convergence.density > distant);
+        assert!(convergence.score > 0.0);
     }
 
     #[test]
@@ -1113,18 +1215,29 @@ mod tests {
             volatility: 0.0,
         });
         let calm_core = core_state(0.0, calm.health(), &calm);
-        let calm_geometry = FlowGeometry {
-            aspect: domain_aspect(160, 80, true),
-            step_size: 0.02,
-            virtual_margin: 0.2,
-            core: calm_core,
-        };
+        let calm_flow = FlowField::new(
+            domain_aspect(160, 80, true),
+            0.0,
+            calm.health(),
+            &calm,
+            calm_core,
+        );
         let mut calm_field = FieldFrame::new(160, 80, true);
         calm_field.deposit(calm_core.position, 1.0, 8.0, 0, 1.0);
-        assert_eq!(
-            discharge_strength(&calm_field, calm.health(), 0.65, &calm, calm_geometry),
-            0.0
+        let calm_before = calm_field.clone();
+        apply_discharges(
+            &mut calm_field,
+            &calm_flow,
+            ConvergenceState {
+                density: 1.0,
+                score: 1.0,
+            },
+            calm.health(),
+            0.65,
+            &calm,
+            0.02,
         );
+        assert_eq!(calm_field, calm_before);
 
         let mut active = PulseModel::new(false);
         active.set_input(PulseInput {
@@ -1136,33 +1249,52 @@ mod tests {
             volatility: 0.90,
         });
         let active_core = core_state(0.0, active.health(), &active);
-        let active_geometry = FlowGeometry {
-            core: active_core,
-            ..calm_geometry
-        };
+        let active_flow = FlowField::new(
+            domain_aspect(160, 80, true),
+            0.0,
+            active.health(),
+            &active,
+            active_core,
+        );
         let mut active_field = FieldFrame::new(160, 80, true);
         active_field.deposit(active_core.position, 1.0, 8.0, 0, 1.0);
-        let strength = discharge_strength(
-            &active_field,
+        let active_convergence = ConvergenceState {
+            density: 1.0,
+            score: 1.0,
+        };
+        let active_before = active_field.clone();
+        apply_discharges(
+            &mut active_field,
+            &active_flow,
+            active_convergence,
             active.health(),
             0.65,
             &active,
-            active_geometry,
+            0.02,
         );
-        assert!(strength > 0.08);
+        assert_ne!(active_field, active_before);
 
         let mut reduced = active;
         reduced.set_reduced_motion(true);
-        assert_eq!(
-            discharge_strength(
-                &active_field,
-                reduced.health(),
-                0.65,
-                &reduced,
-                active_geometry,
-            ),
-            0.0
+        let reduced_core = core_state(0.0, reduced.health(), &reduced);
+        let reduced_flow = FlowField::new(
+            domain_aspect(160, 80, true),
+            0.0,
+            reduced.health(),
+            &reduced,
+            reduced_core,
         );
+        let reduced_before = active_field.clone();
+        apply_discharges(
+            &mut active_field,
+            &reduced_flow,
+            active_convergence,
+            reduced.health(),
+            0.65,
+            &reduced,
+            0.02,
+        );
+        assert_eq!(active_field, reduced_before);
     }
 
     #[test]
