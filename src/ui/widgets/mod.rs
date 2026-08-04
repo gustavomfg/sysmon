@@ -1,0 +1,10 @@
+pub(crate) mod cpu;
+pub(crate) mod footer;
+pub(crate) mod gpu;
+pub(crate) mod history;
+pub(crate) mod memory;
+pub(crate) mod network;
+pub(crate) mod overview;
+pub(crate) mod processes;
+pub(crate) mod storage;
+pub(crate) mod system;
