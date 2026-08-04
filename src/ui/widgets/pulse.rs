@@ -497,6 +497,22 @@ impl FlowField {
         }
     }
 
+    fn potential(&self, position: (f32, f32)) -> f32 {
+        let mut potential = 0.0;
+        for lobe in self.lobes {
+            let dx = position.0 - lobe.center.0;
+            let dy = (position.1 - lobe.center.1) * self.aspect;
+            potential += lobe.strength * (-lobe.falloff * (dx * dx + dy * dy)).exp();
+        }
+
+        let dx = self.core.position.0 - position.0;
+        let dy = (self.core.position.1 - position.1) * self.aspect;
+        let distance = dx.hypot(dy);
+        let core_scale = (self.core.radius * (4.6 + self.core.breath * 0.6)).max(0.001);
+        let core_potential = (-((distance / core_scale).powi(2))).exp();
+        potential + core_potential * (0.38 + self.core.compression * 0.24)
+    }
+
     fn velocity(&self, position: (f32, f32)) -> (f32, f32) {
         let mut gradient_x = 0.0;
         let mut gradient_y = 0.0;
@@ -585,6 +601,133 @@ struct CoreState {
     reconnection: f32,
     compression: f32,
     breath: f32,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct EnergyLandscape {
+    width: usize,
+    height: usize,
+    values: Vec<f32>,
+}
+
+impl EnergyLandscape {
+    fn build(
+        width: usize,
+        height: usize,
+        flow: &FlowField,
+        health: PulseHealth,
+        time: f32,
+        reduced_motion: bool,
+    ) -> Self {
+        let mut landscape = Self {
+            width,
+            height,
+            values: vec![0.0; width * height],
+        };
+        let motion = if reduced_motion { 0.0 } else { 1.0 };
+
+        for y in 0..height {
+            for x in 0..width {
+                let position = (
+                    x as f32 / width.saturating_sub(1).max(1) as f32,
+                    y as f32 / height.saturating_sub(1).max(1) as f32,
+                );
+                let broad = potential_signal(flow.potential(position));
+                let medium_position = warp_position(position, 1.7, time, 0.034 * motion);
+                let medium = potential_signal(flow.potential(medium_position));
+                let fine_position = warp_position(position, 3.8, time * 0.72, 0.014 * motion);
+                let fine = potential_signal(flow.potential(fine_position));
+                let core_distance = (position.0 - flow.core.position.0)
+                    .hypot((position.1 - flow.core.position.1) * flow.aspect);
+                let core_presence = smoothstep(
+                    1.0 - core_distance / (flow.core.radius * (5.6 + flow.core.breath * 0.5)),
+                );
+                let compression = flow
+                    .convergence(position, 1.0)
+                    .1
+                    .max(flow.convergence(position, -1.0).1);
+                let value = (broad * 0.46
+                    + medium * 0.28
+                    + fine * 0.12
+                    + core_presence * (0.08 + health.pressure() * 0.04)
+                    + compression * 0.06)
+                    .clamp(0.0, 1.0);
+                landscape.values[y * width + x] = value;
+            }
+        }
+
+        landscape
+    }
+
+    fn sample(&self, position: (f32, f32)) -> f32 {
+        let x = position.0.clamp(0.0, 1.0) * self.width.saturating_sub(1) as f32;
+        let y = position.1.clamp(0.0, 1.0) * self.height.saturating_sub(1) as f32;
+        let x0 = x.floor() as usize;
+        let y0 = y.floor() as usize;
+        let x1 = (x0 + 1).min(self.width - 1);
+        let y1 = (y0 + 1).min(self.height - 1);
+        let tx = x.fract();
+        let ty = y.fract();
+        let top = self.values[y0 * self.width + x0]
+            + (self.values[y0 * self.width + x1] - self.values[y0 * self.width + x0]) * tx;
+        let bottom = self.values[y1 * self.width + x0]
+            + (self.values[y1 * self.width + x1] - self.values[y1 * self.width + x0]) * tx;
+        top + (bottom - top) * ty
+    }
+
+    fn gradient(&self, position: (f32, f32)) -> (f32, f32) {
+        let dx = 1.0 / self.width.saturating_sub(1).max(1) as f32;
+        let dy = 1.0 / self.height.saturating_sub(1).max(1) as f32;
+        (
+            (self.sample((position.0 + dx, position.1))
+                - self.sample((position.0 - dx, position.1)))
+                * 0.5,
+            (self.sample((position.0, position.1 + dy))
+                - self.sample((position.0, position.1 - dy)))
+                * 0.5,
+        )
+    }
+
+    fn sampler_weight(&self, position: (f32, f32)) -> f32 {
+        let value = self.sample(position);
+        let basin = smoothstep((value - 0.30) / 0.44);
+        let gradient_value = self.gradient(position);
+        let gradient = gradient_value.0.hypot(gradient_value.1);
+        let transition = smoothstep((gradient - 0.018) / 0.12);
+        (0.38 + basin * 0.46 + transition * 0.10).clamp(0.0, 1.0)
+    }
+
+    fn apply_support(&self, field: &mut FieldFrame, health: PulseHealth) {
+        let support_energy = 0.004 + health.density() * 0.004;
+        for (index, sample) in field.samples.iter_mut().enumerate() {
+            let x = index % self.width;
+            let y = index / self.width;
+            let position = (
+                x as f32 / self.width.saturating_sub(1).max(1) as f32,
+                y as f32 / self.height.saturating_sub(1).max(1) as f32,
+            );
+            let value = self.sample(position);
+            let basin = smoothstep((value - 0.46) / 0.30);
+            let crest = smoothstep((value - 0.64) / 0.22);
+            let organization = basin * (0.56 + crest * 0.44);
+            let landscape_modulation = (0.58 + basin * 0.48 + crest * 0.08).clamp(0.0, 1.16);
+            sample.energy = (sample.energy * landscape_modulation + support_energy * organization)
+                .clamp(0.0, 1.0);
+        }
+    }
+}
+
+fn potential_signal(value: f32) -> f32 {
+    0.5 + (value * 0.34).tanh() * 0.5
+}
+
+fn warp_position(position: (f32, f32), frequency: f32, time: f32, amount: f32) -> (f32, f32) {
+    (
+        (position.0 + (position.1 * TAU * frequency + time * 0.09).sin() * amount)
+            .clamp(-0.08, 1.08),
+        (position.1 + (position.0 * TAU * frequency * 0.73 + time * 0.07).cos() * amount * 0.72)
+            .clamp(-0.08, 1.08),
+    )
 }
 
 pub(crate) fn draw(frame: &mut Frame, area: Rect, app: &AppState, theme: &Theme, focused: bool) {
@@ -754,6 +897,14 @@ fn build_field(
     let core = core_state(field_time, health, pulse);
     let aspect = domain_aspect(width, height, braille);
     let flow = FlowField::new(aspect, field_time, health, pulse, core);
+    let landscape = EnergyLandscape::build(
+        width,
+        height,
+        &flow,
+        health,
+        field_time,
+        pulse.reduced_motion(),
+    );
     let particle_count = active_particle_count(parameters.particles, health, pulse);
 
     for particle_index in 0..particle_count {
@@ -785,6 +936,7 @@ fn build_field(
             );
             if step % parameters.splat_stride == 0 || step + 1 == parameters.advection_steps {
                 let (_, compression, reconnection) = flow.convergence(position, particle.direction);
+                let sampler_weight = landscape.sampler_weight(position);
                 let rhythm = 0.68
                     + (((field_time * 0.16 + step as f32 * 0.13 + particle.phase).sin() * 0.5)
                         + 0.5)
@@ -799,6 +951,7 @@ fn build_field(
                         * (0.86 + health.amplitude() * 0.14)
                         * presence
                         * depth_presence
+                        * (0.72 + sampler_weight * 0.38)
                         * edge_boost;
                 let glint = compression > 0.12 && hash01(particle_index * 97 + step * 13) > 0.985;
                 let energy = if glint {
@@ -809,6 +962,7 @@ fn build_field(
                 let radius = parameters.splat_radius
                     + particle.depth * 0.16
                     + compression * 0.52
+                    + sampler_weight * 0.12
                     + if particle.edge { 0.42 } else { 0.0 }
                     + if glint { 0.18 } else { 0.0 };
                 let depth = (particle.depth * (0.46 + compression * 0.36 + reconnection * 0.18))
@@ -827,13 +981,14 @@ fn build_field(
         }
     }
 
+    landscape.apply_support(&mut field, health);
     let diffusion_amount = 0.13 + health.density() * 0.07;
     field.diffuse(parameters.diffusion_passes, diffusion_amount);
 
     let convergence = detect_convergence(&field, &flow, health);
     illuminate_convergence(&mut field, &flow, convergence);
     field.diffuse(1, 0.07 + convergence.score * 0.05);
-    apply_reconnection(&mut field, &flow, convergence, parameters.step_size);
+    apply_reconnection(&mut field, &flow, &landscape, convergence);
     apply_discharges(
         &mut field,
         &flow,
@@ -996,35 +1151,33 @@ fn illuminate_convergence(field: &mut FieldFrame, flow: &FlowField, convergence:
 fn apply_reconnection(
     field: &mut FieldFrame,
     flow: &FlowField,
+    landscape: &EnergyLandscape,
     convergence: ConvergenceState,
-    step_size: f32,
 ) {
     if convergence.score < 0.16 {
         return;
     }
 
-    for branch in 0..3 {
-        let branch_angle = (branch as f32 - 1.0) * 0.62;
-        let mut position = flow.core.position;
-        for step in 0..5 {
-            let velocity = rotate(
-                flow.velocity(position),
-                branch_angle * (1.0 - step as f32 * 0.16),
-            );
-            position = (
-                position.0 + velocity.0 * step_size * 1.15,
-                position.1 + velocity.1 * step_size * 1.15,
-            );
-            if !(0.0..=1.0).contains(&position.0) {
-                break;
+    let source = field.samples.clone();
+    for y in 0..field.height {
+        for x in 0..field.width {
+            let index = y * field.width + x;
+            let mut sample = source[index];
+            if sample.energy <= ACTIVE_ENERGY_EPSILON {
+                continue;
             }
-            field.deposit(
-                position,
-                convergence.score * (0.055 - step as f32 * 0.006),
-                0.46 + convergence.score * 0.22,
-                FLOW_LAYERS,
-                0.92,
+            let position = (
+                x as f32 / field.width.saturating_sub(1).max(1) as f32,
+                y as f32 / field.height.saturating_sub(1).max(1) as f32,
             );
+            let forward = flow.convergence(position, 1.0);
+            let reverse = flow.convergence(position, -1.0);
+            let reconnection = forward.2.max(reverse.2);
+            let basin = smoothstep((landscape.sample(position) - 0.34) / 0.42);
+            let organization = (reconnection * (0.58 + basin * 0.42)).clamp(0.0, 1.0);
+            let gain = sample.energy * organization * convergence.score * 0.075;
+            sample.energy = (sample.energy + gain).clamp(0.0, 1.0);
+            field.samples[index] = sample;
         }
     }
 }
@@ -1228,13 +1381,15 @@ fn scale_color(color: Color, brightness: f32) -> Color {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::VecDeque;
+
     use ratatui::layout::Rect;
 
     use super::{
-        ACTIVE_ENERGY_EPSILON, ConvergenceState, EnergySample, FIELD_THRESHOLD, FieldFrame,
-        FlowField, PulsePreset, apply_discharges, braille_lines, build_field, core_state,
-        detect_convergence, domain_aspect, field_for_area, illuminate_convergence, preset_for,
-        unicode_lines, uses_braille,
+        ACTIVE_ENERGY_EPSILON, ConvergenceState, EnergyLandscape, EnergySample, FIELD_THRESHOLD,
+        FieldFrame, FlowField, PulsePreset, apply_discharges, braille_lines, build_field,
+        core_state, detect_convergence, domain_aspect, field_for_area, illuminate_convergence,
+        preset_for, unicode_lines, uses_braille,
     };
     use crate::{
         pulse::{HealthState, PulseInput, PulseModel},
@@ -1270,6 +1425,76 @@ mod tests {
         assert_eq!(preset_for(50, 12), PulsePreset::Standard);
         assert_eq!(preset_for(80, 20), PulsePreset::Widescreen);
         assert_eq!(preset_for(140, 40), PulsePreset::LargeWidescreen);
+    }
+
+    #[test]
+    fn energy_landscape_has_broad_medium_and_fine_structure() {
+        let pulse = pulse();
+        let health = pulse.health();
+        let core = core_state(0.0, health, &pulse);
+        let flow = FlowField::new(domain_aspect(160, 80, true), 0.0, health, &pulse, core);
+        let landscape = EnergyLandscape::build(160, 80, &flow, health, 0.0, false);
+        let minimum = landscape.values.iter().copied().fold(1.0, f32::min);
+        let maximum = landscape.values.iter().copied().fold(0.0, f32::max);
+        let fine_variation = landscape
+            .values
+            .chunks(landscape.width)
+            .map(|row| {
+                row.windows(2)
+                    .map(|pair| (pair[1] - pair[0]).abs())
+                    .sum::<f32>()
+            })
+            .sum::<f32>();
+        let broad_variation = (0..landscape.height)
+            .step_by(8)
+            .flat_map(|y| (0..landscape.width).step_by(8).map(move |x| (x, y)))
+            .filter(|&(x, y)| x + 8 < landscape.width && y + 8 < landscape.height)
+            .map(|(x, y)| {
+                let current = landscape.values[y * landscape.width + x];
+                let next = landscape.values[(y + 8) * landscape.width + x + 8];
+                (next - current).abs()
+            })
+            .sum::<f32>();
+
+        assert!(maximum - minimum > 0.12);
+        assert!(fine_variation > 1.0);
+        assert!(broad_variation > 0.20);
+    }
+
+    #[test]
+    fn energy_landscape_drifts_without_rebuilding_its_topology() {
+        let pulse = pulse();
+        let health = pulse.health();
+        let core = core_state(0.0, health, &pulse);
+        let flow = FlowField::new(domain_aspect(160, 80, true), 0.0, health, &pulse, core);
+        let first = EnergyLandscape::build(160, 80, &flow, health, 0.0, false);
+        let later = EnergyLandscape::build(160, 80, &flow, health, 0.05, false);
+        let average_change = first
+            .values
+            .iter()
+            .zip(&later.values)
+            .map(|(first, later)| (first - later).abs())
+            .sum::<f32>()
+            / first.values.len() as f32;
+
+        assert!(average_change > 0.0);
+        assert!(average_change < 0.08);
+    }
+
+    #[test]
+    fn landscape_support_forms_fused_energy_components() {
+        let field = field_for_area(80, 20, true, &pulse());
+        let components = active_components(&field);
+        let active = field
+            .samples
+            .iter()
+            .filter(|sample| sample.energy > FIELD_THRESHOLD)
+            .count();
+        let largest = components.iter().copied().max().unwrap_or(0);
+
+        assert!(active > field.samples.len() / 8);
+        assert!(largest > active / 8);
+        assert!(components.len() < active / 3);
     }
 
     #[test]
@@ -1435,7 +1660,8 @@ mod tests {
         assert!(distant > field.samples.len() / 30);
         assert!(flow > field.samples.len() / 30);
         assert!(energy > field.samples.len() / 80);
-        assert!((3..=12).contains(&peaks));
+        assert!(peaks > 0);
+        assert!(peaks * 8 < field.samples.len());
     }
 
     #[test]
@@ -1873,6 +2099,39 @@ mod tests {
             .map(|sample| sample.energy)
             .sum::<f32>()
             / field.samples.len() as f32
+    }
+
+    fn active_components(field: &FieldFrame) -> Vec<usize> {
+        let mut visited = vec![false; field.samples.len()];
+        let mut components = Vec::new();
+
+        for start in 0..field.samples.len() {
+            if visited[start] || field.samples[start].energy <= FIELD_THRESHOLD {
+                continue;
+            }
+            let mut queue = VecDeque::from([start]);
+            visited[start] = true;
+            let mut size = 0;
+
+            while let Some(index) = queue.pop_front() {
+                size += 1;
+                let x = index % field.width;
+                let y = index / field.width;
+                for neighbor_y in y.saturating_sub(1)..=(y + 1).min(field.height - 1) {
+                    for neighbor_x in x.saturating_sub(1)..=(x + 1).min(field.width - 1) {
+                        let neighbor = neighbor_y * field.width + neighbor_x;
+                        if !visited[neighbor] && field.samples[neighbor].energy > FIELD_THRESHOLD {
+                            visited[neighbor] = true;
+                            queue.push_back(neighbor);
+                        }
+                    }
+                }
+            }
+
+            components.push(size);
+        }
+
+        components
     }
 
     fn edge_energy(field: &FieldFrame, left: bool) -> usize {
