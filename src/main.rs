@@ -1,5 +1,8 @@
+mod animation;
 mod app;
+mod history;
 mod system;
+mod theme;
 mod ui;
 
 use std::{
@@ -72,25 +75,51 @@ fn run_app(
     collector: &mut SystemInfoCollector,
     app: &mut AppState,
 ) -> io::Result<()> {
-    let tick_rate = Duration::from_secs(1);
-    let mut last_tick = Instant::now() - tick_rate;
+    let collection_interval = Duration::from_secs(1);
+    let render_interval = Duration::from_millis(33);
+    let mut last_collection = Instant::now() - collection_interval;
+    let mut last_render = Instant::now() - render_interval;
+    let mut last_animation_update = Instant::now();
+    let mut render_pending = true;
 
     loop {
-        if last_tick.elapsed() >= tick_rate {
-            let info = collector.collect(Instant::now());
+        let now = Instant::now();
+        let mut collected = false;
 
-            app.update_cpu_history(info.cpu_usage);
-
-            terminal.draw(|frame| {
-                ui::dashboard::draw(frame, &info, app);
-            })?;
-
-            last_tick = Instant::now();
+        if last_collection.elapsed() >= collection_interval {
+            let info = collector.collect(now);
+            app.update(info);
+            last_collection = now;
+            collected = true;
+            render_pending = true;
         }
 
-        let timeout = tick_rate
-            .checked_sub(last_tick.elapsed())
+        let animation_delta = now.saturating_duration_since(last_animation_update);
+        last_animation_update = now;
+        if app.update_animations(animation_delta) {
+            render_pending = true;
+        }
+
+        let render_due = last_render.elapsed() >= render_interval;
+        if render_pending && (collected || render_due || !app.animations_active()) {
+            terminal.draw(|frame| {
+                ui::dashboard::draw_app(frame, app);
+            })?;
+            last_render = now;
+            render_pending = false;
+        }
+
+        let until_collection = collection_interval
+            .checked_sub(last_collection.elapsed())
             .unwrap_or(Duration::ZERO);
+        let until_render = render_interval
+            .checked_sub(last_render.elapsed())
+            .unwrap_or(Duration::ZERO);
+        let timeout = if app.animations_active() || render_pending {
+            until_collection.min(until_render)
+        } else {
+            until_collection
+        };
 
         if event::poll(timeout)? {
             loop {
