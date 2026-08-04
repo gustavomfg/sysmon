@@ -76,12 +76,14 @@ struct EnergySample {
     layer: usize,
     depth: f32,
     particle: bool,
+    particle_intensity: f32,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
 struct ParticlePoint {
     layer: usize,
     depth: f32,
+    intensity: f32,
     x: f32,
     y: f32,
 }
@@ -93,6 +95,8 @@ struct FieldFrame {
     particles: [ParticlePoint; PARTICLE_SEEDS.len()],
     particle_count: usize,
     particle_radius_scale: f32,
+    visual_intensity_scale: f32,
+    field_time: f32,
 }
 
 pub(crate) fn draw(frame: &mut Frame, area: Rect, app: &AppState, theme: &Theme, focused: bool) {
@@ -223,18 +227,25 @@ fn build_field(
     let breathing = pulse.breath();
     let phase = pulse.phase();
     let field_time = time + phase * 0.05 + pulse.input().volatility * 0.02;
+    let breathing_scale = if pulse.reduced_motion() {
+        1.0
+    } else {
+        0.95 + breathing * 0.10
+    };
     let mut field = FieldFrame {
         trajectory_points: [[(0.0, 0.0); CURVE_SAMPLES + 1]; TRAJECTORIES.len()],
         trajectory_count,
         particles: [ParticlePoint::default(); PARTICLE_SEEDS.len()],
         particle_count: particle_count(health, pulse),
         particle_radius_scale: if pulse.reduced_motion() { 0.75 } else { 1.0 },
+        visual_intensity_scale: if pulse.reduced_motion() { 0.72 } else { 1.0 },
+        field_time,
     };
 
     for (index, trajectory) in TRAJECTORIES.iter().take(trajectory_count).enumerate() {
         for sample_index in 0..=CURVE_SAMPLES {
             let progress = sample_index as f32 / CURVE_SAMPLES as f32;
-            field.trajectory_points[index][sample_index] = trajectory_point(
+            let point = trajectory_point(
                 progress,
                 width,
                 height,
@@ -243,6 +254,8 @@ fn build_field(
                 field_time + breathing * 0.02,
                 pulse,
             );
+            field.trajectory_points[index][sample_index] =
+                breathe_point(point, width, height, breathing_scale);
         }
     }
 
@@ -255,9 +268,12 @@ fn build_field(
         let (x, y) = trajectory_point(
             progress, width, height, trajectory, health, field_time, pulse,
         );
+        let (x, y) = breathe_point((x, y), width, height, breathing_scale);
+        let intensity = 0.62 + ((index as f32 * 1.73 + trajectory.phase).sin() * 0.5 + 0.5) * 0.38;
         field.particles[index] = ParticlePoint {
             layer,
             depth: trajectory.depth,
+            intensity,
             x,
             y,
         };
@@ -268,21 +284,29 @@ fn build_field(
 
 fn sample_at(x: f32, y: f32, health: PulseHealth, field: &FieldFrame) -> EnergySample {
     let mut strongest = EnergySample::default();
-    let curve_thickness = 0.65 + health.density() * 0.42 + health.pressure() * 0.10;
+    let curve_thickness =
+        (0.65 + health.density() * 0.42 + health.pressure() * 0.10) * field.visual_intensity_scale;
 
     for (index, trajectory) in TRAJECTORIES.iter().take(field.trajectory_count).enumerate() {
-        for &(curve_x, curve_y) in &field.trajectory_points[index] {
+        for (sample_index, &(curve_x, curve_y)) in field.trajectory_points[index].iter().enumerate()
+        {
             let distance = (x - curve_x).hypot(y - curve_y);
-            let thickness =
-                (trajectory.thickness * curve_thickness + trajectory.depth * 0.75).max(0.8);
-            let energy =
-                smoothstep(1.0 - distance / (thickness + 2.1)) * (0.50 + trajectory.depth * 0.50);
+            let progress = sample_index as f32 / CURVE_SAMPLES as f32;
+            let local_density = density_cluster(progress, *trajectory, field.field_time);
+            let thickness = (trajectory.thickness * curve_thickness * local_density
+                + trajectory.depth * 0.75)
+                .max(0.8);
+            let energy = smoothstep(1.0 - distance / (thickness + 2.1))
+                * (0.50 + trajectory.depth * 0.50)
+                * local_density
+                * field.visual_intensity_scale;
             if energy > strongest.energy {
                 strongest = EnergySample {
                     energy,
                     layer: index,
                     depth: trajectory.depth,
                     particle: false,
+                    particle_intensity: 0.0,
                 };
             }
         }
@@ -290,11 +314,16 @@ fn sample_at(x: f32, y: f32, health: PulseHealth, field: &FieldFrame) -> EnergyS
 
     for particle in &field.particles[..field.particle_count] {
         let radius = (0.75 + particle.depth * 0.95) * field.particle_radius_scale;
-        if (x - particle.x).hypot(y - particle.y) <= radius {
+        if (x - particle.x).hypot(y - particle.y) <= radius
+            && particle.intensity > strongest.particle_intensity
+        {
             strongest.layer = particle.layer;
             strongest.depth = particle.depth;
             strongest.particle = true;
-            strongest.energy = strongest.energy.max(0.86);
+            strongest.energy = strongest
+                .energy
+                .max((0.68 + particle.intensity * 0.20) * field.visual_intensity_scale);
+            strongest.particle_intensity = particle.intensity;
         }
     }
 
@@ -337,6 +366,21 @@ fn trajectory_point(
     (x.clamp(0.0, width), y.clamp(0.0, height))
 }
 
+fn breathe_point(point: (f32, f32), width: f32, height: f32, scale: f32) -> (f32, f32) {
+    (
+        (width * 0.5 + (point.0 - width * 0.5) * scale).clamp(0.0, width),
+        (height * 0.5 + (point.1 - height * 0.5) * scale).clamp(0.0, height),
+    )
+}
+
+fn density_cluster(progress: f32, trajectory: Trajectory, time: f32) -> f32 {
+    let first_center = 0.22 + trajectory.depth * 0.10;
+    let second_center = (0.73 - trajectory.depth * 0.08 + time * 0.006).rem_euclid(1.0);
+    let first = (-((progress - first_center) / 0.13).powi(2)).exp();
+    let second = (-((progress - second_center) / 0.18).powi(2)).exp();
+    (0.62 + first * 0.58 + second * 0.42).clamp(0.58, 1.55)
+}
+
 fn cubic_bezier(points: [(f32, f32); 4], progress: f32) -> (f32, f32) {
     let inverse = 1.0 - progress;
     let first = inverse * inverse * inverse;
@@ -375,11 +419,15 @@ fn sample_style(theme: &Theme, health: PulseHealth, sample: EnergySample) -> Sty
     let brightness = (0.28
         + sample.depth * 0.32
         + sample.energy * 0.40
-        + if sample.particle { 0.14 } else { 0.0 })
+        + if sample.particle {
+            0.10 + sample.particle_intensity * 0.20
+        } else {
+            0.0
+        })
     .clamp(0.0, 1.0);
     let style = Style::default().fg(scale_color(color, brightness));
 
-    if sample.particle {
+    if sample.particle && sample.particle_intensity > 0.80 {
         style.add_modifier(Modifier::BOLD)
     } else {
         style
@@ -539,6 +587,17 @@ mod tests {
         let second = sample_at(16.0, 10.0, health, &field);
 
         assert_eq!(first, second);
+        let intensities = field.particles[..field.particle_count]
+            .iter()
+            .map(|particle| particle.intensity)
+            .collect::<Vec<_>>();
+        let minimum = intensities.iter().copied().fold(f32::INFINITY, f32::min);
+        let maximum = intensities
+            .iter()
+            .copied()
+            .fold(f32::NEG_INFINITY, f32::max);
+        assert!(maximum - minimum > 0.10);
+
         let particle_is_visible = (0..32)
             .any(|x| (0..20).any(|y| sample_at(x as f32, y as f32, health, &field).particle));
         assert!(particle_is_visible);
