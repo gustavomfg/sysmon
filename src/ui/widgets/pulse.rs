@@ -27,6 +27,7 @@ const BRAILLE_DOTS: [(u16, u16, u8); 8] = [
 ];
 
 const FLOW_LAYERS: usize = 4;
+const FIELD_THRESHOLD: f32 = 0.05;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PulsePreset {
@@ -45,6 +46,7 @@ struct PresetParameters {
     particle_stride: usize,
     margin: f32,
     virtual_margin: f32,
+    diffusion_passes: usize,
 }
 
 impl PulsePreset {
@@ -58,6 +60,7 @@ impl PulsePreset {
                 particle_stride: 15,
                 margin: 0.08,
                 virtual_margin: 0.16,
+                diffusion_passes: 1,
             },
             Self::Standard => PresetParameters {
                 streams: 20,
@@ -67,6 +70,7 @@ impl PulsePreset {
                 particle_stride: 13,
                 margin: 0.06,
                 virtual_margin: 0.20,
+                diffusion_passes: 2,
             },
             Self::Widescreen => PresetParameters {
                 streams: 28,
@@ -76,6 +80,7 @@ impl PulsePreset {
                 particle_stride: 11,
                 margin: 0.045,
                 virtual_margin: 0.24,
+                diffusion_passes: 2,
             },
             Self::LargeWidescreen => PresetParameters {
                 streams: 36,
@@ -85,6 +90,7 @@ impl PulsePreset {
                 particle_stride: 10,
                 margin: 0.035,
                 virtual_margin: 0.27,
+                diffusion_passes: 3,
             },
         }
     }
@@ -133,6 +139,42 @@ impl FieldFrame {
         let x = x.min(self.width - 1);
         let y = y.min(self.height - 1);
         self.samples[y * self.width + x]
+    }
+
+    fn local_energy(&self, position: (f32, f32), radius: f32) -> f32 {
+        let center_x = position.0 * self.width.saturating_sub(1) as f32;
+        let center_y = position.1 * self.height.saturating_sub(1) as f32;
+        let radius = radius.max(1.0);
+        let left = (center_x - radius).floor().max(0.0) as usize;
+        let right = (center_x + radius)
+            .ceil()
+            .min(self.width.saturating_sub(1) as f32) as usize;
+        let top = (center_y - radius).floor().max(0.0) as usize;
+        let bottom = (center_y + radius)
+            .ceil()
+            .min(self.height.saturating_sub(1) as f32) as usize;
+        let mut energy = 0.0;
+        let mut weight = 0.0;
+
+        for y in top..=bottom {
+            for x in left..=right {
+                let distance = ((x as f32 - center_x).powi(2)
+                    + ((y as f32 - center_y) * self.dot_aspect).powi(2))
+                .sqrt();
+                if distance > radius {
+                    continue;
+                }
+                let local_weight = 1.0 - distance / radius;
+                energy += self.sample(x, y).energy * local_weight;
+                weight += local_weight;
+            }
+        }
+
+        if weight > 0.0 {
+            (energy / weight).clamp(0.0, 1.0)
+        } else {
+            0.0
+        }
     }
 
     fn deposit(
@@ -210,17 +252,60 @@ impl FieldFrame {
             self.deposit(position, local_energy, radius, layer, depth);
         }
     }
+
+    fn diffuse(&mut self, passes: usize, amount: f32) {
+        if passes == 0 {
+            return;
+        }
+
+        let amount = amount.clamp(0.0, 1.0);
+        let mut next = vec![EnergySample::default(); self.samples.len()];
+        for _ in 0..passes {
+            for y in 0..self.height {
+                for x in 0..self.width {
+                    let index = y * self.width + x;
+                    let current = self.samples[index];
+                    let mut neighborhood_energy = current.energy;
+                    let mut neighborhood_count = 1.0;
+                    let mut strongest = current;
+
+                    for neighbor_y in y.saturating_sub(1)..=(y + 1).min(self.height - 1) {
+                        for neighbor_x in x.saturating_sub(1)..=(x + 1).min(self.width - 1) {
+                            if neighbor_x == x && neighbor_y == y {
+                                continue;
+                            }
+                            let neighbor = self.samples[neighbor_y * self.width + neighbor_x];
+                            neighborhood_energy += neighbor.energy;
+                            neighborhood_count += 1.0;
+                            if neighbor.energy > strongest.energy {
+                                strongest = neighbor;
+                            }
+                        }
+                    }
+
+                    next[index] = EnergySample {
+                        energy: (current.energy * (1.0 - amount)
+                            + neighborhood_energy / neighborhood_count * amount)
+                            .clamp(0.0, 1.0),
+                        layer: strongest.layer,
+                        depth: current.depth * (1.0 - amount) + strongest.depth * amount,
+                    };
+                }
+            }
+            self.samples.clone_from(&next);
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
 struct StreamSpec {
     seed: (f32, f32),
-    target_y: f32,
     phase: f32,
     speed: f32,
     direction: f32,
     layer: usize,
     depth: f32,
+    edge_span: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -254,7 +339,7 @@ fn uses_braille(area: Rect) -> bool {
 }
 
 fn braille_lines(area: Rect, pulse: &PulseModel, theme: &Theme) -> Vec<Line<'static>> {
-    let width = usize::from(area.width.saturating_sub(4)).max(1);
+    let width = usize::from(area.width.saturating_sub(2)).max(1);
     let height = usize::from(area.height.saturating_sub(2)).max(1);
     let field = field_for_area(width, height, true, pulse);
     let health = pulse.health();
@@ -270,7 +355,7 @@ fn braille_lines(area: Rect, pulse: &PulseModel, theme: &Theme) -> Vec<Line<'sta
                     let x = cell_x * 2 + usize::from(dot_x);
                     let y = cell_y * 4 + usize::from(dot_y);
                     let sample = field.sample(x, y);
-                    if sample.energy > 0.05 {
+                    if sample.energy > FIELD_THRESHOLD {
                         mask |= 1 << bit;
                     }
                     if sample.energy > strongest.energy {
@@ -290,7 +375,7 @@ fn braille_lines(area: Rect, pulse: &PulseModel, theme: &Theme) -> Vec<Line<'sta
 }
 
 fn unicode_lines(area: Rect, pulse: &PulseModel, theme: &Theme) -> Vec<Line<'static>> {
-    let width = usize::from(area.width.saturating_sub(4)).max(1);
+    let width = usize::from(area.width.saturating_sub(2)).max(1);
     let height = usize::from(area.height.saturating_sub(2)).max(1);
     let field = field_for_area(width, height, false, pulse);
     let health = pulse.health();
@@ -360,7 +445,7 @@ fn build_field(
     let mut field = FieldFrame::new(width, height, braille);
     let parameters = preset.parameters();
     let active_streams = active_stream_count(parameters.streams, health, pulse);
-    let trail_steps = active_trail_steps(parameters.trail_steps, pulse);
+    let base_trail_steps = active_trail_steps(parameters.trail_steps, pulse);
     let geometry = FlowGeometry {
         aspect: domain_aspect(width, height, braille),
         step_size: parameters.step_size,
@@ -382,6 +467,15 @@ fn build_field(
             parameters.margin,
             parameters.virtual_margin,
         );
+        let trail_steps = if stream.edge_span {
+            edge_span_steps(
+                base_trail_steps,
+                parameters.step_size,
+                parameters.virtual_margin,
+            )
+        } else {
+            base_trail_steps
+        };
         let lead_steps = if pulse.reduced_motion() {
             0
         } else {
@@ -429,6 +523,10 @@ fn build_field(
         }
     }
 
+    let diffusion_amount = 0.18 + health.density() * 0.08;
+    apply_discharges(&mut field, health, field_time, pulse);
+    field.diffuse(parameters.diffusion_passes, diffusion_amount);
+
     field
 }
 
@@ -444,6 +542,57 @@ fn active_trail_steps(base: usize, pulse: &PulseModel) -> usize {
     } else {
         base
     }
+}
+
+fn apply_discharges(field: &mut FieldFrame, health: PulseHealth, time: f32, pulse: &PulseModel) {
+    if pulse.reduced_motion() || health.volatility() < 0.06 {
+        return;
+    }
+
+    let volatility = smoothstep((health.volatility() - 0.06) / 0.34);
+    let nodes = [(0.47, 0.46, 0.4), (0.56, 0.55, 2.2)];
+    for (index, (node_x, node_y, phase)) in nodes.into_iter().enumerate() {
+        let convergence = field.local_energy((node_x, node_y), 3.5);
+        let node_energy = smoothstep((convergence - 0.10) / 0.26) * volatility;
+        let cadence = ((time * (1.05 + index as f32 * 0.18) + phase).sin() * 0.5) + 0.5;
+        let burst = smoothstep((cadence - 0.72) / 0.28);
+        let discharge = node_energy * burst;
+        if discharge < 0.08 {
+            continue;
+        }
+
+        field.deposit(
+            (node_x, node_y),
+            discharge * 0.62,
+            1.35 + discharge * 1.2,
+            FLOW_LAYERS,
+            1.0,
+        );
+        let flow = flow_vector((node_x, node_y), time, health, field.dot_aspect);
+        let flow_angle = flow.1.atan2(flow.0);
+        for branch in 0..3 {
+            let branch_angle =
+                flow_angle + (branch as f32 - 1.0) * 0.75 + (time * 0.13 + phase).sin() * 0.12;
+            let length = 0.035 + discharge * (0.035 + branch as f32 * 0.008);
+            let endpoint = (
+                node_x + branch_angle.cos() * length,
+                node_y + branch_angle.sin() * length,
+            );
+            field.deposit_segment(
+                (node_x, node_y),
+                endpoint,
+                discharge * (0.20 - branch as f32 * 0.025),
+                0.62,
+                FLOW_LAYERS,
+                1.0,
+            );
+        }
+    }
+}
+
+fn edge_span_steps(base: usize, step_size: f32, virtual_margin: f32) -> usize {
+    let required_length = 1.65 + virtual_margin * 2.0;
+    base.max((required_length / step_size).ceil() as usize)
 }
 
 fn domain_aspect(width: usize, height: usize, braille: bool) -> f32 {
@@ -475,12 +624,12 @@ fn stream_spec(index: usize, count: usize, margin: f32, virtual_margin: f32) -> 
             },
             seed_y,
         ),
-        target_y: center + jitter * 0.02,
         phase,
         speed: 0.78 + hash01(index * 53 + 19) * 0.34,
         direction: if from_left { 1.0 } else { -1.0 },
         layer,
         depth: 0.27 + layer as f32 * 0.18 + hash01(index * 67 + 23) * 0.10,
+        edge_span: index < FLOW_LAYERS,
     }
 }
 
@@ -495,16 +644,16 @@ fn advect_steps(
     for step in 0..steps {
         let vector = flow_vector(
             position,
-            stream,
             time + step as f32 * 0.011,
             health,
             geometry.aspect,
         );
+        let direction = stream.direction;
         position.0 = wrap_virtual(
-            position.0 + vector.0 * geometry.step_size,
+            position.0 + vector.0 * geometry.step_size * direction,
             geometry.virtual_margin,
         );
-        position.1 += vector.1 * geometry.step_size;
+        position.1 += vector.1 * geometry.step_size * direction;
         position.1 = reflect(position.1, 0.025, 0.975);
     }
     position
@@ -515,27 +664,21 @@ fn wrap_virtual(value: f32, margin: f32) -> f32 {
     (value + margin).rem_euclid(span) - margin
 }
 
-fn flow_vector(
-    position: (f32, f32),
-    stream: StreamSpec,
-    time: f32,
-    health: PulseHealth,
-    aspect: f32,
-) -> (f32, f32) {
-    let phase = stream.phase + time * (0.06 + health.volatility() * 0.08);
+fn flow_vector(position: (f32, f32), time: f32, health: PulseHealth, aspect: f32) -> (f32, f32) {
+    let phase = time * (0.06 + health.volatility() * 0.08);
     let braid_phase = TAU * (position.0 * 0.83 + position.1 * 0.61) + phase;
     let bend_phase = TAU * (position.0 * 0.47 - position.1 * 0.92) - phase * 0.63;
-    let mut vx = stream.direction * (0.54 + braid_phase.sin() * 0.10);
-    let mut vy = braid_phase.cos() * (0.12 + health.amplitude() * 0.035)
-        + (stream.target_y - position.1) * 0.16;
+    let mut vx = 0.54 + braid_phase.sin() * 0.10;
+    let mut vy =
+        braid_phase.cos() * (0.12 + health.amplitude() * 0.035) + (0.5 - position.1) * 0.10;
 
-    vx += bend_phase.cos() * 0.055 * stream.direction;
+    vx += bend_phase.cos() * 0.055;
     vy += bend_phase.sin() * (0.09 + health.volatility() * 0.10);
 
     let vortices = [
         (0.30, 0.34, 1.0, 0.035),
         (0.68, 0.66, -1.0, 0.041),
-        (0.52, 0.50, 1.0 - stream.layer as f32 * 0.40, 0.026),
+        (0.52, 0.50, 0.75, 0.026),
     ];
     for (center_x, center_y, rotation, strength) in vortices {
         let dx = position.0 - center_x;
@@ -598,7 +741,9 @@ fn sample_style(theme: &Theme, health: PulseHealth, sample: EnergySample) -> Sty
         2 => theme.pulse_medium,
         _ => theme.pulse_high,
     };
-    let color = blend_color(base, layer_tint, 0.10 + sample.depth * 0.20);
+    let color = blend_color(base, layer_tint, 0.05 + sample.depth * 0.10);
+    let luminous = smoothstep((sample.energy - 0.72) / 0.28);
+    let color = blend_color(color, theme.text, luminous * (0.32 + sample.depth * 0.28));
     let brightness = (0.26 + sample.depth * 0.34 + sample.energy * 0.44).clamp(0.0, 1.0);
     Style::default().fg(scale_color(color, brightness))
 }
@@ -655,10 +800,13 @@ mod tests {
     use ratatui::layout::Rect;
 
     use super::{
-        EnergySample, FieldFrame, PulsePreset, braille_lines, build_field, field_for_area,
-        preset_for, unicode_lines, uses_braille,
+        EnergySample, FIELD_THRESHOLD, FieldFrame, PulsePreset, braille_lines, build_field,
+        field_for_area, preset_for, unicode_lines, uses_braille,
     };
-    use crate::{pulse::PulseModel, theme::Theme};
+    use crate::{
+        pulse::{HealthState, PulseInput, PulseModel},
+        theme::Theme,
+    };
 
     fn pulse() -> PulseModel {
         let mut pulse = PulseModel::new(false);
@@ -697,6 +845,8 @@ mod tests {
         let field = field_for_area(28, 8, true, &pulse);
         assert!(!braille.is_empty());
         assert!(!unicode.is_empty());
+        assert!(braille.iter().all(|line| line.spans.len() == 30));
+        assert!(unicode.iter().all(|line| line.spans.len() == 18));
         assert!(
             field
                 .samples
@@ -765,6 +915,91 @@ mod tests {
     }
 
     #[test]
+    fn guarantees_real_edge_coverage_across_health_and_time() {
+        let presets = [
+            PulsePreset::Standard,
+            PulsePreset::Widescreen,
+            PulsePreset::LargeWidescreen,
+        ];
+        let inputs = [
+            (
+                PulseInput {
+                    cpu: 0.05,
+                    memory: 0.10,
+                    gpu: None,
+                    network: 0.0,
+                    load: 0.05,
+                    volatility: 0.0,
+                },
+                HealthState::Calm,
+            ),
+            (
+                PulseInput {
+                    cpu: 0.45,
+                    memory: 0.50,
+                    gpu: None,
+                    network: 0.10,
+                    load: 0.30,
+                    volatility: 0.0,
+                },
+                HealthState::Active,
+            ),
+            (
+                PulseInput {
+                    cpu: 0.70,
+                    memory: 0.70,
+                    gpu: Some(0.30),
+                    network: 0.20,
+                    load: 0.60,
+                    volatility: 0.0,
+                },
+                HealthState::Busy,
+            ),
+        ];
+
+        for (input, expected_state) in inputs {
+            let mut pulse = PulseModel::new(false);
+            pulse.set_input(input);
+            assert_eq!(pulse.health().state(), expected_state);
+
+            for preset in presets {
+                for time in [0.0, 0.7, 1.9] {
+                    let field = build_field(160, 80, true, preset, pulse.health(), time, &pulse);
+                    let left_column = column_energy(&field, 0);
+                    let right_column = column_energy(&field, field.width - 1);
+                    let left_band = edge_energy(&field, true);
+                    let right_band = edge_energy(&field, false);
+
+                    assert!(
+                        left_column > 0,
+                        "left column is empty for {preset:?} at {time}"
+                    );
+                    assert!(
+                        right_column > 0,
+                        "right column is empty for {preset:?} at {time}"
+                    );
+                    assert!(
+                        left_band > 8,
+                        "left band is too sparse for {preset:?} at {time}"
+                    );
+                    assert!(
+                        right_band > 8,
+                        "right band is too sparse for {preset:?} at {time}"
+                    );
+                }
+            }
+        }
+
+        let mut reduced = PulseModel::new(true);
+        reduced.set_input(inputs[1].0);
+        for preset in presets {
+            let field = build_field(160, 80, true, preset, reduced.health(), 0.0, &reduced);
+            assert!(column_energy(&field, 0) > 0);
+            assert!(column_energy(&field, field.width - 1) > 0);
+        }
+    }
+
+    #[test]
     fn moving_field_changes_while_reduced_motion_is_stable() {
         let pulse = pulse();
         let preset = preset_for(80, 20);
@@ -810,8 +1045,18 @@ mod tests {
                 } else {
                     &row[row.len().saturating_sub(4)..]
                 };
-                edge.iter().filter(|sample| sample.energy > 0.05).count()
+                edge.iter()
+                    .filter(|sample| sample.energy > FIELD_THRESHOLD)
+                    .count()
             })
             .sum()
+    }
+
+    fn column_energy(field: &FieldFrame, column: usize) -> usize {
+        field
+            .samples
+            .chunks(field.width)
+            .filter(|row| row[column].energy > FIELD_THRESHOLD)
+            .count()
     }
 }
