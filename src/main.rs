@@ -16,6 +16,8 @@ mod widget;
 
 use std::{
     io,
+    sync::mpsc::{self, Receiver, Sender, TryRecvError},
+    thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
 
@@ -31,9 +33,34 @@ use crossterm::{
 
 use ratatui::{Terminal, backend::CrosstermBackend};
 
-use system::info::SystemInfoCollector;
+use system::info::{SystemInfo, SystemInfoCollector};
 
 struct TerminalGuard;
+
+enum CollectorCommand {
+    SetInterval(Duration),
+    Stop,
+}
+
+struct CollectorWorker {
+    commands: Sender<CollectorCommand>,
+    handle: Option<JoinHandle<()>>,
+}
+
+impl CollectorWorker {
+    fn set_interval(&self, interval: Duration) {
+        let _ = self.commands.send(CollectorCommand::SetInterval(interval));
+    }
+}
+
+impl Drop for CollectorWorker {
+    fn drop(&mut self) {
+        let _ = self.commands.send(CollectorCommand::Stop);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
 
 impl TerminalGuard {
     fn enter() -> io::Result<Self> {
@@ -133,34 +160,45 @@ fn main() -> io::Result<()> {
     let mut terminal = Terminal::new(backend)?;
     terminal.clear()?;
 
-    let mut collector = SystemInfoCollector::new();
+    let collector = SystemInfoCollector::new();
     let mut app = AppState::new();
 
-    run_app(&mut terminal, &mut collector, &mut app)
+    run_app(&mut terminal, collector, &mut app)
 }
 
 fn run_app(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    collector: &mut SystemInfoCollector,
+    collector: SystemInfoCollector,
     app: &mut AppState,
 ) -> io::Result<()> {
+    let (snapshots, collector_worker) = spawn_collector(collector, app.refresh_interval());
     let render_interval = Duration::from_millis(33);
-    let mut last_collection = Instant::now() - app.refresh_interval();
+    let snapshot_poll_interval = Duration::from_millis(50);
     let mut last_render = Instant::now() - render_interval;
     let mut last_animation_update = Instant::now();
     let mut render_pending = true;
+    let mut requested_collection_interval = app.refresh_interval();
 
     loop {
         let now = Instant::now();
-        let mut collected = false;
-        let collection_interval = app.refresh_interval();
-
-        if last_collection.elapsed() >= collection_interval {
-            let info = collector.collect(now);
-            app.update(info);
-            last_collection = now;
-            collected = true;
+        let mut received_snapshot = false;
+        loop {
+            match snapshots.try_recv() {
+                Ok(info) => {
+                    app.update(info);
+                    received_snapshot = true;
+                }
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => break,
+            }
+        }
+        if received_snapshot {
             render_pending = true;
+        }
+
+        if app.refresh_interval() != requested_collection_interval {
+            requested_collection_interval = app.refresh_interval();
+            collector_worker.set_interval(requested_collection_interval);
         }
 
         let animation_delta = now.saturating_duration_since(last_animation_update);
@@ -170,7 +208,7 @@ fn run_app(
         }
 
         let render_due = last_render.elapsed() >= render_interval;
-        if render_pending && (collected || render_due || !app.animations_active()) {
+        if render_pending && (received_snapshot || render_due || !app.animations_active()) {
             terminal.draw(|frame| {
                 ui::dashboard::draw_app(frame, app);
             })?;
@@ -178,16 +216,14 @@ fn run_app(
             render_pending = false;
         }
 
-        let until_collection = collection_interval
-            .checked_sub(last_collection.elapsed())
-            .unwrap_or(Duration::ZERO);
         let until_render = render_interval
             .checked_sub(last_render.elapsed())
             .unwrap_or(Duration::ZERO);
+        let until_snapshot_poll = snapshot_poll_interval;
         let timeout = if app.animations_active() || render_pending {
-            until_collection.min(until_render)
+            until_snapshot_poll.min(until_render)
         } else {
-            until_collection
+            until_snapshot_poll
         };
 
         if event::poll(timeout)? {
@@ -208,6 +244,54 @@ fn run_app(
                 if !event::poll(Duration::ZERO)? {
                     break;
                 }
+            }
+        }
+    }
+}
+
+fn spawn_collector(
+    mut collector: SystemInfoCollector,
+    interval: Duration,
+) -> (Receiver<SystemInfo>, CollectorWorker) {
+    let (snapshot_sender, snapshot_receiver) = mpsc::channel();
+    let (command_sender, command_receiver) = mpsc::channel();
+    let handle = thread::spawn(move || {
+        collection_loop(&mut collector, snapshot_sender, command_receiver, interval);
+    });
+
+    (
+        snapshot_receiver,
+        CollectorWorker {
+            commands: command_sender,
+            handle: Some(handle),
+        },
+    )
+}
+
+fn collection_loop(
+    collector: &mut SystemInfoCollector,
+    snapshots: Sender<SystemInfo>,
+    commands: Receiver<CollectorCommand>,
+    initial_interval: Duration,
+) {
+    let mut interval = initial_interval;
+    let mut next_collection = Instant::now();
+
+    loop {
+        let wait = next_collection.saturating_duration_since(Instant::now());
+        match commands.recv_timeout(wait) {
+            Ok(CollectorCommand::SetInterval(new_interval)) => {
+                interval = new_interval;
+                next_collection = Instant::now();
+            }
+            Ok(CollectorCommand::Stop) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                let collected_at = Instant::now();
+                let snapshot = collector.collect(collected_at);
+                if snapshots.send(snapshot).is_err() {
+                    break;
+                }
+                next_collection = collected_at + interval;
             }
         }
     }

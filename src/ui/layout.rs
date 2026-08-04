@@ -33,6 +33,10 @@ impl DashboardLayout {
         }
 
         let mode = layout_mode(area);
+        if mode == LayoutMode::Widescreen {
+            return Some(Self::widescreen(area, visibility));
+        }
+
         let page = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
@@ -128,6 +132,85 @@ impl DashboardLayout {
             footer: page[2],
         })
     }
+
+    fn widescreen(area: Rect, visibility: &WidgetVisibility) -> Self {
+        let page = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(3),
+                Constraint::Min(10),
+                Constraint::Length(1),
+            ])
+            .margin(1)
+            .spacing(1)
+            .split(area);
+        let columns = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Percentage(24),
+                Constraint::Percentage(52),
+                Constraint::Percentage(24),
+            ])
+            .spacing(1)
+            .split(page[1]);
+
+        let left_count = 2
+            + usize::from(visibility.is_visible(WidgetId::Memory))
+            + usize::from(visibility.is_visible(WidgetId::Gpu))
+            + usize::from(visibility.is_visible(WidgetId::Network));
+        let left = stack(columns[0], left_count);
+        let mut left_index = 0;
+        let cpu = left[left_index];
+        left_index += 1;
+        let memory = if visibility.is_visible(WidgetId::Memory) {
+            let area = left[left_index];
+            left_index += 1;
+            Some(area)
+        } else {
+            None
+        };
+        let gpu = if visibility.is_visible(WidgetId::Gpu) {
+            let area = left[left_index];
+            left_index += 1;
+            Some(area)
+        } else {
+            None
+        };
+        let network = if visibility.is_visible(WidgetId::Network) {
+            let area = left[left_index];
+            left_index += 1;
+            Some(area)
+        } else {
+            None
+        };
+        let system = left[left_index];
+
+        let right = stack(columns[2], 4);
+
+        Self {
+            header: page[0],
+            pulse: columns[1],
+            system,
+            cpu,
+            memory,
+            gpu,
+            processes: right[0],
+            timeline: right[1],
+            storage: right[2],
+            history: right[3],
+            network,
+            footer: page[2],
+        }
+    }
+}
+
+fn stack(area: Rect, count: usize) -> Vec<Rect> {
+    Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(vec![Constraint::Ratio(1, count as u32); count])
+        .spacing(1)
+        .split(area)
+        .to_vec()
 }
 
 fn layout_mode(area: Rect) -> LayoutMode {
@@ -217,6 +300,52 @@ mod tests {
             .expect("layout should fit without network");
         assert!(layout.network.is_none());
         assert!(layout.timeline.width > 0);
+    }
+
+    #[test]
+    fn widescreen_gives_the_pulse_the_hero_region() {
+        let visibility = WidgetVisibility::default();
+        let layout = DashboardLayout::new(Rect::new(0, 0, 160, 40), &visibility)
+            .expect("widescreen layout should fit");
+
+        assert!(layout.pulse.width > layout.cpu.width);
+        assert!(layout.pulse.width > layout.processes.width);
+        assert!(layout.pulse.height > layout.cpu.height);
+        assert!(layout.cpu.x < layout.pulse.x);
+        assert!(layout.pulse.x < layout.processes.x);
+        assert!(layout.pulse.height > layout.cpu.height * 3);
+    }
+
+    #[test]
+    fn widescreen_reclaims_hidden_metric_space() {
+        let visible = WidgetVisibility::default();
+        let full = DashboardLayout::new(Rect::new(0, 0, 160, 40), &visible)
+            .expect("widescreen layout should fit");
+
+        let mut hidden = visible;
+        hidden.toggle(WidgetId::Gpu);
+        hidden.toggle(WidgetId::Memory);
+        let compacted = DashboardLayout::new(Rect::new(0, 0, 160, 40), &hidden)
+            .expect("widescreen layout should fit with hidden widgets");
+
+        assert!(compacted.gpu.is_none());
+        assert!(compacted.memory.is_none());
+        assert!(compacted.cpu.height > full.cpu.height);
+        assert!(compacted.network.is_some());
+    }
+
+    #[test]
+    fn preserves_valid_regions_across_layout_variants() {
+        let visibility = WidgetVisibility::default();
+        for (width, height) in [(80, 24), (120, 40), (160, 40)] {
+            let layout = DashboardLayout::new(Rect::new(0, 0, width, height), &visibility)
+                .expect("representative layout should fit");
+            assert!(layout.pulse.width > 0);
+            assert!(layout.pulse.height > 0);
+            assert!(layout.cpu.width > 0);
+            assert!(layout.processes.width > 0);
+            assert!(layout.timeline.height > 0);
+        }
     }
 
     #[test]

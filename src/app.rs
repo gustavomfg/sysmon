@@ -133,7 +133,11 @@ impl AppState {
     }
 
     pub fn update_animations(&mut self, delta: Duration) -> bool {
-        self.cpu_tween.update(delta) || self.memory_tween.update(delta) || self.pulse.update(delta)
+        let cpu_changed = self.cpu_tween.update(delta);
+        let memory_changed = self.memory_tween.update(delta);
+        let pulse_changed = self.pulse.update(delta);
+
+        cpu_changed || memory_changed || pulse_changed
     }
 
     pub fn animations_active(&self) -> bool {
@@ -650,6 +654,16 @@ mod tests {
                 .iter()
                 .any(|event| event.contains("Reduced motion enabled"))
         );
+    }
+
+    #[test]
+    fn advances_pulse_while_metric_tweens_are_active() {
+        let mut app = AppState::new();
+        app.update(snapshot(10.0));
+        app.update(snapshot(90.0));
+
+        assert!(app.update_animations(std::time::Duration::from_millis(100)));
+        assert!(app.pulse().time_seconds() >= 0.099);
     }
 
     fn run_command(app: &mut AppState, query: &str) {

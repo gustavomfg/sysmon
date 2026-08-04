@@ -37,15 +37,32 @@ impl PulseInput {
         }
     }
 
-    pub fn intensity(self) -> f32 {
-        let base = self.cpu * 0.35 + self.memory * 0.20 + self.network * 0.10 + self.load * 0.15;
+    pub fn pressure(self) -> f32 {
+        let base = self.cpu * CPU_WEIGHT
+            + self.memory * MEMORY_WEIGHT
+            + self.network * NETWORK_WEIGHT
+            + self.load * LOAD_WEIGHT;
 
         match self.gpu {
-            Some(gpu) => (base + gpu * 0.20).clamp(0.0, 1.0),
-            None => (base / 0.80).clamp(0.0, 1.0),
+            Some(gpu) => base + gpu * GPU_WEIGHT,
+            None => {
+                let redistributed = self.cpu * 0.04 + self.memory * 0.08 + self.load * 0.03;
+                base + redistributed
+            }
         }
     }
+
+    pub fn intensity(self) -> f32 {
+        (self.pressure() + self.volatility * VOLATILITY_WEIGHT).clamp(0.0, 1.0)
+    }
 }
+
+const CPU_WEIGHT: f32 = 0.27;
+const MEMORY_WEIGHT: f32 = 0.30;
+const NETWORK_WEIGHT: f32 = 0.10;
+const LOAD_WEIGHT: f32 = 0.18;
+const GPU_WEIGHT: f32 = 0.15;
+const VOLATILITY_WEIGHT: f32 = 0.10;
 
 impl Default for PulseInput {
     fn default() -> Self {
@@ -60,10 +77,84 @@ impl Default for PulseInput {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HealthState {
+    Calm,
+    Active,
+    Busy,
+    Critical,
+}
+
+impl HealthState {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Calm => "Calm",
+            Self::Active => "Active",
+            Self::Busy => "Busy",
+            Self::Critical => "Critical",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PulseHealth {
+    state: HealthState,
+    intensity: f32,
+    pressure: f32,
+    volatility: f32,
+}
+
+impl PulseHealth {
+    fn new(intensity: f32, pressure: f32, volatility: f32) -> Self {
+        let state = match intensity {
+            value if value < 0.30 => HealthState::Calm,
+            value if value < 0.55 => HealthState::Active,
+            value if value < 0.78 => HealthState::Busy,
+            _ => HealthState::Critical,
+        };
+
+        Self {
+            state,
+            intensity,
+            pressure,
+            volatility,
+        }
+    }
+
+    pub fn state(self) -> HealthState {
+        self.state
+    }
+
+    pub fn intensity(self) -> f32 {
+        self.intensity
+    }
+
+    pub fn pressure(self) -> f32 {
+        self.pressure
+    }
+
+    pub fn volatility(self) -> f32 {
+        self.volatility
+    }
+
+    pub fn speed(self) -> f32 {
+        1.0 + self.intensity * 1.8 + self.volatility * 0.45
+    }
+
+    pub fn amplitude(self) -> f32 {
+        0.75 + self.pressure * 0.30 + self.volatility * 0.20
+    }
+
+    pub fn density(self) -> f32 {
+        (0.30 + self.intensity * 0.70 + self.volatility * 0.20).clamp(0.0, 1.0)
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct PulseModel {
     input: PulseInput,
     intensity: Tween,
+    volatility: Tween,
     elapsed: Duration,
     reduced_motion: bool,
     has_input: bool,
@@ -76,6 +167,7 @@ impl PulseModel {
         Self {
             input: PulseInput::default(),
             intensity: Tween::new(0.0, PULSE_DURATION, reduced_motion),
+            volatility: Tween::new(0.0, PULSE_DURATION, reduced_motion),
             elapsed: Duration::ZERO,
             reduced_motion,
             has_input: false,
@@ -87,12 +179,18 @@ impl PulseModel {
     }
 
     pub fn set_input(&mut self, input: PulseInput) {
-        let target = f64::from(input.intensity());
+        let target_intensity = f64::from(input.intensity());
+        let target_volatility = f64::from(input.volatility.clamp(0.0, 1.0));
         self.input = input;
+
         if self.has_input {
-            self.intensity.set_target_clamped(target, 0.0, 1.0);
+            self.intensity
+                .set_target_clamped(target_intensity, 0.0, 1.0);
+            self.volatility
+                .set_target_clamped(target_volatility, 0.0, 1.0);
         } else {
-            self.intensity.snap_to(target);
+            self.intensity.snap_to(target_intensity);
+            self.volatility.snap_to(target_volatility);
             self.has_input = true;
         }
     }
@@ -100,6 +198,7 @@ impl PulseModel {
     pub fn set_reduced_motion(&mut self, reduced_motion: bool) {
         self.reduced_motion = reduced_motion;
         self.intensity.set_reduced_motion(reduced_motion);
+        self.volatility.set_reduced_motion(reduced_motion);
     }
 
     pub fn update(&mut self, delta: Duration) -> bool {
@@ -108,7 +207,14 @@ impl PulseModel {
         }
 
         self.elapsed = self.elapsed.saturating_add(delta);
-        self.intensity.update(delta) || (!self.reduced_motion && !delta.is_zero())
+        let intensity_changed = self.intensity.update(delta);
+        let volatility_changed = self.volatility.update(delta);
+
+        intensity_changed || volatility_changed || self.is_ambient_active(delta)
+    }
+
+    fn is_ambient_active(&self, delta: Duration) -> bool {
+        !self.reduced_motion && !delta.is_zero()
     }
 
     pub fn is_active(&self) -> bool {
@@ -119,12 +225,20 @@ impl PulseModel {
         self.intensity.current() as f32
     }
 
+    pub fn volatility(&self) -> f32 {
+        self.volatility.current() as f32
+    }
+
+    pub fn health(&self) -> PulseHealth {
+        PulseHealth::new(self.intensity(), self.input.pressure(), self.volatility())
+    }
+
     pub fn breath(&self) -> f32 {
         if self.reduced_motion || !self.has_input {
             return 0.5;
         }
 
-        let speed = 1.2 + self.intensity() * 2.0;
+        let speed = self.health().speed();
         (self.elapsed.as_secs_f32() * speed).sin() * 0.5 + 0.5
     }
 
@@ -132,9 +246,16 @@ impl PulseModel {
         if self.reduced_motion || !self.has_input {
             0.0
         } else {
-            (self.elapsed.as_secs_f32() * (1.2 + self.intensity() * 2.0))
-                .rem_euclid(std::f32::consts::TAU)
+            (self.elapsed.as_secs_f32() * self.health().speed()).rem_euclid(std::f32::consts::TAU)
         }
+    }
+
+    pub fn time_seconds(&self) -> f32 {
+        self.elapsed.as_secs_f32()
+    }
+
+    pub fn reduced_motion(&self) -> bool {
+        self.reduced_motion
     }
 }
 
@@ -188,7 +309,7 @@ fn gpu_usage(snapshot: &SystemInfo) -> Option<f32> {
 mod tests {
     use std::time::Duration;
 
-    use super::{PulseInput, PulseModel};
+    use super::{HealthState, PulseInput, PulseModel};
     use crate::system::info::SystemInfo;
 
     #[test]
@@ -213,6 +334,38 @@ mod tests {
     }
 
     #[test]
+    fn gives_memory_a_meaningful_health_weight() {
+        let memory = PulseInput {
+            memory: 1.0,
+            ..PulseInput::default()
+        };
+        let cpu = PulseInput {
+            cpu: 1.0,
+            ..PulseInput::default()
+        };
+
+        assert!(memory.pressure() > cpu.pressure());
+    }
+
+    #[test]
+    fn maps_intensity_to_stable_health_states() {
+        let mut pulse = PulseModel::new(false);
+        pulse.set_input(PulseInput::default());
+        assert_eq!(pulse.health().state(), HealthState::Calm);
+
+        pulse.set_input(PulseInput {
+            cpu: 1.0,
+            memory: 1.0,
+            gpu: Some(1.0),
+            network: 1.0,
+            load: 1.0,
+            volatility: 0.0,
+        });
+        pulse.update(Duration::from_millis(300));
+        assert_eq!(pulse.health().state(), HealthState::Critical);
+    }
+
+    #[test]
     fn pulse_animation_is_time_based_and_respects_reduced_motion() {
         let mut animated = PulseModel::new(false);
         animated.set_input(PulseInput {
@@ -231,7 +384,34 @@ mod tests {
         let mut reduced = PulseModel::new(true);
         reduced.set_input(animated.input());
         assert_eq!(reduced.breath(), 0.5);
+        assert_eq!(reduced.phase(), 0.0);
         assert!(!reduced.is_active());
+    }
+
+    #[test]
+    fn updates_intensity_and_volatility_during_the_same_tick() {
+        let mut pulse = PulseModel::new(false);
+        pulse.set_input(PulseInput {
+            cpu: 0.1,
+            memory: 0.1,
+            gpu: None,
+            network: 0.0,
+            load: 0.0,
+            volatility: 0.0,
+        });
+        pulse.set_input(PulseInput {
+            cpu: 0.9,
+            memory: 0.8,
+            gpu: None,
+            network: 0.2,
+            load: 0.7,
+            volatility: 1.0,
+        });
+
+        pulse.update(Duration::from_millis(100));
+
+        assert!(pulse.intensity() > 0.0);
+        assert!(pulse.volatility() > 0.0);
     }
 
     fn snapshot(cpu_usage: f32, total_ram: f64, used_ram: f64) -> SystemInfo {
