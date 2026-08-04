@@ -1,77 +1,91 @@
 use crate::app::AppState;
-use crate::system::info::SystemInfo;
+use crate::theme::Theme;
 
 use ratatui::Frame;
 
-use super::{
-    layout::DashboardLayout,
-    renderer::{BACKGROUND, SURFACE, fill},
-    widgets,
-};
+use super::{layout::DashboardLayout, renderer::fill, widgets};
 
 pub fn draw_app(frame: &mut Frame, app: &AppState) {
     if let Some(info) = app.snapshot() {
-        draw(frame, info, app);
+        draw_with_theme(frame, info, app, app.theme());
     } else {
-        frame.render_widget(fill(BACKGROUND), frame.area());
+        frame.render_widget(fill(app.theme().background), frame.area());
     }
 }
 
-pub fn draw(frame: &mut Frame, info: &SystemInfo, app: &AppState) {
-    frame.render_widget(fill(BACKGROUND), frame.area());
+fn draw_with_theme(
+    frame: &mut Frame,
+    info: &crate::system::info::SystemInfo,
+    app: &AppState,
+    theme: &Theme,
+) {
+    frame.render_widget(fill(theme.background), frame.area());
 
     let Some(layout) = DashboardLayout::new(frame.area()) else {
-        widgets::overview::draw_minimum_size_message(frame);
+        widgets::overview::draw_minimum_size_message(frame, theme);
         return;
     };
 
     for area in layout.page.iter().copied() {
-        frame.render_widget(fill(BACKGROUND), area);
+        frame.render_widget(fill(theme.background), area);
     }
 
-    widgets::overview::draw(frame, layout.page[0], info);
+    widgets::overview::draw(
+        frame,
+        layout.page[0],
+        info,
+        app.cpu_usage(),
+        app.memory_usage_percent(),
+        theme,
+    );
 
     for area in layout.main.iter().copied() {
-        frame.render_widget(fill(BACKGROUND), area);
+        frame.render_widget(fill(theme.background), area);
     }
 
     for area in layout.top.iter().copied() {
-        frame.render_widget(fill(SURFACE), area);
+        frame.render_widget(fill(theme.surface), area);
     }
 
     for area in layout.middle.iter().copied() {
-        frame.render_widget(fill(SURFACE), area);
+        frame.render_widget(fill(theme.surface), area);
     }
 
     for area in layout.middle_left.iter().copied() {
-        frame.render_widget(fill(SURFACE), area);
+        frame.render_widget(fill(theme.surface), area);
     }
 
     for area in layout.system.iter().copied() {
-        frame.render_widget(fill(SURFACE), area);
+        frame.render_widget(fill(theme.surface), area);
     }
 
-    widgets::system::draw_info(frame, layout.system[0], info);
-    widgets::cpu::draw(frame, layout.system[1], info);
-    widgets::gpu::draw(frame, layout.top[1], info);
-    widgets::memory::draw(frame, layout.middle_left[0], info);
-    widgets::processes::draw(frame, layout.middle[1], info);
+    widgets::system::draw_info(frame, layout.system[0], info, theme);
+    widgets::cpu::draw(frame, layout.system[1], app.cpu_usage(), theme);
+    widgets::gpu::draw(frame, layout.top[1], info, theme);
+    widgets::memory::draw(
+        frame,
+        layout.middle_left[0],
+        info,
+        app.memory_usage_percent(),
+        theme,
+    );
+    widgets::processes::draw(frame, layout.middle[1], info, theme);
 
     for area in layout.bottom.iter().copied() {
-        frame.render_widget(fill(SURFACE), area);
+        frame.render_widget(fill(theme.surface), area);
     }
 
-    widgets::storage::draw(frame, layout.middle_left[1], info);
-    widgets::history::draw(frame, layout.bottom[0], info, app);
-    widgets::network::draw(frame, layout.bottom[1], info);
-    widgets::footer::draw(frame, layout.page[2]);
+    widgets::storage::draw(frame, layout.middle_left[1], info, theme);
+    widgets::history::draw(frame, layout.bottom[0], app, theme);
+    widgets::network::draw(frame, layout.bottom[1], info, theme);
+    widgets::footer::draw(frame, layout.page[2], theme);
 }
 
 #[cfg(test)]
 mod tests {
     use ratatui::{Terminal, backend::TestBackend};
 
-    use super::draw;
+    use super::draw_app;
     use crate::{
         app::AppState,
         system::info::SystemInfo,
@@ -100,14 +114,14 @@ mod tests {
     fn renders_dashboard_at_representative_terminal_sizes() {
         let info = sample_system_info();
         let mut app = AppState::new();
-        app.update_cpu_history(info.cpu_usage);
+        app.update(info);
 
         for (width, height) in [(80, 24), (120, 40)] {
             let backend = TestBackend::new(width, height);
             let mut terminal = Terminal::new(backend).expect("test terminal should be created");
 
             terminal
-                .draw(|frame| draw(frame, &info, &app))
+                .draw(|frame| draw_app(frame, &app))
                 .expect("dashboard should render");
 
             let rendered = terminal
@@ -118,6 +132,7 @@ mod tests {
                 .map(|cell| cell.symbol())
                 .collect::<String>();
             assert!(rendered.contains("SYSMON"));
+            assert!(rendered.contains("CPU Trend"));
         }
     }
 
@@ -126,8 +141,11 @@ mod tests {
         let backend = TestBackend::new(60, 20);
         let mut terminal = Terminal::new(backend).expect("test terminal should be created");
 
+        let mut app = AppState::new();
+        app.update(sample_system_info());
+
         terminal
-            .draw(|frame| draw(frame, &sample_system_info(), &AppState::new()))
+            .draw(|frame| draw_app(frame, &app))
             .expect("minimum-size message should render");
 
         let rendered = terminal
