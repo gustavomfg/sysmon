@@ -44,6 +44,7 @@ struct PresetParameters {
     density: f32,
     particle_stride: usize,
     margin: f32,
+    virtual_margin: f32,
 }
 
 impl PulsePreset {
@@ -56,6 +57,7 @@ impl PulsePreset {
                 density: 0.68,
                 particle_stride: 15,
                 margin: 0.08,
+                virtual_margin: 0.16,
             },
             Self::Standard => PresetParameters {
                 streams: 20,
@@ -64,6 +66,7 @@ impl PulsePreset {
                 density: 0.78,
                 particle_stride: 13,
                 margin: 0.06,
+                virtual_margin: 0.20,
             },
             Self::Widescreen => PresetParameters {
                 streams: 28,
@@ -72,6 +75,7 @@ impl PulsePreset {
                 density: 0.86,
                 particle_stride: 11,
                 margin: 0.045,
+                virtual_margin: 0.24,
             },
             Self::LargeWidescreen => PresetParameters {
                 streams: 36,
@@ -80,6 +84,7 @@ impl PulsePreset {
                 density: 0.92,
                 particle_stride: 10,
                 margin: 0.035,
+                virtual_margin: 0.27,
             },
         }
     }
@@ -138,7 +143,12 @@ impl FieldFrame {
         layer: usize,
         depth: f32,
     ) {
-        let center_x = position.0.clamp(0.0, 1.0) * (self.width.saturating_sub(1) as f32);
+        if !position.0.is_finite() || !position.1.is_finite() || !(0.0..=1.0).contains(&position.0)
+        {
+            return;
+        }
+
+        let center_x = position.0 * (self.width.saturating_sub(1) as f32);
         let center_y = position.1.clamp(0.0, 1.0) * (self.height.saturating_sub(1) as f32);
         let radius = radius.max(0.25);
         let left = (center_x - radius).floor().max(0.0) as usize;
@@ -211,6 +221,13 @@ struct StreamSpec {
     direction: f32,
     layer: usize,
     depth: f32,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct FlowGeometry {
+    aspect: f32,
+    step_size: f32,
+    virtual_margin: f32,
 }
 
 pub(crate) fn draw(frame: &mut Frame, area: Rect, app: &AppState, theme: &Theme, focused: bool) {
@@ -344,7 +361,11 @@ fn build_field(
     let parameters = preset.parameters();
     let active_streams = active_stream_count(parameters.streams, health, pulse);
     let trail_steps = active_trail_steps(parameters.trail_steps, pulse);
-    let domain_aspect = domain_aspect(width, height, braille);
+    let geometry = FlowGeometry {
+        aspect: domain_aspect(width, height, braille),
+        step_size: parameters.step_size,
+        virtual_margin: parameters.virtual_margin,
+    };
     let motion = if pulse.reduced_motion() { 0.0 } else { 1.0 };
     let breathing = if pulse.reduced_motion() {
         1.0
@@ -355,7 +376,12 @@ fn build_field(
     let field_time = time + pulse.phase() * 0.025 + input.network * 0.018 + input.load * 0.012;
 
     for stream_index in 0..active_streams {
-        let stream = stream_spec(stream_index, active_streams, parameters.margin);
+        let stream = stream_spec(
+            stream_index,
+            active_streams,
+            parameters.margin,
+            parameters.virtual_margin,
+        );
         let lead_steps = if pulse.reduced_motion() {
             0
         } else {
@@ -367,8 +393,7 @@ fn build_field(
             stream,
             field_time,
             health,
-            domain_aspect,
-            parameters.step_size,
+            geometry,
         );
 
         for trail_index in 0..trail_steps {
@@ -395,8 +420,7 @@ fn build_field(
                 stream,
                 field_time + progress * 0.12,
                 health,
-                domain_aspect,
-                parameters.step_size,
+                geometry,
             );
             let start = breathe_position(position, breathing, motion);
             let end = breathe_position(next_position, breathing, motion);
@@ -427,7 +451,7 @@ fn domain_aspect(width: usize, height: usize, braille: bool) -> f32 {
     (height as f32 / width.max(1) as f32 * dot_aspect).clamp(0.22, 3.5)
 }
 
-fn stream_spec(index: usize, count: usize, margin: f32) -> StreamSpec {
+fn stream_spec(index: usize, count: usize, margin: f32, virtual_margin: f32) -> StreamSpec {
     let layer = index % FLOW_LAYERS;
     let lane = index / FLOW_LAYERS;
     let lane_count = count.div_ceil(FLOW_LAYERS).max(1);
@@ -440,9 +464,17 @@ fn stream_spec(index: usize, count: usize, margin: f32) -> StreamSpec {
         (center + (lane_position - 0.5) * spread + jitter * 0.035).clamp(margin, 1.0 - margin);
     let from_left = layer.is_multiple_of(2);
     let phase = hash01(index * 41 + 13) * TAU;
+    let edge_offset = hash01(index * 71 + 31) * 0.035;
 
     StreamSpec {
-        seed: (if from_left { margin } else { 1.0 - margin }, seed_y),
+        seed: (
+            if from_left {
+                -virtual_margin - edge_offset
+            } else {
+                1.0 + virtual_margin + edge_offset
+            },
+            seed_y,
+        ),
         target_y: center + jitter * 0.02,
         phase,
         speed: 0.78 + hash01(index * 53 + 19) * 0.34,
@@ -458,16 +490,29 @@ fn advect_steps(
     stream: StreamSpec,
     time: f32,
     health: PulseHealth,
-    aspect: f32,
-    step_size: f32,
+    geometry: FlowGeometry,
 ) -> (f32, f32) {
     for step in 0..steps {
-        let vector = flow_vector(position, stream, time + step as f32 * 0.011, health, aspect);
-        position.0 = (position.0 + vector.0 * step_size).rem_euclid(1.0);
-        position.1 += vector.1 * step_size;
+        let vector = flow_vector(
+            position,
+            stream,
+            time + step as f32 * 0.011,
+            health,
+            geometry.aspect,
+        );
+        position.0 = wrap_virtual(
+            position.0 + vector.0 * geometry.step_size,
+            geometry.virtual_margin,
+        );
+        position.1 += vector.1 * geometry.step_size;
         position.1 = reflect(position.1, 0.025, 0.975);
     }
     position
+}
+
+fn wrap_virtual(value: f32, margin: f32) -> f32 {
+    let span = 1.0 + margin * 2.0;
+    (value + margin).rem_euclid(span) - margin
 }
 
 fn flow_vector(
@@ -508,7 +553,7 @@ fn flow_vector(
 fn breathe_position(position: (f32, f32), scale: f32, motion: f32) -> (f32, f32) {
     let scale = 1.0 + (scale - 1.0) * motion;
     (
-        (0.5 + (position.0 - 0.5) * scale).clamp(0.015, 0.985),
+        0.5 + (position.0 - 0.5) * scale,
         (0.5 + (position.1 - 0.5) * scale).clamp(0.015, 0.985),
     )
 }
@@ -610,8 +655,8 @@ mod tests {
     use ratatui::layout::Rect;
 
     use super::{
-        EnergySample, PulsePreset, braille_lines, build_field, field_for_area, preset_for,
-        unicode_lines, uses_braille,
+        EnergySample, FieldFrame, PulsePreset, braille_lines, build_field, field_for_area,
+        preset_for, unicode_lines, uses_braille,
     };
     use crate::{pulse::PulseModel, theme::Theme};
 
@@ -692,6 +737,34 @@ mod tests {
     }
 
     #[test]
+    fn virtual_domain_keeps_both_edges_connected_for_all_presets() {
+        let pulse = pulse();
+        let health = pulse.health();
+        let presets = [
+            PulsePreset::Compact,
+            PulsePreset::Standard,
+            PulsePreset::Widescreen,
+            PulsePreset::LargeWidescreen,
+        ];
+
+        for preset in presets {
+            let field = build_field(160, 80, true, preset, health, 0.0, &pulse);
+            let left_edge = edge_energy(&field, true);
+            let right_edge = edge_energy(&field, false);
+
+            assert!(left_edge > 0, "left edge is empty for {preset:?}");
+            assert!(right_edge > 0, "right edge is empty for {preset:?}");
+            assert_eq!(field.samples.len(), field.width * field.height);
+            assert!(
+                field
+                    .samples
+                    .iter()
+                    .all(|sample| (0.0..=1.0).contains(&sample.energy))
+            );
+        }
+    }
+
+    #[test]
     fn moving_field_changes_while_reduced_motion_is_stable() {
         let pulse = pulse();
         let preset = preset_for(80, 20);
@@ -725,5 +798,20 @@ mod tests {
                 .count()
                 > 3
         );
+    }
+
+    fn edge_energy(field: &FieldFrame, left: bool) -> usize {
+        field
+            .samples
+            .chunks(field.width)
+            .map(|row| {
+                let edge = if left {
+                    &row[..4.min(row.len())]
+                } else {
+                    &row[row.len().saturating_sub(4)..]
+                };
+                edge.iter().filter(|sample| sample.energy > 0.05).count()
+            })
+            .sum()
     }
 }
