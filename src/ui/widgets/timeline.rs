@@ -1,7 +1,7 @@
 use crate::{
     theme::Theme,
     timeline::Timeline,
-    ui::renderer::{card, fit},
+    ui::renderer::{fit, panel},
 };
 
 use ratatui::{
@@ -37,6 +37,6 @@ pub(crate) fn draw(
 
     let timeline_widget = Paragraph::new(lines)
         .style(Style::default().bg(theme.surface))
-        .block(card(theme, "Timeline", focused));
+        .block(panel(theme, "Timeline", focused));
     frame.render_widget(timeline_widget, area);
 }

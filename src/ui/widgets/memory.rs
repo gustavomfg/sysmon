@@ -1,7 +1,7 @@
 use crate::{
     system::info::SystemInfo,
     theme::Theme,
-    ui::renderer::{card, label, meter, usage_color},
+    ui::renderer::{label, meter, panel, usage_color},
 };
 
 use ratatui::{
@@ -23,7 +23,8 @@ pub(crate) fn draw(
     let ram_percent = memory_percent.clamp(0.0, 100.0) as u16;
 
     let mut ram_line = vec![Span::styled("RAM ", label(theme))];
-    ram_line.extend(meter(theme, ram_percent, 28));
+    let meter_width = usize::from(area.width.saturating_sub(18)).clamp(8, 28);
+    ram_line.extend(meter(theme, ram_percent, meter_width));
     ram_line.push(Span::styled(
         format!(" {:>3}%", ram_percent),
         usage_color(theme, ram_percent),
@@ -31,8 +32,8 @@ pub(crate) fn draw(
 
     let ram = Paragraph::new(Line::from(ram_line))
         .alignment(Alignment::Center)
-        .style(Style::default().bg(theme.background))
-        .block(card(
+        .style(Style::default().bg(theme.surface))
+        .block(panel(
             theme,
             format!(
                 "RAM {:.1}/{:.1}GB  Swap {:.1}/{:.1}GB",

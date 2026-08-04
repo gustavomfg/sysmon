@@ -1,7 +1,7 @@
 use crate::{
     system::info::SystemInfo,
     theme::Theme,
-    ui::renderer::{card, metric_line},
+    ui::renderer::{metric_line, panel},
 };
 
 use ratatui::{Frame, style::Style, widgets::Paragraph};
@@ -35,7 +35,7 @@ pub(crate) fn draw_info(
         ),
     ])
     .style(Style::default().fg(theme.text).bg(theme.surface))
-    .block(card(theme, "System", focused));
+    .block(panel(theme, "System", focused));
 
     frame.render_widget(system_info, area);
 }

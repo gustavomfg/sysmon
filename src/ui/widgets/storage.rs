@@ -1,7 +1,7 @@
 use crate::{
     system::info::SystemInfo,
     theme::Theme,
-    ui::renderer::{card, disk_usage, fit, label, section_header, usage_color, value},
+    ui::renderer::{disk_usage, fit, label, panel, section_header, usage_color, value},
 };
 
 use ratatui::{
@@ -50,7 +50,7 @@ pub(crate) fn draw(
 ) {
     let disks = Paragraph::new(lines(info, area.width, theme))
         .style(Style::default().bg(theme.surface))
-        .block(card(theme, "Storage", focused));
+        .block(panel(theme, "Storage", focused));
 
     frame.render_widget(disks, area);
 }

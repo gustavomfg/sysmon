@@ -12,7 +12,7 @@ use ratatui::{
     widgets::{Paragraph, Wrap},
 };
 
-use super::super::renderer::{brand, card, chip, format_uptime, muted, usage_color, value};
+use super::super::renderer::{brand, card, chip, format_uptime, muted, panel, usage_color, value};
 
 pub(crate) fn draw_minimum_size_message(frame: &mut Frame, theme: &Theme) {
     let area = frame.area();
@@ -61,7 +61,7 @@ pub(crate) fn draw(
         chip(format!("UP {}", format_uptime(info.uptime)), value(theme)),
     ]))
     .alignment(Alignment::Center)
-    .block(card(theme, "overview", focused));
+    .block(panel(theme, "overview", focused));
 
     frame.render_widget(title, area);
 }
