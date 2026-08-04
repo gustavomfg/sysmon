@@ -1,43 +1,19 @@
-v0.2
+Phase 1
+1. Widget architecture
+2. Theme engine
+3. State refactor
 
-Core rewrite
+Phase 2
+4. Animation engine
+5. History engine
+6. Layout manager
 
-State management
+Phase 3
+7. Command palette
+8. Timeline
+9. Focus mode
 
-Animation engine
-
-Theme engine
-
-Configuration
-
---------------------------------
-
-v0.3
-
-Timeline
-
-History
-
-Command Palette
-
-Widget system
-
---------------------------------
-
-v0.4
-
-Kitty backend
-
-Graphics
-
-Particles
-
-Heatmaps
-
---------------------------------
-
-v1.0
-
-Plugin API
-
-Stable release
+Phase 4
+10. Kitty backend
+11. Particle renderer
+12. Pulse visualization
