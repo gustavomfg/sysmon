@@ -4,39 +4,34 @@ use ratatui::{
     widgets::{Block, BorderType, Borders, Padding},
 };
 
-pub(crate) const ACCENT: Color = Color::Cyan;
-pub(crate) const ACCENT_ALT: Color = Color::Magenta;
-pub(crate) const OK: Color = Color::Green;
-pub(crate) const WARN: Color = Color::Yellow;
-pub(crate) const DANGER: Color = Color::Red;
-pub(crate) const BACKGROUND: Color = Color::Black;
-pub(crate) const SURFACE: Color = Color::Black;
-pub(crate) const TEXT: Color = Color::Gray;
+use crate::theme::Theme;
 
-pub(crate) fn usage_color(value: u16) -> Style {
+pub(crate) fn usage_color(theme: &Theme, value: u16) -> Style {
     match value {
-        0..=50 => Style::default().fg(OK),
-        51..=80 => Style::default().fg(WARN),
-        _ => Style::default().fg(DANGER).add_modifier(Modifier::BOLD),
+        0..=50 => Style::default().fg(theme.success),
+        51..=80 => Style::default().fg(theme.warning),
+        _ => Style::default()
+            .fg(theme.danger)
+            .add_modifier(Modifier::BOLD),
     }
 }
 
-pub(crate) fn muted() -> Style {
-    Style::default().fg(Color::DarkGray)
+pub(crate) fn muted(theme: &Theme) -> Style {
+    Style::default().fg(theme.text_muted)
 }
 
-pub(crate) fn label() -> Style {
-    Style::default().fg(Color::DarkGray)
+pub(crate) fn label(theme: &Theme) -> Style {
+    Style::default().fg(theme.text_muted)
 }
 
-pub(crate) fn value() -> Style {
-    Style::default().fg(Color::White)
+pub(crate) fn value(theme: &Theme) -> Style {
+    Style::default().fg(theme.text)
 }
 
-pub(crate) fn brand() -> Style {
+pub(crate) fn brand(theme: &Theme) -> Style {
     Style::default()
-        .fg(Color::Black)
-        .bg(ACCENT)
+        .fg(theme.background)
+        .bg(theme.secondary)
         .add_modifier(Modifier::BOLD)
 }
 
@@ -44,16 +39,18 @@ pub(crate) fn chip(text: impl Into<String>, style: Style) -> Span<'static> {
     Span::styled(format!(" {} ", text.into()), style)
 }
 
-pub(crate) fn card(title: impl Into<String>) -> Block<'static> {
+pub(crate) fn card(theme: &Theme, title: impl Into<String>) -> Block<'static> {
     Block::default()
         .title(Span::styled(
             format!("  {}  ", title.into()),
-            Style::default().fg(ACCENT_ALT).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(theme.primary)
+                .add_modifier(Modifier::BOLD),
         ))
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(Color::DarkGray))
-        .style(Style::default().bg(SURFACE))
+        .border_style(Style::default().fg(theme.border))
+        .style(Style::default().bg(theme.surface))
         .padding(Padding::horizontal(1))
 }
 
@@ -62,36 +59,39 @@ pub(crate) fn fill(color: Color) -> Block<'static> {
 }
 
 pub(crate) fn metric_line(
+    theme: &Theme,
     label_text: impl Into<String>,
     value_text: impl Into<String>,
 ) -> Line<'static> {
     Line::from(vec![
-        Span::styled(label_text.into(), label()),
-        Span::styled(value_text.into(), value()),
+        Span::styled(label_text.into(), label(theme)),
+        Span::styled(value_text.into(), value(theme)),
     ])
 }
 
-pub(crate) fn section_header(columns: Vec<(&str, usize)>) -> Line<'static> {
+pub(crate) fn section_header(theme: &Theme, columns: Vec<(&str, usize)>) -> Line<'static> {
     Line::from(
         columns
             .into_iter()
             .map(|(text, width)| {
                 Span::styled(
                     format!("{text:<width$}"),
-                    Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(theme.secondary)
+                        .add_modifier(Modifier::BOLD),
                 )
             })
             .collect::<Vec<Span>>(),
     )
 }
 
-pub(crate) fn meter(value: u16, width: usize) -> Vec<Span<'static>> {
+pub(crate) fn meter(theme: &Theme, value: u16, width: usize) -> Vec<Span<'static>> {
     let filled = ((value as usize * width) / 100).min(width);
     vec![
-        Span::styled("[", muted()),
-        Span::styled("#".repeat(filled), usage_color(value)),
-        Span::styled("-".repeat(width - filled), muted()),
-        Span::styled("]", muted()),
+        Span::styled("[", muted(theme)),
+        Span::styled("#".repeat(filled), usage_color(theme, value)),
+        Span::styled("-".repeat(width - filled), muted(theme)),
+        Span::styled("]", muted(theme)),
     ]
 }
 

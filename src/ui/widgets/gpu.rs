@@ -1,5 +1,6 @@
 use crate::{
     system::info::SystemInfo,
+    theme::Theme,
     ui::renderer::{card, metric_line, muted, value},
 };
 
@@ -10,9 +11,9 @@ use ratatui::{
     widgets::Paragraph,
 };
 
-fn lines(info: &SystemInfo) -> Vec<Line<'static>> {
+fn lines(info: &SystemInfo, theme: &Theme) -> Vec<Line<'static>> {
     if info.gpus.is_empty() {
-        return vec![Line::styled("GPU não encontrada", muted())];
+        return vec![Line::styled("GPU não encontrada", muted(theme))];
     }
 
     info.gpus
@@ -22,9 +23,10 @@ fn lines(info: &SystemInfo) -> Vec<Line<'static>> {
             [
                 Line::styled(
                     format!("GPU {}  {}", index + 1, gpu.name),
-                    value().add_modifier(Modifier::BOLD),
+                    value(theme).add_modifier(Modifier::BOLD),
                 ),
                 metric_line(
+                    theme,
                     "  ",
                     format!(
                         "Temp {}  Uso {}  VRAM {}",
@@ -36,10 +38,15 @@ fn lines(info: &SystemInfo) -> Vec<Line<'static>> {
         .collect()
 }
 
-pub(crate) fn draw(frame: &mut Frame, area: ratatui::layout::Rect, info: &SystemInfo) {
-    let gpu = Paragraph::new(lines(info))
-        .style(Style::default().bg(ratatui::style::Color::Black))
-        .block(card("GPU"));
+pub(crate) fn draw(
+    frame: &mut Frame,
+    area: ratatui::layout::Rect,
+    info: &SystemInfo,
+    theme: &Theme,
+) {
+    let gpu = Paragraph::new(lines(info, theme))
+        .style(Style::default().bg(theme.surface))
+        .block(card(theme, "GPU"));
 
     frame.render_widget(gpu, area);
 }

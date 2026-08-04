@@ -1,22 +1,31 @@
 use crate::{
     system::info::SystemInfo,
-    ui::renderer::{SURFACE, TEXT, card, metric_line},
+    theme::Theme,
+    ui::renderer::{card, metric_line},
 };
 
 use ratatui::{Frame, style::Style, widgets::Paragraph};
 
-pub(crate) fn draw_info(frame: &mut Frame, area: ratatui::layout::Rect, info: &SystemInfo) {
+pub(crate) fn draw_info(
+    frame: &mut Frame,
+    area: ratatui::layout::Rect,
+    info: &SystemInfo,
+    theme: &Theme,
+) {
     let system_info = Paragraph::new(vec![
         metric_line(
+            theme,
             "OS      ",
             format!("{}  kernel {}", info.os_name, info.kernel),
         ),
-        metric_line("CPU     ", info.cpu_name.clone()),
+        metric_line(theme, "CPU     ", info.cpu_name.clone()),
         metric_line(
+            theme,
             "THREADS ",
             format!("{} cores  {} processes", info.cpu_cores, info.processes),
         ),
         metric_line(
+            theme,
             "LOAD    ",
             format!(
                 "{:.2}  {:.2}  {:.2}",
@@ -24,8 +33,8 @@ pub(crate) fn draw_info(frame: &mut Frame, area: ratatui::layout::Rect, info: &S
             ),
         ),
     ])
-    .style(Style::default().fg(TEXT).bg(SURFACE))
-    .block(card("System"));
+    .style(Style::default().fg(theme.text).bg(theme.surface))
+    .block(card(theme, "System"));
 
     frame.render_widget(system_info, area);
 }

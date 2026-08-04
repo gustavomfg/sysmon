@@ -1,6 +1,7 @@
 use crate::{
     system::info::SystemInfo,
-    ui::renderer::{OK, WARN, card, fit, section_header, value},
+    theme::Theme,
+    ui::renderer::{card, fit, section_header, value},
 };
 
 use ratatui::{
@@ -10,34 +11,38 @@ use ratatui::{
     widgets::Paragraph,
 };
 
-fn lines(info: &SystemInfo, area_width: u16) -> Vec<Line<'static>> {
+fn lines(info: &SystemInfo, area_width: u16, theme: &Theme) -> Vec<Line<'static>> {
     let interface_width = usize::from(area_width.saturating_sub(29)).clamp(7, 14);
-    let mut lines = vec![section_header(vec![
-        ("IFACE", interface_width),
-        ("DOWN", 13),
-        ("UP", 12),
-    ])];
+    let mut lines = vec![section_header(
+        theme,
+        vec![("IFACE", interface_width), ("DOWN", 13), ("UP", 12)],
+    )];
 
     lines.extend(info.networks.iter().map(|network| {
         Line::from(vec![
-            Span::styled(fit(&network.interface, interface_width), value()),
+            Span::styled(fit(&network.interface, interface_width), value(theme)),
             Span::styled(
                 format!("{:>8.2} MB/s ", network.received_per_sec),
-                Style::default().fg(OK),
+                Style::default().fg(theme.success),
             ),
             Span::styled(
                 format!("{:>7.2} MB/s", network.transmitted_per_sec),
-                Style::default().fg(WARN),
+                Style::default().fg(theme.warning),
             ),
         ])
     }));
     lines
 }
 
-pub(crate) fn draw(frame: &mut Frame, area: ratatui::layout::Rect, info: &SystemInfo) {
-    let network = Paragraph::new(lines(info, area.width))
-        .style(Style::default().bg(ratatui::style::Color::Black))
-        .block(card("Network"));
+pub(crate) fn draw(
+    frame: &mut Frame,
+    area: ratatui::layout::Rect,
+    info: &SystemInfo,
+    theme: &Theme,
+) {
+    let network = Paragraph::new(lines(info, area.width, theme))
+        .style(Style::default().bg(theme.surface))
+        .block(card(theme, "Network"));
 
     frame.render_widget(network, area);
 }

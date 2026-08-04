@@ -1,5 +1,6 @@
 use crate::{
     system::info::SystemInfo,
+    theme::Theme,
     ui::{MIN_DASHBOARD_HEIGHT, MIN_DASHBOARD_WIDTH},
 };
 
@@ -11,11 +12,9 @@ use ratatui::{
     widgets::{Paragraph, Wrap},
 };
 
-use super::super::renderer::{
-    brand, card, chip, format_uptime, muted, usage_color, usage_percent, value,
-};
+use super::super::renderer::{brand, card, chip, format_uptime, muted, usage_color, value};
 
-pub(crate) fn draw_minimum_size_message(frame: &mut Frame) {
+pub(crate) fn draw_minimum_size_message(frame: &mut Frame, theme: &Theme) {
     let area = frame.area();
     let message = Paragraph::new(format!(
         "Janela muito pequena: {}x{}.\nO Sysmon requer ao menos {}x{}.",
@@ -23,23 +22,31 @@ pub(crate) fn draw_minimum_size_message(frame: &mut Frame) {
     ))
     .alignment(Alignment::Center)
     .wrap(Wrap { trim: true })
-    .block(card("Sysmon"));
+    .block(card(theme, "Sysmon"));
     frame.render_widget(message, area);
 }
 
-pub(crate) fn draw(frame: &mut Frame, area: ratatui::layout::Rect, info: &SystemInfo) {
+pub(crate) fn draw(
+    frame: &mut Frame,
+    area: ratatui::layout::Rect,
+    info: &SystemInfo,
+    cpu_usage: f64,
+    memory_percent: f64,
+    theme: &Theme,
+) {
+    let memory_used = info.total_ram * memory_percent.clamp(0.0, 100.0) / 100.0;
     let title = Paragraph::new(Line::from(vec![
         Span::raw(" "),
-        chip("SYSMON", brand()),
+        chip("SYSMON", brand(theme)),
         Span::raw("  "),
         chip(
-            format!("CPU {:.1}%", info.cpu_usage),
-            usage_color(info.cpu_usage as u16).add_modifier(Modifier::BOLD),
+            format!("CPU {:.1}%", cpu_usage),
+            usage_color(theme, cpu_usage as u16).add_modifier(Modifier::BOLD),
         ),
         Span::raw(" "),
         chip(
-            format!("RAM {:.1}/{:.1}GB", info.used_ram, info.total_ram),
-            usage_color(usage_percent(info.used_ram, info.total_ram) as u16),
+            format!("RAM {:.1}/{:.1}GB", memory_used, info.total_ram),
+            usage_color(theme, memory_percent as u16),
         ),
         Span::raw(" "),
         chip(
@@ -47,13 +54,13 @@ pub(crate) fn draw(frame: &mut Frame, area: ratatui::layout::Rect, info: &System
                 "LOAD {:.2} {:.2} {:.2}",
                 info.load_average.0, info.load_average.1, info.load_average.2
             ),
-            muted(),
+            muted(theme),
         ),
         Span::raw(" "),
-        chip(format!("UP {}", format_uptime(info.uptime)), value()),
+        chip(format!("UP {}", format_uptime(info.uptime)), value(theme)),
     ]))
     .alignment(Alignment::Center)
-    .block(card("overview"));
+    .block(card(theme, "overview"));
 
     frame.render_widget(title, area);
 }

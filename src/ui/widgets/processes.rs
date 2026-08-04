@@ -1,5 +1,6 @@
 use crate::{
     system::info::SystemInfo,
+    theme::Theme,
     ui::renderer::{card, fit, section_header, usage_color, value},
 };
 
@@ -10,34 +11,38 @@ use ratatui::{
     widgets::Paragraph,
 };
 
-fn lines(info: &SystemInfo, area_width: u16) -> Vec<Line<'static>> {
+fn lines(info: &SystemInfo, area_width: u16, theme: &Theme) -> Vec<Line<'static>> {
     let process_width = usize::from(area_width.saturating_sub(20)).clamp(8, 24);
-    let mut lines = vec![section_header(vec![
-        ("PROCESS", process_width),
-        ("MEM", 9),
-        ("CPU", 5),
-    ])];
+    let mut lines = vec![section_header(
+        theme,
+        vec![("PROCESS", process_width), ("MEM", 9), ("CPU", 5)],
+    )];
 
     lines.extend(info.processes_list.iter().map(|process| {
         Line::from(vec![
-            Span::styled(fit(&process.name, process_width), value()),
+            Span::styled(fit(&process.name, process_width), value(theme)),
             Span::styled(
                 format!("{:>7.1}M ", process.memory),
-                Style::default().fg(ratatui::style::Color::DarkGray),
+                Style::default().fg(theme.text_muted),
             ),
             Span::styled(
                 format!("{:>5.1}%", process.cpu_usage),
-                usage_color(process.cpu_usage as u16),
+                usage_color(theme, process.cpu_usage as u16),
             ),
         ])
     }));
     lines
 }
 
-pub(crate) fn draw(frame: &mut Frame, area: ratatui::layout::Rect, info: &SystemInfo) {
-    let processes = Paragraph::new(lines(info, area.width))
-        .style(Style::default().bg(ratatui::style::Color::Black))
-        .block(card("Top Processes"));
+pub(crate) fn draw(
+    frame: &mut Frame,
+    area: ratatui::layout::Rect,
+    info: &SystemInfo,
+    theme: &Theme,
+) {
+    let processes = Paragraph::new(lines(info, area.width, theme))
+        .style(Style::default().bg(theme.surface))
+        .block(card(theme, "Top Processes"));
 
     frame.render_widget(processes, area);
 }

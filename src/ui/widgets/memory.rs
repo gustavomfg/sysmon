@@ -1,6 +1,7 @@
 use crate::{
     system::info::SystemInfo,
-    ui::renderer::{BACKGROUND, card, label, meter, usage_color, usage_percent},
+    theme::Theme,
+    ui::renderer::{card, label, meter, usage_color},
 };
 
 use ratatui::{
@@ -11,23 +12,32 @@ use ratatui::{
     widgets::Paragraph,
 };
 
-pub(crate) fn draw(frame: &mut Frame, area: ratatui::layout::Rect, info: &SystemInfo) {
-    let ram_percent = usage_percent(info.used_ram, info.total_ram) as u16;
+pub(crate) fn draw(
+    frame: &mut Frame,
+    area: ratatui::layout::Rect,
+    info: &SystemInfo,
+    memory_percent: f64,
+    theme: &Theme,
+) {
+    let ram_percent = memory_percent.clamp(0.0, 100.0) as u16;
 
-    let mut ram_line = vec![Span::styled("RAM ", label())];
-    ram_line.extend(meter(ram_percent, 28));
+    let mut ram_line = vec![Span::styled("RAM ", label(theme))];
+    ram_line.extend(meter(theme, ram_percent, 28));
     ram_line.push(Span::styled(
         format!(" {:>3}%", ram_percent),
-        usage_color(ram_percent),
+        usage_color(theme, ram_percent),
     ));
 
     let ram = Paragraph::new(Line::from(ram_line))
         .alignment(Alignment::Center)
-        .style(Style::default().bg(BACKGROUND))
-        .block(card(format!(
-            "RAM {:.1}/{:.1}GB  Swap {:.1}/{:.1}GB",
-            info.used_ram, info.total_ram, info.used_swap, info.total_swap
-        )));
+        .style(Style::default().bg(theme.background))
+        .block(card(
+            theme,
+            format!(
+                "RAM {:.1}/{:.1}GB  Swap {:.1}/{:.1}GB",
+                info.used_ram, info.total_ram, info.used_swap, info.total_swap
+            ),
+        ));
 
     frame.render_widget(ram, area);
 }
