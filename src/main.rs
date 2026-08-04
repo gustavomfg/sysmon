@@ -7,6 +7,7 @@ mod export;
 mod focus;
 mod history;
 mod process_search;
+mod pulse;
 mod system;
 mod theme;
 mod timeline;
