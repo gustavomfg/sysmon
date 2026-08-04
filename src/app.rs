@@ -3,7 +3,7 @@ use std::time::Duration;
 use crate::{
     action::Action,
     animation::Tween,
-    command_palette::{Command, CommandPaletteState},
+    command_palette::{Command, CommandPaletteState, CommandStatus},
     focus::{FocusState, FocusTarget},
     history::{History, Metric},
     system::info::SystemInfo,
@@ -121,13 +121,13 @@ impl AppState {
             Action::OpenPalette => {
                 if !self.palette.is_open() {
                     self.palette.open();
-                    self.timeline.record("Command Palette opened");
+                    self.timeline.record("Opened Command Palette");
                 }
             }
             Action::ClosePalette => {
                 if self.palette.is_open() {
                     self.palette.close();
-                    self.timeline.record("Command Palette closed");
+                    self.timeline.record("Closed Command Palette");
                 }
             }
             Action::PaletteUp => self.palette.move_selection(-1),
@@ -137,7 +137,8 @@ impl AppState {
             Action::PaletteSubmit => {
                 if let Some(command) = self.palette.selected_command() {
                     self.palette.close();
-                    self.execute_command(command);
+                    self.timeline.record("Closed Command Palette");
+                    return self.execute_command(command);
                 }
             }
             Action::FocusNext => {
@@ -198,12 +199,38 @@ impl AppState {
         self.history.record(Metric::Gpu, gpu_usage);
     }
 
-    fn execute_command(&mut self, command: Command) {
-        self.timeline.record(format!(
-            "{} unavailable: {}",
-            command.label(),
-            command.unavailable_reason()
-        ));
+    fn execute_command(&mut self, command: Command) -> bool {
+        match command.status() {
+            CommandStatus::Available => match command {
+                Command::Quit => {
+                    self.timeline.record("Executed: Quit");
+                    true
+                }
+                Command::ShowTimeline => {
+                    self.focus.set(FocusTarget::Timeline);
+                    self.timeline.record("Executed: Show Timeline");
+                    false
+                }
+                Command::ToggleFocusMode => {
+                    if self.focus_active() {
+                        self.focus.clear();
+                    } else {
+                        self.focus.set(FocusTarget::Overview);
+                    }
+                    self.timeline.record("Executed: Toggle Focus Mode");
+                    false
+                }
+                _ => false,
+            },
+            CommandStatus::Planned => {
+                if let Some(reason) = command.planned_reason() {
+                    self.timeline
+                        .record(format!("Unavailable: {} — {reason}", command.label()));
+                }
+                false
+            }
+            CommandStatus::Hidden => false,
+        }
     }
 }
 
@@ -246,7 +273,7 @@ mod tests {
     }
 
     #[test]
-    fn dispatches_palette_commands_and_focus_actions_to_state() {
+    fn dispatches_available_and_planned_palette_commands_to_state() {
         let mut app = AppState::new();
 
         assert!(app.dispatch(Action::Quit));
@@ -254,17 +281,29 @@ mod tests {
         assert!(app.is_focused(FocusTarget::Overview));
         app.dispatch(Action::OpenPalette);
         assert!(app.palette().is_open());
-        for _ in 0..5 {
-            app.dispatch(Action::PaletteDown);
-        }
-        app.dispatch(Action::PaletteSubmit);
+        app.dispatch(Action::PaletteDown);
+        assert!(!app.dispatch(Action::PaletteSubmit));
         assert!(!app.palette().is_open());
+        assert!(app.is_focused(FocusTarget::Timeline));
         assert!(
             app.timeline()
                 .events()
                 .last()
                 .unwrap()
-                .contains("Open Config")
+                .contains("Executed: Show Timeline")
+        );
+
+        app.dispatch(Action::OpenPalette);
+        for character in "settings".chars() {
+            app.dispatch(Action::PaletteCharacter(character));
+        }
+        assert!(!app.dispatch(Action::PaletteSubmit));
+        assert!(
+            app.timeline()
+                .events()
+                .last()
+                .unwrap()
+                .contains("Unavailable: Open Settings")
         );
     }
 

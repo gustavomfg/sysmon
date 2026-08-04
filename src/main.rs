@@ -61,6 +61,9 @@ fn action_for_event(event: Event, palette_open: bool, focus_active: bool) -> Opt
 
     if palette_open {
         return match key.code {
+            KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                Some(Action::ClosePalette)
+            }
             KeyCode::Esc => Some(Action::ClosePalette),
             KeyCode::Up => Some(Action::PaletteUp),
             KeyCode::Down => Some(Action::PaletteDown),

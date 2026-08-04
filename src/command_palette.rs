@@ -1,42 +1,103 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Command {
-    ToggleGpu,
+    Quit,
+    ShowTimeline,
+    ToggleFocusMode,
     ChangeTheme,
+    ToggleGpuWidget,
     RestartWidget,
     ExportSnapshot,
     SearchProcess,
-    OpenConfig,
+    OpenSettings,
+    ToggleMemoryWidget,
+    ToggleNetworkWidget,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandStatus {
+    Available,
+    Planned,
+    Hidden,
 }
 
 impl Command {
-    pub const ALL: [Self; 6] = [
-        Self::ToggleGpu,
+    pub const ALL: [Self; 11] = [
+        Self::Quit,
+        Self::ShowTimeline,
+        Self::ToggleFocusMode,
         Self::ChangeTheme,
+        Self::ToggleGpuWidget,
         Self::RestartWidget,
         Self::ExportSnapshot,
         Self::SearchProcess,
-        Self::OpenConfig,
+        Self::OpenSettings,
+        Self::ToggleMemoryWidget,
+        Self::ToggleNetworkWidget,
     ];
 
     pub fn label(self) -> &'static str {
         match self {
-            Self::ToggleGpu => "Toggle GPU",
+            Self::Quit => "Quit",
+            Self::ShowTimeline => "Show Timeline",
+            Self::ToggleFocusMode => "Toggle Focus Mode",
             Self::ChangeTheme => "Change Theme",
+            Self::ToggleGpuWidget => "Toggle GPU Widget",
             Self::RestartWidget => "Restart Widget",
             Self::ExportSnapshot => "Export Snapshot",
             Self::SearchProcess => "Search Process",
-            Self::OpenConfig => "Open Config",
+            Self::OpenSettings => "Open Settings",
+            Self::ToggleMemoryWidget => "Toggle Memory Widget",
+            Self::ToggleNetworkWidget => "Toggle Network Widget",
         }
     }
 
-    pub fn unavailable_reason(self) -> &'static str {
+    pub fn status(self) -> CommandStatus {
         match self {
-            Self::ToggleGpu => "widget visibility is outside Phase 3",
-            Self::ChangeTheme => "theme selection is not implemented",
-            Self::RestartWidget => "widget restart lifecycle is not defined",
-            Self::ExportSnapshot => "snapshot export is not implemented",
-            Self::SearchProcess => "process search is not implemented",
-            Self::OpenConfig => "configuration support is not implemented",
+            Self::Quit | Self::ShowTimeline | Self::ToggleFocusMode => CommandStatus::Available,
+            Self::ChangeTheme
+            | Self::ToggleGpuWidget
+            | Self::RestartWidget
+            | Self::ExportSnapshot
+            | Self::SearchProcess
+            | Self::OpenSettings => CommandStatus::Planned,
+            Self::ToggleMemoryWidget | Self::ToggleNetworkWidget => CommandStatus::Hidden,
+        }
+    }
+
+    pub fn planned_reason(self) -> Option<&'static str> {
+        let reason = match self {
+            Self::ChangeTheme => "theme selection is planned for a future phase",
+            Self::ToggleGpuWidget => "widget visibility is planned for a future phase",
+            Self::RestartWidget => "widget restart is planned for a future phase",
+            Self::ExportSnapshot => "snapshot export is planned for a future phase",
+            Self::SearchProcess => "process search is planned for a future phase",
+            Self::OpenSettings => "settings are planned for a future phase",
+            _ => return None,
+        };
+        Some(reason)
+    }
+
+    fn matches(self, query: &str) -> bool {
+        self.label().to_ascii_lowercase().contains(query)
+            || self
+                .keywords()
+                .iter()
+                .any(|keyword| keyword.contains(query))
+    }
+
+    fn keywords(self) -> &'static [&'static str] {
+        match self {
+            Self::ShowTimeline => &["timeline", "events"],
+            Self::ToggleFocusMode => &["focus", "focused"],
+            Self::ToggleGpuWidget => &["gpu", "graphics"],
+            Self::OpenSettings => &["settings", "config", "configuration"],
+            Self::ChangeTheme => &["theme", "colors", "colour"],
+            Self::RestartWidget => &["restart", "reload"],
+            Self::ExportSnapshot => &["export", "snapshot"],
+            Self::SearchProcess => &["search", "process", "processes"],
+            Self::Quit => &["exit", "close"],
+            Self::ToggleMemoryWidget => &["memory", "ram"],
+            Self::ToggleNetworkWidget => &["network", "net"],
         }
     }
 }
@@ -108,7 +169,8 @@ impl CommandPaletteState {
         let query = self.query.to_ascii_lowercase();
         Command::ALL
             .into_iter()
-            .filter(|command| command.label().to_ascii_lowercase().contains(&query))
+            .filter(|command| command.status() != CommandStatus::Hidden)
+            .filter(|command| command.matches(query.as_str()))
             .collect()
     }
 
@@ -123,30 +185,45 @@ impl CommandPaletteState {
 
 #[cfg(test)]
 mod tests {
-    use super::{Command, CommandPaletteState};
+    use super::{Command, CommandPaletteState, CommandStatus};
 
     #[test]
-    fn exposes_only_the_documented_commands() {
-        assert_eq!(Command::ALL.len(), 6);
-        assert_eq!(Command::ALL[0].label(), "Toggle GPU");
-        assert_eq!(Command::ALL[5].label(), "Open Config");
+    fn classifies_current_commands_and_hides_future_only_commands() {
+        assert_eq!(Command::Quit.status(), CommandStatus::Available);
+        assert_eq!(Command::ShowTimeline.status(), CommandStatus::Available);
+        assert_eq!(Command::ToggleFocusMode.status(), CommandStatus::Available);
+        assert_eq!(Command::ChangeTheme.status(), CommandStatus::Planned);
+        assert_eq!(Command::ToggleMemoryWidget.status(), CommandStatus::Hidden);
+
+        let palette = CommandPaletteState::new();
+        let visible = palette.filtered_commands();
+        assert_eq!(visible.len(), 9);
+        assert!(!visible.contains(&Command::ToggleMemoryWidget));
+        assert!(!visible.contains(&Command::ToggleNetworkWidget));
     }
 
     #[test]
     fn filters_commands_and_wraps_selection() {
         let mut palette = CommandPaletteState::new();
         palette.open();
-        for character in "toggle".chars() {
+        for character in "gpu".chars() {
             palette.insert(character);
         }
 
-        assert_eq!(palette.filtered_commands(), vec![Command::ToggleGpu]);
-        assert_eq!(palette.selected_command(), Some(Command::ToggleGpu));
+        assert_eq!(palette.filtered_commands(), vec![Command::ToggleGpuWidget]);
+        assert_eq!(palette.selected_command(), Some(Command::ToggleGpuWidget));
+
+        let mut settings = CommandPaletteState::new();
+        settings.open();
+        for character in "config".chars() {
+            settings.insert(character);
+        }
+        assert_eq!(settings.selected_command(), Some(Command::OpenSettings));
 
         let mut all_commands = CommandPaletteState::new();
         all_commands.open();
         all_commands.move_selection(-1);
-        assert_eq!(all_commands.selected_command(), Some(Command::OpenConfig));
+        assert_eq!(all_commands.selected_command(), Some(Command::OpenSettings));
     }
 
     #[test]

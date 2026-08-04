@@ -1,5 +1,6 @@
 use crate::{
     app::AppState,
+    command_palette::CommandStatus,
     theme::Theme,
     ui::renderer::{card, fit},
 };
@@ -31,7 +32,18 @@ pub(crate) fn draw(frame: &mut Frame, area: Rect, app: &AppState, theme: &Theme)
     } else {
         for (index, command) in commands.into_iter().enumerate() {
             let selected = index == app.palette().selected_index();
-            let text = format!("{}  — {}", command.label(), command.unavailable_reason());
+            let (text, color) = match command.status() {
+                CommandStatus::Available => (command.label().to_string(), theme.text),
+                CommandStatus::Planned => (
+                    format!(
+                        "{}  — Planned: {}",
+                        command.label(),
+                        command.planned_reason().unwrap_or("not available yet")
+                    ),
+                    theme.warning,
+                ),
+                CommandStatus::Hidden => continue,
+            };
             let text = fit(&text, usize::from(popup.width.saturating_sub(6)));
             let style = if selected {
                 Style::default()
@@ -39,7 +51,7 @@ pub(crate) fn draw(frame: &mut Frame, area: Rect, app: &AppState, theme: &Theme)
                     .bg(theme.selection_background)
                     .add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(theme.text_muted)
+                Style::default().fg(color)
             };
             lines.push(Line::from(vec![Span::styled(
                 if selected {

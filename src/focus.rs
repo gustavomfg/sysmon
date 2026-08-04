@@ -87,6 +87,10 @@ impl FocusState {
     pub fn clear(&mut self) {
         self.target = None;
     }
+
+    pub fn set(&mut self, target: FocusTarget) {
+        self.target = Some(target);
+    }
 }
 
 #[cfg(test)]

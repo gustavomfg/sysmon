@@ -214,8 +214,10 @@ mod tests {
             .map(|cell| cell.symbol())
             .collect::<String>();
         assert!(rendered.contains("Command Palette"));
-        assert!(rendered.contains("Toggle GPU"));
-        assert!(rendered.contains("Open Config"));
+        assert!(rendered.contains("Quit"));
+        assert!(rendered.contains("Toggle GPU Widget"));
+        assert!(rendered.contains("Open Settings"));
+        assert!(!rendered.contains("Toggle Memory Widget"));
     }
 
     #[test]
