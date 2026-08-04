@@ -8,7 +8,7 @@ use crate::{
 use ratatui::{
     Frame,
     layout::Rect,
-    style::{Color, Style},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::Paragraph,
 };
@@ -130,13 +130,17 @@ struct LightingRange {
 
 impl LightingRange {
     fn signals(self, energy: f32) -> (f32, f32, f32, f32) {
+        if energy <= FIELD_THRESHOLD {
+            return (0.0, 0.0, 0.0, 0.0);
+        }
+
         let distant = smoothstep(
             (energy - ACTIVE_ENERGY_EPSILON) / (self.distant - ACTIVE_ENERGY_EPSILON).max(0.018),
         );
         let flow = smoothstep((energy - self.distant) / (self.flow - self.distant).max(0.025));
         let energetic = smoothstep((energy - self.flow) / (self.energy - self.flow).max(0.04));
         let peak = smoothstep((energy - self.peak) / (1.0 - self.peak).max(0.04));
-        (distant, flow, energetic, peak)
+        (distant.max(0.16), flow, energetic, peak)
     }
 }
 
@@ -782,7 +786,7 @@ fn braille_lines(area: Rect, pulse: &PulseModel, theme: &Theme) -> Vec<Line<'sta
                 let symbol = char::from_u32(0x2800 + u32::from(mask)).unwrap_or(' ');
                 spans.push(Span::styled(
                     symbol.to_string(),
-                    sample_style(theme, health, strongest, lighting),
+                    sample_style(theme, health, strongest, lighting, mask.count_ones()),
                 ));
             }
             Line::from(spans)
@@ -805,7 +809,7 @@ fn unicode_lines(area: Rect, pulse: &PulseModel, theme: &Theme) -> Vec<Line<'sta
                     let symbol = unicode_symbol(sample, lighting);
                     Span::styled(
                         symbol.to_string(),
-                        sample_style(theme, health, sample, lighting),
+                        sample_style(theme, health, sample, lighting, 1),
                     )
                 })
                 .collect::<Vec<_>>();
@@ -1271,16 +1275,36 @@ fn hash01(value: usize) -> f32 {
 }
 
 fn unicode_symbol(sample: EnergySample, lighting: LightingRange) -> char {
-    let (distant, flow, energetic, peak) = lighting.signals(sample.energy);
+    let (_distant, _flow, energetic, peak) = lighting.signals(sample.energy);
     if peak > 0.72 {
         '•'
     } else if energetic > 0.52 {
         '∙'
-    } else if flow > 0.24 || distant > 0.45 {
+    } else if sample.energy > FIELD_THRESHOLD {
         '·'
     } else {
         ' '
     }
+}
+
+fn perceptual_intensity(energy: f32, lighting: LightingRange, dot_count: u32) -> f32 {
+    if energy <= FIELD_THRESHOLD {
+        return 0.0;
+    }
+
+    let (distant, flow, energetic, peak) = lighting.signals(energy);
+    let range = (lighting.peak - lighting.distant).max(0.16);
+    let normalized = ((energy - lighting.distant) / range).clamp(0.0, 1.0);
+    let gamma_lift = normalized.powf(0.64);
+    let sparse_cell_lift = if dot_count <= 2 { 0.055 } else { 0.0 };
+    let intensity = 0.30
+        + distant * 0.06
+        + gamma_lift * 0.20
+        + flow * 0.19
+        + energetic * 0.25
+        + peak * 0.34
+        + sparse_cell_lift;
+    intensity.clamp(0.0, 0.96)
 }
 
 fn sample_style(
@@ -1288,8 +1312,9 @@ fn sample_style(
     health: PulseHealth,
     sample: EnergySample,
     lighting: LightingRange,
+    dot_count: u32,
 ) -> Style {
-    let (distant, flow, energetic, peak) = lighting.signals(sample.energy);
+    let (_distant, flow, energetic, peak) = lighting.signals(sample.energy);
     let layer_tint = match sample.layer % FLOW_LAYERS {
         0 => theme.secondary,
         1 => theme.primary,
@@ -1314,10 +1339,16 @@ fn sample_style(
     );
     color = blend_color(color, theme.text, peak * (0.42 + sample.depth * 0.42));
 
-    let level_signal = distant * 0.08 + flow * 0.24 + energetic * 0.36 + peak * 0.78;
-    let depth_signal = 0.38 + sample.depth * 0.62;
-    let brightness = (0.028 + level_signal) * depth_signal;
-    Style::default().fg(scale_color(color, brightness))
+    let intensity = perceptual_intensity(sample.energy, lighting, dot_count);
+    let color_lift = (0.035 + flow * 0.055 + energetic * 0.12 + peak * 0.24).clamp(0.0, 0.42);
+    color = blend_color(color, theme.text, color_lift);
+    let depth_signal = 0.78 + sample.depth * 0.22;
+    let brightness = (intensity * depth_signal).clamp(0.0, 0.96);
+    let mut style = Style::default().fg(scale_color(color, brightness));
+    if peak > 0.76 || (energetic > 0.82 && dot_count >= 3) {
+        style = style.add_modifier(Modifier::BOLD);
+    }
+    style
 }
 
 fn histogram_quantile<const N: usize>(histogram: &[usize; N], total: usize, quantile: f32) -> f32 {
@@ -1383,13 +1414,14 @@ fn scale_color(color: Color, brightness: f32) -> Color {
 mod tests {
     use std::collections::VecDeque;
 
-    use ratatui::layout::Rect;
+    use ratatui::{layout::Rect, style::Modifier};
 
     use super::{
         ACTIVE_ENERGY_EPSILON, ConvergenceState, EnergyLandscape, EnergySample, FIELD_THRESHOLD,
-        FieldFrame, FlowField, PulsePreset, apply_discharges, braille_lines, build_field,
-        core_state, detect_convergence, domain_aspect, field_for_area, illuminate_convergence,
-        preset_for, unicode_lines, uses_braille,
+        FieldFrame, FlowField, LightingRange, PulsePreset, apply_discharges, braille_lines,
+        build_field, core_state, detect_convergence, domain_aspect, field_for_area,
+        illuminate_convergence, perceptual_intensity, preset_for, sample_style, unicode_lines,
+        unicode_symbol, uses_braille,
     };
     use crate::{
         pulse::{HealthState, PulseInput, PulseModel},
@@ -1662,6 +1694,120 @@ mod tests {
         assert!(energy > field.samples.len() / 80);
         assert!(peaks > 0);
         assert!(peaks * 8 < field.samples.len());
+    }
+
+    #[test]
+    fn calm_lighting_recovers_midtone_visibility_without_lighting_silence() {
+        let calm = pulse_with_input(PulseInput {
+            cpu: 0.12,
+            memory: 0.20,
+            gpu: None,
+            network: 0.02,
+            load: 0.10,
+            volatility: 0.0,
+        });
+        let field = field_for_area(80, 20, true, &calm);
+        let lighting = field.lighting_range();
+        let active = field
+            .samples
+            .iter()
+            .filter(|sample| sample.energy > FIELD_THRESHOLD)
+            .map(|sample| perceptual_intensity(sample.energy, lighting, 8))
+            .collect::<Vec<_>>();
+        let minimum = active.iter().copied().fold(1.0, f32::min);
+        let average = active.iter().sum::<f32>() / active.len().max(1) as f32;
+        let midtones = active
+            .iter()
+            .filter(|intensity| (0.30..=0.72).contains(*intensity))
+            .count();
+        let silence = field
+            .samples
+            .iter()
+            .filter(|sample| perceptual_intensity(sample.energy, lighting, 8) == 0.0)
+            .count();
+
+        assert!(minimum >= 0.21);
+        assert!(average > 0.26);
+        assert!(midtones > active.len() / 10);
+        assert!(silence > field.samples.len() / 5);
+    }
+
+    #[test]
+    fn brighter_states_gain_visual_energy_without_losing_headroom() {
+        let calm = pulse_with_input(PulseInput {
+            cpu: 0.12,
+            memory: 0.20,
+            gpu: None,
+            network: 0.02,
+            load: 0.10,
+            volatility: 0.0,
+        });
+        let busy = pulse_with_input(PulseInput {
+            cpu: 0.72,
+            memory: 0.76,
+            gpu: Some(0.45),
+            network: 0.22,
+            load: 0.62,
+            volatility: 0.12,
+        });
+        let critical = pulse_with_input(PulseInput {
+            cpu: 0.96,
+            memory: 0.94,
+            gpu: Some(0.92),
+            network: 0.75,
+            load: 0.96,
+            volatility: 0.80,
+        });
+        let calm_field = field_for_area(80, 20, true, &calm);
+        let busy_field = field_for_area(80, 20, true, &busy);
+        let critical_field = field_for_area(80, 20, true, &critical);
+        let calm_mean = mean_perceptual_intensity(&calm_field);
+        let busy_mean = mean_perceptual_intensity(&busy_field);
+        let critical_mean = mean_perceptual_intensity(&critical_field);
+        let busy_max = max_perceptual_intensity(&busy_field);
+        let critical_max = max_perceptual_intensity(&critical_field);
+
+        assert!(busy_mean > calm_mean);
+        assert!(critical_mean > calm_mean);
+        assert!(busy_max <= 0.96);
+        assert!(critical_max <= 0.96);
+        assert!(rare_peak_count(&critical_field) < critical_field.samples.len() / 5);
+    }
+
+    #[test]
+    fn sparse_braille_cells_receive_visibility_without_becoming_peaks() {
+        let theme = Theme::default();
+        let lighting = LightingRange {
+            distant: 0.12,
+            flow: 0.24,
+            energy: 0.42,
+            peak: 0.76,
+        };
+        let sample = EnergySample {
+            energy: 0.16,
+            layer: 0,
+            depth: 0.25,
+        };
+        let sparse = perceptual_intensity(sample.energy, lighting, 1);
+        let dense = perceptual_intensity(sample.energy, lighting, 8);
+        let sparse_style = sample_style(&theme, pulse().health(), sample, lighting, 1);
+        let peak_style = sample_style(
+            &theme,
+            pulse().health(),
+            EnergySample {
+                energy: 0.92,
+                ..sample
+            },
+            lighting,
+            4,
+        );
+
+        assert!(sparse > dense);
+        assert!(sparse > 0.20);
+        assert!(sparse_style.fg.is_some());
+        assert!(peak_style.add_modifier.contains(Modifier::BOLD));
+        assert_eq!(unicode_symbol(EnergySample::default(), lighting), ' ');
+        assert_eq!(unicode_symbol(sample, lighting), '·');
     }
 
     #[test]
@@ -2099,6 +2245,34 @@ mod tests {
             .map(|sample| sample.energy)
             .sum::<f32>()
             / field.samples.len() as f32
+    }
+
+    fn mean_perceptual_intensity(field: &FieldFrame) -> f32 {
+        let lighting = field.lighting_range();
+        field
+            .samples
+            .iter()
+            .map(|sample| perceptual_intensity(sample.energy, lighting, 8))
+            .sum::<f32>()
+            / field.samples.len() as f32
+    }
+
+    fn max_perceptual_intensity(field: &FieldFrame) -> f32 {
+        let lighting = field.lighting_range();
+        field
+            .samples
+            .iter()
+            .map(|sample| perceptual_intensity(sample.energy, lighting, 8))
+            .fold(0.0, f32::max)
+    }
+
+    fn rare_peak_count(field: &FieldFrame) -> usize {
+        let lighting = field.lighting_range();
+        field
+            .samples
+            .iter()
+            .filter(|sample| perceptual_intensity(sample.energy, lighting, 8) > 0.84)
+            .count()
     }
 
     fn active_components(field: &FieldFrame) -> Vec<usize> {
