@@ -2,12 +2,16 @@ mod action;
 mod animation;
 mod app;
 mod command_palette;
+mod config;
+mod export;
 mod focus;
 mod history;
+mod process_search;
 mod system;
 mod theme;
 mod timeline;
 mod ui;
+mod widget;
 
 use std::{
     io,
@@ -50,7 +54,13 @@ impl Drop for TerminalGuard {
     }
 }
 
-fn action_for_event(event: Event, palette_open: bool, focus_active: bool) -> Option<Action> {
+fn action_for_event(
+    event: Event,
+    palette_open: bool,
+    process_search_open: bool,
+    config_open: bool,
+    focus_active: bool,
+) -> Option<Action> {
     let Event::Key(key) = event else {
         return None;
     };
@@ -72,6 +82,32 @@ fn action_for_event(event: Event, palette_open: bool, focus_active: bool) -> Opt
             KeyCode::Char(character) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                 Some(Action::PaletteCharacter(character))
             }
+            _ => None,
+        };
+    }
+
+    if process_search_open {
+        return match key.code {
+            KeyCode::Esc => Some(Action::CloseProcessSearch),
+            KeyCode::Up => Some(Action::ProcessSearchUp),
+            KeyCode::Down => Some(Action::ProcessSearchDown),
+            KeyCode::Backspace => Some(Action::ProcessSearchBackspace),
+            KeyCode::Enter => Some(Action::ProcessSearchSubmit),
+            KeyCode::Char(character) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                Some(Action::ProcessSearchCharacter(character))
+            }
+            _ => None,
+        };
+    }
+
+    if config_open {
+        return match key.code {
+            KeyCode::Esc => Some(Action::CloseConfig),
+            KeyCode::Up => Some(Action::ConfigUp),
+            KeyCode::Down => Some(Action::ConfigDown),
+            KeyCode::Left => Some(Action::ConfigPrevious),
+            KeyCode::Right => Some(Action::ConfigNext),
+            KeyCode::Enter => Some(Action::ConfigToggle),
             _ => None,
         };
     }
@@ -107,9 +143,8 @@ fn run_app(
     collector: &mut SystemInfoCollector,
     app: &mut AppState,
 ) -> io::Result<()> {
-    let collection_interval = Duration::from_secs(1);
     let render_interval = Duration::from_millis(33);
-    let mut last_collection = Instant::now() - collection_interval;
+    let mut last_collection = Instant::now() - app.refresh_interval();
     let mut last_render = Instant::now() - render_interval;
     let mut last_animation_update = Instant::now();
     let mut render_pending = true;
@@ -117,6 +152,7 @@ fn run_app(
     loop {
         let now = Instant::now();
         let mut collected = false;
+        let collection_interval = app.refresh_interval();
 
         if last_collection.elapsed() >= collection_interval {
             let info = collector.collect(now);
@@ -155,9 +191,13 @@ fn run_app(
 
         if event::poll(timeout)? {
             loop {
-                if let Some(action) =
-                    action_for_event(event::read()?, app.palette().is_open(), app.focus_active())
-                {
+                if let Some(action) = action_for_event(
+                    event::read()?,
+                    app.palette().is_open(),
+                    app.process_search().is_open(),
+                    app.config().is_open(),
+                    app.focus_active(),
+                ) {
                     if app.dispatch(action) {
                         return Ok(());
                     }

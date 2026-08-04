@@ -1,6 +1,7 @@
 use crate::app::AppState;
 use crate::focus::FocusTarget;
 use crate::theme::Theme;
+use crate::widget::WidgetId;
 
 use ratatui::Frame;
 
@@ -15,6 +16,12 @@ pub fn draw_app(frame: &mut Frame, app: &AppState) {
 
     if app.palette().is_open() {
         widgets::command_palette::draw(frame, frame.area(), app, app.theme());
+    }
+    if app.process_search().is_open() {
+        widgets::process_search::draw(frame, frame.area(), app, app.theme());
+    }
+    if app.config().is_open() {
+        widgets::config::draw(frame, frame.area(), app, app.theme());
     }
 }
 
@@ -79,27 +86,36 @@ fn draw_with_theme(
         theme,
         app.is_focused(FocusTarget::Cpu),
     );
-    widgets::gpu::draw(
-        frame,
-        layout.top[1],
-        info,
-        theme,
-        app.is_focused(FocusTarget::Gpu),
-    );
-    widgets::memory::draw(
-        frame,
-        layout.middle_left[0],
-        info,
-        app.memory_usage_percent(),
-        theme,
-        app.is_focused(FocusTarget::Memory),
-    );
+    if app.widget_visible(WidgetId::Gpu) {
+        widgets::gpu::draw(
+            frame,
+            layout.top[1],
+            info,
+            theme,
+            app.is_focused(FocusTarget::Gpu),
+        );
+    } else {
+        frame.render_widget(fill(theme.background), layout.top[1]);
+    }
+    if app.widget_visible(WidgetId::Memory) {
+        widgets::memory::draw(
+            frame,
+            layout.middle_left[0],
+            info,
+            app.memory_usage_percent(),
+            theme,
+            app.is_focused(FocusTarget::Memory),
+        );
+    } else {
+        frame.render_widget(fill(theme.background), layout.middle_left[0]);
+    }
     widgets::processes::draw(
         frame,
         layout.middle[1],
         info,
         theme,
         app.is_focused(FocusTarget::Processes),
+        app.selected_process(),
     );
 
     for area in layout.bottom.iter().copied() {
@@ -120,13 +136,17 @@ fn draw_with_theme(
         theme,
         app.is_focused(FocusTarget::History),
     );
-    widgets::network::draw(
-        frame,
-        layout.bottom[1],
-        info,
-        theme,
-        app.is_focused(FocusTarget::Network),
-    );
+    if app.widget_visible(WidgetId::Network) {
+        widgets::network::draw(
+            frame,
+            layout.bottom[1],
+            info,
+            theme,
+            app.is_focused(FocusTarget::Network),
+        );
+    } else {
+        frame.render_widget(fill(theme.background), layout.bottom[1]);
+    }
     widgets::timeline::draw(
         frame,
         layout.bottom[2],
@@ -134,7 +154,7 @@ fn draw_with_theme(
         theme,
         app.is_focused(FocusTarget::Timeline),
     );
-    widgets::footer::draw(frame, layout.page[2], theme);
+    widgets::footer::draw(frame, layout.page[2], theme, app.refresh_interval());
 }
 
 #[cfg(test)]
@@ -217,7 +237,7 @@ mod tests {
         assert!(rendered.contains("Quit"));
         assert!(rendered.contains("Toggle GPU Widget"));
         assert!(rendered.contains("Open Settings"));
-        assert!(!rendered.contains("Toggle Memory Widget"));
+        assert!(rendered.contains("Toggle Memory Widget"));
     }
 
     #[test]

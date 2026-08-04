@@ -56,22 +56,18 @@ impl Command {
             Self::Quit | Self::ShowTimeline | Self::ToggleFocusMode => CommandStatus::Available,
             Self::ChangeTheme
             | Self::ToggleGpuWidget
-            | Self::RestartWidget
+            | Self::ToggleMemoryWidget
+            | Self::ToggleNetworkWidget
             | Self::ExportSnapshot
             | Self::SearchProcess
-            | Self::OpenSettings => CommandStatus::Planned,
-            Self::ToggleMemoryWidget | Self::ToggleNetworkWidget => CommandStatus::Hidden,
+            | Self::OpenSettings => CommandStatus::Available,
+            Self::RestartWidget => CommandStatus::Planned,
         }
     }
 
     pub fn planned_reason(self) -> Option<&'static str> {
         let reason = match self {
-            Self::ChangeTheme => "theme selection is planned for a future phase",
-            Self::ToggleGpuWidget => "widget visibility is planned for a future phase",
             Self::RestartWidget => "widget restart is planned for a future phase",
-            Self::ExportSnapshot => "snapshot export is planned for a future phase",
-            Self::SearchProcess => "process search is planned for a future phase",
-            Self::OpenSettings => "settings are planned for a future phase",
             _ => return None,
         };
         Some(reason)
@@ -192,14 +188,17 @@ mod tests {
         assert_eq!(Command::Quit.status(), CommandStatus::Available);
         assert_eq!(Command::ShowTimeline.status(), CommandStatus::Available);
         assert_eq!(Command::ToggleFocusMode.status(), CommandStatus::Available);
-        assert_eq!(Command::ChangeTheme.status(), CommandStatus::Planned);
-        assert_eq!(Command::ToggleMemoryWidget.status(), CommandStatus::Hidden);
+        assert_eq!(Command::ChangeTheme.status(), CommandStatus::Available);
+        assert_eq!(Command::ToggleGpuWidget.status(), CommandStatus::Available);
+        assert_eq!(
+            Command::ToggleMemoryWidget.status(),
+            CommandStatus::Available
+        );
+        assert_eq!(Command::RestartWidget.status(), CommandStatus::Planned);
 
         let palette = CommandPaletteState::new();
         let visible = palette.filtered_commands();
-        assert_eq!(visible.len(), 9);
-        assert!(!visible.contains(&Command::ToggleMemoryWidget));
-        assert!(!visible.contains(&Command::ToggleNetworkWidget));
+        assert_eq!(visible.len(), 11);
     }
 
     #[test]
@@ -223,7 +222,10 @@ mod tests {
         let mut all_commands = CommandPaletteState::new();
         all_commands.open();
         all_commands.move_selection(-1);
-        assert_eq!(all_commands.selected_command(), Some(Command::OpenSettings));
+        assert_eq!(
+            all_commands.selected_command(),
+            Some(Command::ToggleNetworkWidget)
+        );
     }
 
     #[test]
