@@ -313,6 +313,24 @@ struct FlowGeometry {
     aspect: f32,
     step_size: f32,
     virtual_margin: f32,
+    core: CoreState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct CoreState {
+    position: (f32, f32),
+    radius: f32,
+    pull: f32,
+    reconnection: f32,
+    compression: f32,
+    breath: f32,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CoreInfluence {
+    proximity: f32,
+    compression: f32,
+    reconnection: f32,
 }
 
 pub(crate) fn draw(frame: &mut Frame, area: Rect, app: &AppState, theme: &Theme, focused: bool) {
@@ -421,6 +439,34 @@ fn field_for_area(width: usize, height: usize, braille: bool, pulse: &PulseModel
     )
 }
 
+fn core_state(time: f32, health: PulseHealth, pulse: &PulseModel) -> CoreState {
+    let input = pulse.input();
+    let motion = if pulse.reduced_motion() { 0.0 } else { 1.0 };
+    let drift = time * 0.045;
+    let breath = if pulse.reduced_motion() {
+        0.5
+    } else {
+        pulse.breath()
+    };
+    let position = (
+        (0.50 + drift.sin() * 0.055 * motion + (input.network - 0.30) * 0.018).clamp(0.34, 0.66),
+        (0.48 + (drift * 0.73 + 0.8).cos() * 0.065 * motion + (input.load - 0.35) * 0.018)
+            .clamp(0.32, 0.68),
+    );
+
+    CoreState {
+        position,
+        radius: (0.105 + input.memory * 0.035 + health.pressure() * 0.035 + breath * 0.012)
+            .clamp(0.095, 0.19),
+        pull: (0.17 + input.load * 0.08 + health.pressure() * 0.15 + breath * 0.018)
+            .clamp(0.17, 0.42),
+        reconnection: (0.34 + input.network * 0.18 + health.volatility() * 0.12).clamp(0.34, 0.64),
+        compression: (0.64 + input.memory * 0.22 + health.pressure() * 0.15 + breath * 0.05)
+            .clamp(0.64, 1.0),
+        breath,
+    }
+}
+
 fn preset_for(width: usize, height: usize) -> PulsePreset {
     if width <= 36 || height <= 9 {
         PulsePreset::Compact
@@ -446,10 +492,14 @@ fn build_field(
     let parameters = preset.parameters();
     let active_streams = active_stream_count(parameters.streams, health, pulse);
     let base_trail_steps = active_trail_steps(parameters.trail_steps, pulse);
+    let field_time =
+        time + pulse.phase() * 0.025 + pulse.input().network * 0.018 + pulse.input().load * 0.012;
+    let core = core_state(field_time, health, pulse);
     let geometry = FlowGeometry {
         aspect: domain_aspect(width, height, braille),
         step_size: parameters.step_size,
         virtual_margin: parameters.virtual_margin,
+        core,
     };
     let motion = if pulse.reduced_motion() { 0.0 } else { 1.0 };
     let breathing = if pulse.reduced_motion() {
@@ -457,8 +507,6 @@ fn build_field(
     } else {
         0.975 + (pulse.breath() - 0.5) * 0.10
     };
-    let input = pulse.input();
-    let field_time = time + pulse.phase() * 0.025 + input.network * 0.018 + input.load * 0.012;
 
     for stream_index in 0..active_streams {
         let stream = stream_spec(
@@ -492,22 +540,35 @@ fn build_field(
 
         for trail_index in 0..trail_steps {
             let progress = trail_index as f32 / trail_steps.max(1) as f32;
+            let influence = core_influence(position, stream, field_time, health, geometry);
             let rhythm = ((trail_index as f32 * 0.83 + stream.phase * 1.7).sin() * 0.5) + 0.5;
             let taper = 0.68 + (1.0 - progress) * 0.32;
             let layer_weight = 0.72 + stream.depth * 0.28;
+            let field_presence = (0.90
+                + influence.compression * (0.72 + core.breath * 0.14)
+                + influence.reconnection * 0.16)
+                .clamp(0.0, 1.45);
             let energy = (0.12 + health.density() * parameters.density * 0.31 + rhythm * 0.12)
                 * layer_weight
                 * (0.90 + health.amplitude() * 0.10)
                 * (0.86 + health.pressure().clamp(0.0, 1.0) * 0.14)
+                * field_presence
                 * taper;
             let highlight =
                 trail_index % parameters.particle_stride == stream_index % 3 && rhythm > 0.68;
-            let energy = if highlight { energy + 0.28 } else { energy };
-            let radius = if highlight {
-                1.25
+            let energy = if highlight {
+                energy + 0.13 + influence.compression * 0.22
             } else {
-                1.0 + stream.depth * 0.25
+                energy
             };
+            let radius = if highlight {
+                0.90 + influence.compression * 0.65
+            } else {
+                0.86 + stream.depth * 0.22 + influence.compression * 0.52
+            };
+            let depth = (stream.depth
+                * (0.56 + influence.proximity * 0.28 + influence.compression * 0.28))
+                .clamp(0.0, 1.0);
             let next_position = advect_steps(
                 position,
                 1,
@@ -518,13 +579,13 @@ fn build_field(
             );
             let start = breathe_position(position, breathing, motion);
             let end = breathe_position(next_position, breathing, motion);
-            field.deposit_segment(start, end, energy, radius, stream.layer, stream.depth);
+            field.deposit_segment(start, end, energy, radius, stream.layer, depth);
             position = next_position;
         }
     }
 
     let diffusion_amount = 0.18 + health.density() * 0.08;
-    apply_discharges(&mut field, health, field_time, pulse);
+    apply_discharges(&mut field, health, field_time, pulse, geometry);
     field.diffuse(parameters.diffusion_passes, diffusion_amount);
 
     field
@@ -544,50 +605,114 @@ fn active_trail_steps(base: usize, pulse: &PulseModel) -> usize {
     }
 }
 
-fn apply_discharges(field: &mut FieldFrame, health: PulseHealth, time: f32, pulse: &PulseModel) {
-    if pulse.reduced_motion() || health.volatility() < 0.06 {
+fn core_influence(
+    position: (f32, f32),
+    stream: StreamSpec,
+    time: f32,
+    health: PulseHealth,
+    geometry: FlowGeometry,
+) -> CoreInfluence {
+    let core = geometry.core;
+    let to_core = (
+        core.position.0 - position.0,
+        (core.position.1 - position.1) * geometry.aspect,
+    );
+    let distance = to_core.0.hypot(to_core.1);
+    let influence_radius = core.radius * (4.2 + core.breath * 0.7);
+    let proximity = (1.0 - smoothstep(distance / influence_radius.max(0.001))).clamp(0.0, 1.0);
+
+    let flow = flow_vector(position, time, health, geometry.aspect, core);
+    let velocity = (flow.0 * stream.direction, flow.1 * stream.direction);
+    let to_core_alignment = if distance > 0.001 {
+        ((velocity.0 * to_core.0 + velocity.1 * to_core.1) / distance).max(0.0)
+    } else {
+        1.0
+    };
+    let from_core_alignment = if distance > 0.001 {
+        ((velocity.0 * -to_core.0 + velocity.1 * -to_core.1) / distance).max(0.0)
+    } else {
+        0.0
+    };
+    let compression = (proximity
+        * (0.26 + to_core_alignment * 0.74)
+        * core.compression
+        * (0.88 + health.pressure() * 0.12))
+        .clamp(0.0, 1.0);
+    let outside_core =
+        smoothstep((distance - core.radius * (1.0 + core.breath * 0.18)) / (core.radius * 2.2));
+    let reconnection =
+        (outside_core * from_core_alignment * (0.22 + proximity * 0.78) * core.reconnection)
+            .clamp(0.0, 1.0);
+
+    CoreInfluence {
+        proximity,
+        compression,
+        reconnection,
+    }
+}
+
+fn apply_discharges(
+    field: &mut FieldFrame,
+    health: PulseHealth,
+    time: f32,
+    pulse: &PulseModel,
+    geometry: FlowGeometry,
+) {
+    let discharge = discharge_strength(field, health, time, pulse, geometry);
+    if discharge < 0.08 {
         return;
     }
 
-    let volatility = smoothstep((health.volatility() - 0.06) / 0.34);
-    let nodes = [(0.47, 0.46, 0.4), (0.56, 0.55, 2.2)];
-    for (index, (node_x, node_y, phase)) in nodes.into_iter().enumerate() {
-        let convergence = field.local_energy((node_x, node_y), 3.5);
-        let node_energy = smoothstep((convergence - 0.10) / 0.26) * volatility;
-        let cadence = ((time * (1.05 + index as f32 * 0.18) + phase).sin() * 0.5) + 0.5;
-        let burst = smoothstep((cadence - 0.72) / 0.28);
-        let discharge = node_energy * burst;
-        if discharge < 0.08 {
-            continue;
-        }
+    let core = geometry.core;
 
-        field.deposit(
-            (node_x, node_y),
-            discharge * 0.62,
-            1.35 + discharge * 1.2,
+    field.deposit(
+        core.position,
+        discharge * 0.50,
+        0.85 + discharge * 1.0,
+        FLOW_LAYERS,
+        1.0,
+    );
+    let flow = flow_vector(core.position, time, health, geometry.aspect, core);
+    let flow_angle = flow.1.atan2(flow.0);
+    for branch in 0..3 {
+        let branch_angle =
+            flow_angle + (branch as f32 - 1.0) * 0.70 + (time * 0.13 + core.breath).sin() * 0.12;
+        let length = 0.028 + discharge * (0.030 + branch as f32 * 0.006);
+        let endpoint = (
+            core.position.0 + branch_angle.cos() * length,
+            core.position.1 + branch_angle.sin() * length,
+        );
+        field.deposit_segment(
+            core.position,
+            endpoint,
+            discharge * (0.17 - branch as f32 * 0.022),
+            0.50,
             FLOW_LAYERS,
             1.0,
         );
-        let flow = flow_vector((node_x, node_y), time, health, field.dot_aspect);
-        let flow_angle = flow.1.atan2(flow.0);
-        for branch in 0..3 {
-            let branch_angle =
-                flow_angle + (branch as f32 - 1.0) * 0.75 + (time * 0.13 + phase).sin() * 0.12;
-            let length = 0.035 + discharge * (0.035 + branch as f32 * 0.008);
-            let endpoint = (
-                node_x + branch_angle.cos() * length,
-                node_y + branch_angle.sin() * length,
-            );
-            field.deposit_segment(
-                (node_x, node_y),
-                endpoint,
-                discharge * (0.20 - branch as f32 * 0.025),
-                0.62,
-                FLOW_LAYERS,
-                1.0,
-            );
-        }
     }
+}
+
+fn discharge_strength(
+    field: &FieldFrame,
+    health: PulseHealth,
+    time: f32,
+    pulse: &PulseModel,
+    geometry: FlowGeometry,
+) -> f32 {
+    if pulse.reduced_motion() || health.volatility() < 0.06 {
+        return 0.0;
+    }
+
+    let core = geometry.core;
+    let volatility = smoothstep((health.volatility() - 0.06) / 0.34);
+    let convergence = field.local_energy(core.position, 4.0);
+    let node_energy = smoothstep((convergence - 0.12) / 0.24)
+        * smoothstep((core.compression - 0.68) / 0.22)
+        * volatility;
+    let cadence = ((time * 1.12 + core.breath * 1.7).sin() * 0.5) + 0.5;
+    let burst = smoothstep((cadence - 0.76) / 0.24);
+    node_energy * burst
 }
 
 fn edge_span_steps(base: usize, step_size: f32, virtual_margin: f32) -> usize {
@@ -647,6 +772,7 @@ fn advect_steps(
             time + step as f32 * 0.011,
             health,
             geometry.aspect,
+            geometry.core,
         );
         let direction = stream.direction;
         position.0 = wrap_virtual(
@@ -664,7 +790,13 @@ fn wrap_virtual(value: f32, margin: f32) -> f32 {
     (value + margin).rem_euclid(span) - margin
 }
 
-fn flow_vector(position: (f32, f32), time: f32, health: PulseHealth, aspect: f32) -> (f32, f32) {
+fn flow_vector(
+    position: (f32, f32),
+    time: f32,
+    health: PulseHealth,
+    aspect: f32,
+    core: CoreState,
+) -> (f32, f32) {
     let phase = time * (0.06 + health.volatility() * 0.08);
     let braid_phase = TAU * (position.0 * 0.83 + position.1 * 0.61) + phase;
     let bend_phase = TAU * (position.0 * 0.47 - position.1 * 0.92) - phase * 0.63;
@@ -675,19 +807,24 @@ fn flow_vector(position: (f32, f32), time: f32, health: PulseHealth, aspect: f32
     vx += bend_phase.cos() * 0.055;
     vy += bend_phase.sin() * (0.09 + health.volatility() * 0.10);
 
-    let vortices = [
-        (0.30, 0.34, 1.0, 0.035),
-        (0.68, 0.66, -1.0, 0.041),
-        (0.52, 0.50, 0.75, 0.026),
-    ];
-    for (center_x, center_y, rotation, strength) in vortices {
-        let dx = position.0 - center_x;
-        let dy = (position.1 - center_y) * aspect;
-        let radius_squared = (dx * dx + dy * dy).max(0.018);
-        let influence = strength * rotation / (radius_squared + 0.065);
-        vx += -dy * influence;
-        vy += dx * influence / aspect.max(0.2);
-    }
+    let dx = core.position.0 - position.0;
+    let dy = (core.position.1 - position.1) * aspect;
+    let distance = dx.hypot(dy);
+    let capture_radius = core.radius * (4.2 + core.breath * 0.7);
+    let capture = (1.0 - smoothstep(distance / capture_radius.max(0.001))).clamp(0.0, 1.0);
+    let breathing = 0.92 + core.breath * 0.16;
+    let pull = core.pull * capture * breathing;
+    vx += dx * pull;
+    vy += dy * pull;
+
+    let swirl = core.pull * capture * 0.12;
+    vx += -dy * swirl;
+    vy += dx * swirl;
+
+    let reconnection =
+        smoothstep((distance - core.radius * (0.80 + core.breath * 0.12)) / (core.radius * 2.4));
+    vx += core.reconnection * reconnection * 0.18;
+    vy += (core.position.1 - position.1) * core.reconnection * reconnection * 0.04;
 
     let length = vx.hypot(vy).max(0.001);
     (vx / length, vy / length)
@@ -800,8 +937,9 @@ mod tests {
     use ratatui::layout::Rect;
 
     use super::{
-        EnergySample, FIELD_THRESHOLD, FieldFrame, PulsePreset, braille_lines, build_field,
-        field_for_area, preset_for, unicode_lines, uses_braille,
+        EnergySample, FIELD_THRESHOLD, FieldFrame, FlowGeometry, PulsePreset, braille_lines,
+        build_field, core_state, discharge_strength, domain_aspect, field_for_area, preset_for,
+        unicode_lines, uses_braille,
     };
     use crate::{
         pulse::{HealthState, PulseInput, PulseModel},
@@ -883,6 +1021,147 @@ mod tests {
                 .samples
                 .iter()
                 .all(|sample| (0.0..=1.0).contains(&sample.energy))
+        );
+    }
+
+    #[test]
+    fn one_core_is_deterministic_slow_and_bounded() {
+        let pulse = pulse();
+        let health = pulse.health();
+        let first = core_state(2.0, health, &pulse);
+        let same = core_state(2.0, health, &pulse);
+        let later = core_state(90.0, health, &pulse);
+
+        assert_eq!(first, same);
+        assert_ne!(first.position, later.position);
+        assert!((0.34..=0.66).contains(&first.position.0));
+        assert!((0.32..=0.68).contains(&first.position.1));
+        assert!((0.095..=0.19).contains(&first.radius));
+
+        let mut reduced = pulse;
+        reduced.set_reduced_motion(true);
+        assert_eq!(
+            core_state(0.0, reduced.health(), &reduced),
+            core_state(90.0, reduced.health(), &reduced)
+        );
+    }
+
+    #[test]
+    fn density_accumulates_around_the_single_core() {
+        let pulse = pulse();
+        let health = pulse.health();
+        let field = build_field(240, 120, true, PulsePreset::Widescreen, health, 0.0, &pulse);
+        let core = core_state(0.0, health, &pulse);
+        let near = field.local_energy(core.position, 7.0);
+        let distant = field.local_energy((0.10, 0.18), 7.0);
+
+        assert!(
+            near > distant,
+            "core density {near} should exceed distant density {distant}"
+        );
+    }
+
+    #[test]
+    fn peak_energy_is_concentrated_near_the_single_core() {
+        let pulse = pulse();
+        let health = pulse.health();
+        let field = build_field(240, 120, true, PulsePreset::Widescreen, health, 0.0, &pulse);
+        let core = core_state(0.0, health, &pulse);
+        let mut core_peak: f32 = 0.0;
+        let mut distant_peak: f32 = 0.0;
+        for (index, sample) in field.samples.iter().enumerate() {
+            let x = index % field.width;
+            let y = index / field.width;
+            let position = (
+                x as f32 / field.width.saturating_sub(1).max(1) as f32,
+                y as f32 / field.height.saturating_sub(1).max(1) as f32,
+            );
+            let distance = (position.0 - core.position.0)
+                .hypot((position.1 - core.position.1) * field.dot_aspect);
+            if distance < core.radius * 2.5 {
+                core_peak = core_peak.max(sample.energy);
+            } else {
+                distant_peak = distant_peak.max(sample.energy);
+            }
+        }
+        assert!(core_peak > 0.0);
+        assert!(core_peak > distant_peak);
+    }
+
+    #[test]
+    fn energy_remains_present_before_and_after_reconnection() {
+        let pulse = pulse();
+        let health = pulse.health();
+        let field = build_field(240, 120, true, PulsePreset::Widescreen, health, 0.0, &pulse);
+        let core = core_state(0.0, health, &pulse);
+        let before = field.local_energy((core.position.0 - 0.16, core.position.1), 12.0);
+        let after = field.local_energy((core.position.0 + 0.16, core.position.1), 12.0);
+
+        assert!(before > 0.0);
+        assert!(after > 0.0);
+    }
+
+    #[test]
+    fn discharges_require_density_volatility_and_motion() {
+        let mut calm = PulseModel::new(false);
+        calm.set_input(PulseInput {
+            cpu: 0.15,
+            memory: 0.20,
+            gpu: None,
+            network: 0.0,
+            load: 0.10,
+            volatility: 0.0,
+        });
+        let calm_core = core_state(0.0, calm.health(), &calm);
+        let calm_geometry = FlowGeometry {
+            aspect: domain_aspect(160, 80, true),
+            step_size: 0.02,
+            virtual_margin: 0.2,
+            core: calm_core,
+        };
+        let mut calm_field = FieldFrame::new(160, 80, true);
+        calm_field.deposit(calm_core.position, 1.0, 8.0, 0, 1.0);
+        assert_eq!(
+            discharge_strength(&calm_field, calm.health(), 0.65, &calm, calm_geometry),
+            0.0
+        );
+
+        let mut active = PulseModel::new(false);
+        active.set_input(PulseInput {
+            cpu: 0.85,
+            memory: 0.90,
+            gpu: Some(0.80),
+            network: 0.70,
+            load: 0.85,
+            volatility: 0.90,
+        });
+        let active_core = core_state(0.0, active.health(), &active);
+        let active_geometry = FlowGeometry {
+            core: active_core,
+            ..calm_geometry
+        };
+        let mut active_field = FieldFrame::new(160, 80, true);
+        active_field.deposit(active_core.position, 1.0, 8.0, 0, 1.0);
+        let strength = discharge_strength(
+            &active_field,
+            active.health(),
+            0.65,
+            &active,
+            active_geometry,
+        );
+        assert!(strength > 0.08);
+
+        let mut reduced = active;
+        reduced.set_reduced_motion(true);
+        assert_eq!(
+            discharge_strength(
+                &active_field,
+                reduced.health(),
+                0.65,
+                &reduced,
+                active_geometry,
+            ),
+            0.0
         );
     }
 
