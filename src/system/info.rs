@@ -109,8 +109,6 @@ impl SystemInfoCollector {
 
         processes_list.sort_by(|a, b| b.memory.partial_cmp(&a.memory).unwrap_or(Ordering::Equal));
 
-        processes_list.truncate(5);
-
         let load_average = System::load_average();
 
         SystemInfo {

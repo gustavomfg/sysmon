@@ -1,12 +1,24 @@
+mod action;
+mod animation;
 mod app;
+mod command_palette;
+mod config;
+mod export;
+mod focus;
+mod history;
+mod process_search;
 mod system;
+mod theme;
+mod timeline;
 mod ui;
+mod widget;
 
 use std::{
     io,
     time::{Duration, Instant},
 };
 
+use action::Action;
 use app::AppState;
 
 use crossterm::{
@@ -42,16 +54,75 @@ impl Drop for TerminalGuard {
     }
 }
 
-fn should_quit(event: Event) -> bool {
-    matches!(
-        event,
-        Event::Key(key)
-            if key.kind == KeyEventKind::Press
-                && (key.code == KeyCode::Char('q')
-                    || key.code == KeyCode::Esc
-                    || (key.code == KeyCode::Char('c')
-                        && key.modifiers.contains(KeyModifiers::CONTROL)))
-    )
+fn action_for_event(
+    event: Event,
+    palette_open: bool,
+    process_search_open: bool,
+    config_open: bool,
+    focus_active: bool,
+) -> Option<Action> {
+    let Event::Key(key) = event else {
+        return None;
+    };
+
+    if key.kind != KeyEventKind::Press {
+        return None;
+    }
+
+    if palette_open {
+        return match key.code {
+            KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                Some(Action::ClosePalette)
+            }
+            KeyCode::Esc => Some(Action::ClosePalette),
+            KeyCode::Up => Some(Action::PaletteUp),
+            KeyCode::Down => Some(Action::PaletteDown),
+            KeyCode::Backspace => Some(Action::PaletteBackspace),
+            KeyCode::Enter => Some(Action::PaletteSubmit),
+            KeyCode::Char(character) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                Some(Action::PaletteCharacter(character))
+            }
+            _ => None,
+        };
+    }
+
+    if process_search_open {
+        return match key.code {
+            KeyCode::Esc => Some(Action::CloseProcessSearch),
+            KeyCode::Up => Some(Action::ProcessSearchUp),
+            KeyCode::Down => Some(Action::ProcessSearchDown),
+            KeyCode::Backspace => Some(Action::ProcessSearchBackspace),
+            KeyCode::Enter => Some(Action::ProcessSearchSubmit),
+            KeyCode::Char(character) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                Some(Action::ProcessSearchCharacter(character))
+            }
+            _ => None,
+        };
+    }
+
+    if config_open {
+        return match key.code {
+            KeyCode::Esc => Some(Action::CloseConfig),
+            KeyCode::Up => Some(Action::ConfigUp),
+            KeyCode::Down => Some(Action::ConfigDown),
+            KeyCode::Left => Some(Action::ConfigPrevious),
+            KeyCode::Right => Some(Action::ConfigNext),
+            KeyCode::Enter => Some(Action::ConfigToggle),
+            _ => None,
+        };
+    }
+
+    match key.code {
+        KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            Some(Action::OpenPalette)
+        }
+        KeyCode::Tab => Some(Action::FocusNext),
+        KeyCode::BackTab => Some(Action::FocusPrevious),
+        KeyCode::Esc if focus_active => Some(Action::ExitFocus),
+        KeyCode::Esc | KeyCode::Char('q') => Some(Action::Quit),
+        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => Some(Action::Quit),
+        _ => None,
+    }
 }
 
 fn main() -> io::Result<()> {
@@ -72,30 +143,65 @@ fn run_app(
     collector: &mut SystemInfoCollector,
     app: &mut AppState,
 ) -> io::Result<()> {
-    let tick_rate = Duration::from_secs(1);
-    let mut last_tick = Instant::now() - tick_rate;
+    let render_interval = Duration::from_millis(33);
+    let mut last_collection = Instant::now() - app.refresh_interval();
+    let mut last_render = Instant::now() - render_interval;
+    let mut last_animation_update = Instant::now();
+    let mut render_pending = true;
 
     loop {
-        if last_tick.elapsed() >= tick_rate {
-            let info = collector.collect(Instant::now());
+        let now = Instant::now();
+        let mut collected = false;
+        let collection_interval = app.refresh_interval();
 
-            app.update_cpu_history(info.cpu_usage);
-
-            terminal.draw(|frame| {
-                ui::dashboard::draw(frame, &info, app);
-            })?;
-
-            last_tick = Instant::now();
+        if last_collection.elapsed() >= collection_interval {
+            let info = collector.collect(now);
+            app.update(info);
+            last_collection = now;
+            collected = true;
+            render_pending = true;
         }
 
-        let timeout = tick_rate
-            .checked_sub(last_tick.elapsed())
+        let animation_delta = now.saturating_duration_since(last_animation_update);
+        last_animation_update = now;
+        if app.update_animations(animation_delta) {
+            render_pending = true;
+        }
+
+        let render_due = last_render.elapsed() >= render_interval;
+        if render_pending && (collected || render_due || !app.animations_active()) {
+            terminal.draw(|frame| {
+                ui::dashboard::draw_app(frame, app);
+            })?;
+            last_render = now;
+            render_pending = false;
+        }
+
+        let until_collection = collection_interval
+            .checked_sub(last_collection.elapsed())
             .unwrap_or(Duration::ZERO);
+        let until_render = render_interval
+            .checked_sub(last_render.elapsed())
+            .unwrap_or(Duration::ZERO);
+        let timeout = if app.animations_active() || render_pending {
+            until_collection.min(until_render)
+        } else {
+            until_collection
+        };
 
         if event::poll(timeout)? {
             loop {
-                if should_quit(event::read()?) {
-                    return Ok(());
+                if let Some(action) = action_for_event(
+                    event::read()?,
+                    app.palette().is_open(),
+                    app.process_search().is_open(),
+                    app.config().is_open(),
+                    app.focus_active(),
+                ) {
+                    if app.dispatch(action) {
+                        return Ok(());
+                    }
+                    render_pending = true;
                 }
 
                 if !event::poll(Duration::ZERO)? {
