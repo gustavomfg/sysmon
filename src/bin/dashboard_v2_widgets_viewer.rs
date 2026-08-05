@@ -5,10 +5,29 @@ pub mod dashboard_v2;
 #[allow(unused_imports)]
 mod ui {
     pub use crate::dashboard_v2;
+
+    pub mod widgets {
+        pub use crate::pulse_v2;
+    }
 }
 #[allow(dead_code)]
 #[path = "../theme/mod.rs"]
 mod theme;
+
+#[path = "../ui/widgets/pulse_v2/mod.rs"]
+pub mod pulse_v2;
+
+mod pulse {
+    #[derive(Debug, Clone, Copy, Default, PartialEq)]
+    pub struct PulseInput {
+        pub cpu: f32,
+        pub memory: f32,
+        pub gpu: Option<f32>,
+        pub network: f32,
+        pub load: f32,
+        pub volatility: f32,
+    }
+}
 
 use std::{
     io,

@@ -1,5 +1,6 @@
 mod chart;
 mod engine;
+mod integration;
 mod layout;
 mod metrics;
 mod regions;
@@ -20,6 +21,10 @@ pub use chart::{
 };
 #[allow(unused_imports)]
 pub use engine::{DashboardEngine, DashboardFrame};
+#[allow(unused_imports)]
+pub(crate) use integration::{
+    DashboardV2Content, DashboardV2RenderError, DashboardV2RenderSummary, DashboardV2Renderer,
+};
 #[allow(unused_imports)]
 pub use layout::{DashboardLayout, DashboardLayoutEngine, DashboardSection};
 #[allow(unused_imports)]
