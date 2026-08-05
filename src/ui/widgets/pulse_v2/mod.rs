@@ -10,10 +10,12 @@
 
 mod engine;
 mod field;
+mod noise;
 mod types;
 
 pub use engine::{PulseV2Engine, PulseV2Frame};
 pub use field::{FieldError, FieldGradient, ScalarField};
+pub use noise::NoiseField;
 pub use types::{
     CoordinateError, DimensionsError, FieldDimensions, InputError, NormalizedPoint,
     NormalizedPulseInput, PresetParameters, PulseV2Preset,
@@ -26,8 +28,8 @@ mod tests {
     use crate::pulse::PulseInput;
 
     use super::{
-        FieldDimensions, FieldGradient, NormalizedPoint, NormalizedPulseInput, PulseV2Engine,
-        PulseV2Frame, PulseV2Preset, ScalarField,
+        FieldDimensions, FieldGradient, NoiseField, NormalizedPoint, NormalizedPulseInput,
+        PulseV2Engine, PulseV2Frame, PulseV2Preset, ScalarField,
     };
 
     #[test]
@@ -341,6 +343,138 @@ mod tests {
 
             assert_eq!(frame.preset(), expected);
             assert_eq!(frame.field().as_slice().len(), dimensions.sample_count());
+            assert_eq!(frame.noise().as_slice().len(), dimensions.sample_count());
+        }
+    }
+
+    #[test]
+    fn noise_field_is_populated_finite_bounded_and_separate_from_energy() {
+        let frame = generated(sample_input(), 2.0, false);
+        let noise = frame.noise();
+
+        assert!(!noise.is_empty());
+        assert_eq!(noise.dimensions(), frame.dimensions());
+        assert!(noise.read(0, 0).is_some());
+        assert!(noise.read(noise.width(), 0).is_none());
+        assert!(
+            noise
+                .as_slice()
+                .iter()
+                .all(|value| value.is_finite() && (0.0..=1.0).contains(value))
+        );
+        assert_ne!(noise.as_slice(), frame.field().as_slice());
+    }
+
+    #[test]
+    fn noise_is_deterministic_and_changes_continuously_over_time() {
+        let first = generated(sample_input(), 2.0, false);
+        let same = generated(sample_input(), 2.0, false);
+        let near = generated(sample_input(), 2.01, false);
+        let distant = generated(sample_input(), 18.0, false);
+
+        assert_eq!(first.noise(), same.noise());
+        let nearby_change = mean_noise_difference(first.noise(), near.noise());
+        let distant_change = mean_noise_difference(first.noise(), distant.noise());
+        assert!(nearby_change < 0.02);
+        assert!(distant_change > nearby_change);
+        assert!(distant_change > 0.02);
+    }
+
+    #[test]
+    fn reduced_motion_freezes_noise_without_removing_the_texture() {
+        let first = generated(sample_input(), 0.0, true);
+        let later = generated(sample_input(), 30.0, true);
+
+        assert_eq!(first.noise(), later.noise());
+        assert!(first.noise().as_slice().iter().any(|value| *value > 0.0));
+    }
+
+    #[test]
+    fn noise_has_useful_variance_without_grid_like_constant_blocks() {
+        let frame = generated(sample_input(), 3.0, false);
+        let noise = frame.noise();
+        let values = noise.as_slice();
+        let mean = values.iter().sum::<f32>() / values.len() as f32;
+        let variance = values
+            .iter()
+            .map(|value| (*value - mean).powi(2))
+            .sum::<f32>()
+            / values.len() as f32;
+        let adjacent = mean_horizontal_noise_difference(noise, 1);
+        let medium_scale = mean_horizontal_noise_difference(noise, 4);
+        let broad_scale = mean_horizontal_noise_difference(noise, 12);
+
+        assert!((0.25..=0.75).contains(&mean));
+        assert!(variance > 0.001);
+        assert!(adjacent > 0.0);
+        assert!(medium_scale > adjacent);
+        assert!(broad_scale > adjacent);
+        assert!(
+            values
+                .windows(2)
+                .any(|pair| (pair[1] - pair[0]).abs() > 0.001)
+        );
+    }
+
+    #[test]
+    fn noise_presets_add_complexity_without_changing_the_contract() {
+        let dimensions = FieldDimensions::new(140, 40).unwrap();
+        let parameters = [
+            PulseV2Preset::Compact.parameters(),
+            PulseV2Preset::Standard.parameters(),
+            PulseV2Preset::Widescreen.parameters(),
+            PulseV2Preset::LargeWidescreen.parameters(),
+        ];
+
+        assert_eq!(parameters[0].noise_octaves(), 3);
+        assert_eq!(parameters[1].noise_octaves(), 3);
+        assert_eq!(parameters[2].noise_octaves(), 4);
+        assert_eq!(parameters[3].noise_octaves(), 5);
+        assert!(
+            parameters
+                .windows(2)
+                .all(|pair| pair[1].noise_base_frequency() > pair[0].noise_base_frequency())
+        );
+        assert!(
+            parameters
+                .windows(2)
+                .all(|pair| pair[1].noise_micro_amplitude() > pair[0].noise_micro_amplitude())
+        );
+
+        let frame = PulseV2Engine::new()
+            .generate(dimensions, sample_input(), Duration::from_secs(2), false)
+            .unwrap();
+        assert_eq!(frame.preset(), PulseV2Preset::LargeWidescreen);
+        assert!(!frame.noise().is_empty());
+        assert!(
+            frame
+                .noise()
+                .as_slice()
+                .iter()
+                .all(|value| value.is_finite())
+        );
+    }
+
+    #[test]
+    fn noise_supports_empty_minimum_and_representative_dimensions() {
+        let engine = PulseV2Engine::new();
+        for dimensions in [
+            FieldDimensions::new(0, 0).unwrap(),
+            FieldDimensions::new(1, 1).unwrap(),
+            FieldDimensions::new(2, 1).unwrap(),
+            FieldDimensions::new(160, 80).unwrap(),
+        ] {
+            let frame = engine
+                .generate(dimensions, sample_input(), Duration::from_secs(1), false)
+                .unwrap();
+            assert_eq!(frame.noise().as_slice().len(), dimensions.sample_count());
+            assert!(
+                frame
+                    .noise()
+                    .as_slice()
+                    .iter()
+                    .all(|value| value.is_finite() && (0.0..=1.0).contains(value))
+            );
         }
     }
 
@@ -370,6 +504,32 @@ mod tests {
             .map(|(left, right)| (left - right).abs())
             .sum::<f32>()
             / left.as_slice().len() as f32
+    }
+
+    fn mean_noise_difference(left: &NoiseField, right: &NoiseField) -> f32 {
+        left.as_slice()
+            .iter()
+            .zip(right.as_slice())
+            .map(|(left, right)| (left - right).abs())
+            .sum::<f32>()
+            / left.as_slice().len().max(1) as f32
+    }
+
+    fn mean_horizontal_noise_difference(noise: &NoiseField, distance: usize) -> f32 {
+        let width = noise.width();
+        if width <= distance {
+            return 0.0;
+        }
+
+        let mut total = 0.0;
+        let mut count = 0;
+        for y in 0..noise.height() {
+            for x in 0..(width - distance) {
+                total += (noise.read(x + distance, y).unwrap() - noise.read(x, y).unwrap()).abs();
+                count += 1;
+            }
+        }
+        total / count.max(1) as f32
     }
 
     fn center_energy(field: &ScalarField) -> f32 {

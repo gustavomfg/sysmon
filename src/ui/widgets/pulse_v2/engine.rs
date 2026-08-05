@@ -1,6 +1,9 @@
 use std::time::Duration;
 
-use super::{FieldDimensions, FieldError, NormalizedPulseInput, PulseV2Preset, ScalarField};
+use super::{
+    FieldDimensions, FieldError, NoiseField, NormalizedPulseInput, PulseV2Preset, ScalarField,
+    noise,
+};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PulseV2Engine;
@@ -11,6 +14,7 @@ pub struct PulseV2Frame {
     preset: PulseV2Preset,
     input: NormalizedPulseInput,
     field: ScalarField,
+    noise: NoiseField,
     elapsed: Duration,
     reduced_motion: bool,
 }
@@ -27,12 +31,14 @@ impl PulseV2Engine {
     ) -> Result<PulseV2Frame, FieldError> {
         let preset = PulseV2Preset::from_dimensions(dimensions);
         let field = ScalarField::try_new(dimensions)?;
+        let noise = NoiseField::try_new(dimensions)?;
 
         Ok(PulseV2Frame {
             dimensions,
             preset,
             input,
             field,
+            noise,
             elapsed: Duration::ZERO,
             reduced_motion: true,
         })
@@ -62,11 +68,14 @@ impl PulseV2Engine {
             }
         }
 
+        let noise = noise::generate(dimensions, input, preset, elapsed, reduced_motion)?;
+
         Ok(PulseV2Frame {
             dimensions,
             preset,
             input,
             field,
+            noise,
             elapsed,
             reduced_motion,
         })
@@ -90,8 +99,13 @@ impl PulseV2Frame {
         &self.field
     }
 
+    pub fn noise(&self) -> &NoiseField {
+        &self.noise
+    }
+
     pub fn is_empty(&self) -> bool {
         self.field.as_slice().iter().all(|value| *value == 0.0)
+            && self.noise.as_slice().iter().all(|value| *value == 0.0)
     }
 
     pub fn elapsed(&self) -> Duration {

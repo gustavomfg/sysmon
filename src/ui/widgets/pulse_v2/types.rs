@@ -201,10 +201,14 @@ pub enum PulseV2Preset {
     LargeWidescreen,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PresetParameters {
     sample_limit: usize,
     complexity: u8,
+    noise_base_frequency: f32,
+    noise_octaves: u8,
+    noise_micro_amplitude: f32,
+    noise_time_speed: f32,
 }
 
 impl PulseV2Preset {
@@ -224,16 +228,27 @@ impl PulseV2Preset {
     }
 
     pub fn parameters(self) -> PresetParameters {
-        let (sample_limit, complexity) = match self {
-            Self::Compact => (16_384, 1),
-            Self::Standard => (65_536, 2),
-            Self::Widescreen => (262_144, 3),
-            Self::LargeWidescreen => (MAX_FIELD_SAMPLES, 4),
+        let (
+            sample_limit,
+            complexity,
+            noise_base_frequency,
+            noise_octaves,
+            noise_micro_amplitude,
+            noise_time_speed,
+        ) = match self {
+            Self::Compact => (16_384, 1, 1.20, 3, 0.065, 0.075),
+            Self::Standard => (65_536, 2, 1.40, 3, 0.080, 0.090),
+            Self::Widescreen => (262_144, 3, 1.58, 4, 0.095, 0.105),
+            Self::LargeWidescreen => (MAX_FIELD_SAMPLES, 4, 1.76, 5, 0.110, 0.120),
         };
 
         PresetParameters {
             sample_limit,
             complexity,
+            noise_base_frequency,
+            noise_octaves,
+            noise_micro_amplitude,
+            noise_time_speed,
         }
     }
 }
@@ -245,5 +260,21 @@ impl PresetParameters {
 
     pub fn complexity(self) -> u8 {
         self.complexity
+    }
+
+    pub(crate) fn noise_base_frequency(self) -> f32 {
+        self.noise_base_frequency
+    }
+
+    pub(crate) fn noise_octaves(self) -> u8 {
+        self.noise_octaves
+    }
+
+    pub(crate) fn noise_micro_amplitude(self) -> f32 {
+        self.noise_micro_amplitude
+    }
+
+    pub(crate) fn noise_time_speed(self) -> f32 {
+        self.noise_time_speed
     }
 }
