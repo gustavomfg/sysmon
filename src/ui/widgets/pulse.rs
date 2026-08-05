@@ -30,6 +30,15 @@ const FLOW_LAYERS: usize = 4;
 const FIELD_THRESHOLD: f32 = 0.035;
 const ACTIVE_ENERGY_EPSILON: f32 = 0.018;
 const LIGHTING_BUCKETS: usize = 64;
+const ATMOSPHERE_FLOOR: f32 = 0.30;
+const ATMOSPHERE_CEILING: f32 = 0.045;
+const RETURN_FLOOR: f32 = 0.64;
+const RETURN_CEILING: f32 = 0.96;
+const ATMOSPHERE_LAYER_BASE: usize = FLOW_LAYERS;
+const RETURN_LAYER_BASE: usize = FLOW_LAYERS * 2;
+const AMBIENT_DUST_LAYER: usize = FLOW_LAYERS * 3;
+const AMBIENT_TRACER_LAYER: usize = AMBIENT_DUST_LAYER + 1;
+const AMBIENT_GLINT_LAYER: usize = AMBIENT_DUST_LAYER + 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PulsePreset {
@@ -442,6 +451,48 @@ struct Particle {
     edge: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FilamentClass {
+    Primary,
+    Secondary,
+    Ghost,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct FilamentProfile {
+    class: FilamentClass,
+    radius_scale: f32,
+}
+
+fn filament_profile(particle: Particle, progress: f32, time: f32) -> FilamentProfile {
+    let class = if particle.depth >= 0.68 {
+        FilamentClass::Primary
+    } else if particle.depth >= 0.38 {
+        FilamentClass::Secondary
+    } else {
+        FilamentClass::Ghost
+    };
+    let progress = progress.clamp(0.0, 1.0);
+    let phase = particle.phase
+        + time * (0.035 + particle.depth * 0.025)
+        + progress * TAU * (0.28 + particle.depth * 0.16)
+        + particle.layer as f32 * 0.37;
+    let broad_variation = phase.sin();
+    let fine_variation = (phase * 0.71 + particle.phase * 0.23).cos();
+    let radius_variation =
+        (0.995 + broad_variation * 0.006 + fine_variation * 0.004).clamp(0.985, 1.005);
+    let class_radius = match class {
+        FilamentClass::Primary => 1.04,
+        FilamentClass::Secondary => 1.00,
+        FilamentClass::Ghost => 0.96,
+    };
+
+    FilamentProfile {
+        class,
+        radius_scale: (class_radius * radius_variation).clamp(0.68, 1.18),
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 struct FlowLobe {
     center: (f32, f32),
@@ -605,6 +656,68 @@ struct CoreState {
     reconnection: f32,
     compression: f32,
     breath: f32,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CompressionZone {
+    center: (f32, f32),
+    entry_x: f32,
+    exit_x: f32,
+    fusion_half_width: f32,
+    skew: f32,
+}
+
+impl CompressionZone {
+    fn from(flow: &FlowField, health: PulseHealth) -> Self {
+        let pressure = health.pressure();
+        let center = (
+            (flow.core.position.0 + 0.026 + flow.network_bias * 0.014).clamp(0.34, 0.68),
+            (flow.core.position.1 - 0.018 + flow.network_bias * 0.010).clamp(0.30, 0.70),
+        );
+        let entry_span = (0.25 + flow.core.radius * 0.85 + pressure * 0.035).clamp(0.25, 0.38);
+        let exit_span = (0.23 + flow.core.radius * 0.72 + pressure * 0.030).clamp(0.23, 0.36);
+
+        Self {
+            center,
+            entry_x: (center.0 - entry_span).clamp(0.12, 0.46),
+            exit_x: (center.0 + exit_span).clamp(0.54, 0.88),
+            fusion_half_width: (0.065 + flow.core.radius * 0.22 + pressure * 0.014)
+                .clamp(0.065, 0.11),
+            skew: 0.058 + pressure * 0.024 + flow.network_bias.abs() * 0.012,
+        }
+    }
+
+    fn project(&self, position: (f32, f32), phase: f32, layer: usize, depth: f32) -> (f32, f32) {
+        if position.0 < self.entry_x || position.0 > self.exit_x {
+            return position;
+        }
+
+        let incoming =
+            smoothstep((position.0 - self.entry_x) / (self.center.0 - self.entry_x).max(0.001));
+        let outgoing =
+            smoothstep((position.0 - self.center.0) / (self.exit_x - self.center.0).max(0.001));
+        let strand = ((phase * 0.61 + layer as f32 * 1.17).sin() * 0.72
+            + (phase * 1.31 + depth * TAU).cos() * 0.28)
+            .clamp(-1.0, 1.0);
+        let centerline = if position.0 <= self.center.0 {
+            self.center.1 + self.skew * (1.0 - incoming)
+        } else {
+            self.center.1 + self.skew * 0.55 * outgoing
+        };
+        let width_factor = if position.0 <= self.center.0 {
+            1.0 - incoming * 0.78
+        } else {
+            0.22 + outgoing * 0.78
+        };
+        let strand_offset = strand * (0.009 + depth * 0.014 * outgoing);
+        let mut y = centerline + (position.1 - centerline) * width_factor + strand_offset;
+
+        let fusion = 1.0
+            - smoothstep(((position.0 - self.center.0).abs() / self.fusion_half_width).max(0.0));
+        let fused_center = self.center.1 + strand * 0.008;
+        y = y + (fused_center - y) * fusion * 0.46;
+        (position.0, y.clamp(-0.06, 1.06))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -909,6 +1022,7 @@ fn build_field(
         field_time,
         pulse.reduced_motion(),
     );
+    let compression_zone = CompressionZone::from(&flow, health);
     let particle_count = active_particle_count(parameters.particles, health, pulse);
 
     for particle_index in 0..particle_count {
@@ -939,6 +1053,9 @@ fn build_field(
                 parameters.virtual_margin,
             );
             if step % parameters.splat_stride == 0 || step + 1 == parameters.advection_steps {
+                let progress =
+                    step as f32 / parameters.advection_steps.saturating_sub(1).max(1) as f32;
+                let morphology = filament_profile(particle, progress, field_time);
                 let (_, compression, reconnection) = flow.convergence(position, particle.direction);
                 let sampler_weight = landscape.sampler_weight(position);
                 let rhythm = 0.68
@@ -963,17 +1080,30 @@ fn build_field(
                 } else {
                     energy
                 };
-                let radius = parameters.splat_radius
+                let radius = (parameters.splat_radius
                     + particle.depth * 0.16
                     + compression * 0.52
                     + sampler_weight * 0.12
                     + if particle.edge { 0.42 } else { 0.0 }
-                    + if glint { 0.18 } else { 0.0 };
+                    + if glint { 0.18 } else { 0.0 })
+                    * morphology.radius_scale;
                 let depth = (particle.depth * (0.46 + compression * 0.36 + reconnection * 0.18))
                     .clamp(0.0, 1.0);
-                field.deposit_segment(
+                let visual_start = compression_zone.project(
                     segment_start,
+                    particle.phase,
+                    particle.layer,
+                    particle.depth,
+                );
+                let visual_end = compression_zone.project(
                     next_position,
+                    particle.phase,
+                    particle.layer,
+                    particle.depth,
+                );
+                field.deposit_segment(
+                    visual_start,
+                    visual_end,
                     energy,
                     radius,
                     particle.layer,
@@ -1002,8 +1132,388 @@ fn build_field(
         pulse,
         parameters.step_size,
     );
+    let atmosphere = build_atmospheric_layer(&field, preset, health, field_time, pulse, &flow);
+    merge_atmospheric_layer(&mut field, &atmosphere);
+    let return_layer = build_return_layer(&field, preset, health, field_time, pulse, &flow);
+    merge_return_layer(&mut field, &return_layer);
+    let atmospheric_particles =
+        build_atmospheric_particles(&field, preset, health, field_time, pulse, &flow);
+    rasterize_atmospheric_particles(&mut field, &atmospheric_particles);
 
     field
+}
+
+fn build_atmospheric_layer(
+    field: &FieldFrame,
+    preset: PulsePreset,
+    health: PulseHealth,
+    time: f32,
+    pulse: &PulseModel,
+    flow: &FlowField,
+) -> FieldFrame {
+    let mut atmosphere = FieldFrame::new(field.width, field.height, field.dot_aspect == 1.0);
+    let filament_count = match preset {
+        PulsePreset::Compact => 1,
+        PulsePreset::Standard => 2,
+        PulsePreset::Widescreen => 3,
+        PulsePreset::LargeWidescreen => 4,
+    };
+    let steps = (field.width as f32 * 1.20).round().clamp(40.0, 220.0) as usize;
+    let motion = if pulse.reduced_motion() { 0.0 } else { 1.0 };
+    let energy = 0.13 + health.density() * 0.015;
+
+    for filament in 0..filament_count {
+        let phase = hash01(filament * 113 + 41) * TAU;
+        let depth = 0.035 + hash01(filament * 127 + 53) * 0.11;
+        let mut position = (
+            -0.14 - hash01(filament * 139 + 67) * 0.06,
+            (ATMOSPHERE_CEILING
+                + 0.13
+                + hash01(filament * 149 + 79) * 0.11
+                + (time * 0.008 * motion + phase).sin() * 0.008 * motion)
+                .clamp(ATMOSPHERE_CEILING, ATMOSPHERE_FLOOR - 0.015),
+        );
+        let mut segment_start = position;
+
+        for step in 0..steps {
+            let progress = step as f32 / steps as f32;
+            let velocity = flow.velocity(position);
+            let slow_phase = phase + time * 0.008 * motion + progress * TAU * 0.34;
+            let lateral_drift = (slow_phase + velocity.1 * 0.9).sin() * 0.0016 * motion;
+            let next_position = (
+                position.0 + (1.26 / steps as f32) * (0.88 + velocity.0 * 0.12),
+                (position.1 + velocity.1 * 0.004 * motion + lateral_drift)
+                    .clamp(ATMOSPHERE_CEILING, ATMOSPHERE_FLOOR - 0.015),
+            );
+            let local_energy = energy * (0.86 + hash01(filament * 173 + step * 7) * 0.16);
+            let radius = 0.62 + depth * 0.26;
+            atmosphere.deposit_segment(
+                segment_start,
+                next_position,
+                local_energy,
+                radius,
+                filament,
+                depth,
+            );
+            segment_start = next_position;
+            position = next_position;
+        }
+    }
+
+    atmosphere.diffuse(1, 0.10);
+    atmosphere
+}
+
+fn merge_atmospheric_layer(field: &mut FieldFrame, atmosphere: &FieldFrame) {
+    let upper_height = ((field.height as f32 * ATMOSPHERE_FLOOR).ceil() as usize).min(field.height);
+    for y in 0..upper_height {
+        for x in 0..field.width {
+            let index = y * field.width + x;
+            let distant = atmosphere.samples[index];
+            if distant.energy <= 0.0 {
+                continue;
+            }
+
+            let contribution = (distant.energy * 0.86).clamp(0.0, 0.13);
+            let sample = &mut field.samples[index];
+            let existing_energy = sample.energy;
+            sample.energy = (existing_energy + contribution).clamp(0.0, 1.0);
+            if distant.energy > existing_energy {
+                sample.layer = ATMOSPHERE_LAYER_BASE + distant.layer % FLOW_LAYERS;
+                sample.depth = distant.depth;
+            }
+        }
+    }
+}
+
+fn build_return_layer(
+    field: &FieldFrame,
+    preset: PulsePreset,
+    health: PulseHealth,
+    time: f32,
+    pulse: &PulseModel,
+    flow: &FlowField,
+) -> FieldFrame {
+    let mut return_layer = FieldFrame::new(field.width, field.height, field.dot_aspect == 1.0);
+    let branch_count = match preset {
+        PulsePreset::Compact => 1,
+        PulsePreset::Standard => 2,
+        PulsePreset::Widescreen => 2,
+        PulsePreset::LargeWidescreen => 3,
+    };
+    let steps = (field.width as f32 * 1.35).round().clamp(48.0, 240.0) as usize;
+    let motion = if pulse.reduced_motion() { 0.0 } else { 1.0 };
+    let energy = 0.078 + health.density() * 0.010;
+    let outlet = flow.velocity((flow.core.position.0 + 0.08, flow.core.position.1));
+    let origin_y =
+        (flow.core.position.1 + 0.17 + outlet.1 * 0.035).clamp(RETURN_FLOOR + 0.02, 0.82);
+
+    for branch in 0..branch_count {
+        let phase = hash01(branch * 181 + 97) * TAU;
+        let depth = 0.050 + hash01(branch * 193 + 109) * 0.095;
+        let direction = if branch % 3 == 0 { -1.0 } else { 1.0 };
+        let lateral_offset = (hash01(branch * 211 + 127) - 0.5) * 0.12;
+        let mut position = (
+            flow.core.position.0 + outlet.0 * 0.06 + direction * 0.028,
+            (origin_y + lateral_offset).clamp(RETURN_FLOOR, RETURN_CEILING - 0.025),
+        );
+        let mut segment_start = position;
+
+        for step in 0..steps {
+            let progress = step as f32 / steps as f32;
+            let velocity = flow.velocity(position);
+            let slow_phase = phase + time * 0.006 * motion + progress * TAU * 0.18;
+            let broad_wave = (slow_phase + velocity.0 * 0.35).sin() * 0.0028 * motion;
+            let next_position = (
+                position.0 + direction * (1.30 / steps as f32) * (0.86 + velocity.0.abs() * 0.06),
+                (position.1
+                    + velocity.1 * 0.0025 * motion
+                    + broad_wave
+                    + (origin_y - position.1) * 0.004)
+                    .clamp(RETURN_FLOOR, RETURN_CEILING - 0.025),
+            );
+            let local_energy = energy * (0.84 + hash01(branch * 227 + step * 11) * 0.12);
+            let radius = 0.72 + depth * 0.22;
+            return_layer.deposit_segment(
+                segment_start,
+                next_position,
+                local_energy,
+                radius,
+                branch,
+                depth,
+            );
+            segment_start = next_position;
+            position = next_position;
+        }
+    }
+
+    return_layer.diffuse(1, 0.08);
+    return_layer
+}
+
+fn merge_return_layer(field: &mut FieldFrame, return_layer: &FieldFrame) {
+    let lower_height = ((field.height as f32 * RETURN_FLOOR).floor() as usize).min(field.height);
+    for y in lower_height..field.height {
+        for x in 0..field.width {
+            let index = y * field.width + x;
+            let distant = return_layer.samples[index];
+            if distant.energy <= 0.0 {
+                continue;
+            }
+
+            let contribution = (distant.energy * 0.74).clamp(0.0, 0.08);
+            let sample = &mut field.samples[index];
+            let existing_energy = sample.energy;
+            sample.energy = (existing_energy + contribution).clamp(0.0, 1.0);
+            if distant.energy > existing_energy {
+                sample.layer = RETURN_LAYER_BASE + distant.layer % FLOW_LAYERS;
+                sample.depth = distant.depth;
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AtmosphericParticleKind {
+    Dust,
+    Tracer,
+    Glint,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct AtmosphericParticle {
+    position: (f32, f32),
+    energy: f32,
+    radius: f32,
+    depth: f32,
+    kind: AtmosphericParticleKind,
+}
+
+fn atmospheric_particle_budget(preset: PulsePreset) -> (usize, usize, usize) {
+    match preset {
+        PulsePreset::Compact => (5, 1, 0),
+        PulsePreset::Standard => (8, 2, 1),
+        PulsePreset::Widescreen => (12, 3, 3),
+        PulsePreset::LargeWidescreen => (16, 4, 5),
+    }
+}
+
+fn build_atmospheric_particles(
+    field: &FieldFrame,
+    preset: PulsePreset,
+    health: PulseHealth,
+    time: f32,
+    pulse: &PulseModel,
+    flow: &FlowField,
+) -> Vec<AtmosphericParticle> {
+    let (dust_count, tracer_count, glint_count) = atmospheric_particle_budget(preset);
+    let capacity = dust_count + tracer_count + glint_count;
+    let mut particles = Vec::with_capacity(capacity);
+    let motion = if pulse.reduced_motion() { 0.0 } else { 1.0 };
+    let core = flow.core.position;
+
+    for index in 0..dust_count {
+        let phase = hash01(index * 271 + 31) * TAU;
+        let cluster = index / 3;
+        let cluster_band = cluster % 4;
+        let cluster_anchor = match cluster_band {
+            0 => (
+                0.12 + hash01(cluster * 401 + 139) * 0.76,
+                0.11 + hash01(cluster * 409 + 149) * 0.12,
+            ),
+            1 => (
+                0.12 + hash01(cluster * 419 + 157) * 0.76,
+                0.78 + hash01(cluster * 421 + 163) * 0.12,
+            ),
+            2 => (
+                (core.0 + (hash01(cluster * 431 + 167) - 0.5) * 0.18).clamp(0.16, 0.84),
+                (core.1 + (hash01(cluster * 433 + 173) - 0.5) * 0.18).clamp(0.34, 0.66),
+            ),
+            _ => (
+                0.18 + hash01(cluster * 439 + 179) * 0.64,
+                0.67 + hash01(cluster * 443 + 181) * 0.12,
+            ),
+        };
+        let cluster_spread_x = 0.045 + hash01(cluster * 449 + 191) * 0.025;
+        let cluster_spread_y = 0.026 + hash01(cluster * 457 + 193) * 0.018;
+        let seed = (
+            (cluster_anchor.0 + (hash01(index * 277 + 43) - 0.5) * cluster_spread_x)
+                .clamp(0.08, 0.92),
+            (cluster_anchor.1 + (hash01(index * 281 + 47) - 0.5) * cluster_spread_y)
+                .clamp(0.055, 0.945),
+        );
+        let drift = time * 0.006 * motion + phase;
+        let position = (
+            (seed.0 + drift.sin() * 0.018).clamp(0.02, 0.98),
+            (seed.1 + (drift * 0.73).cos() * 0.012 * motion).clamp(0.035, 0.965),
+        );
+        particles.push(AtmosphericParticle {
+            position,
+            energy: 0.086 + hash01(index * 293 + 61) * 0.032,
+            radius: 0.28 + hash01(index * 307 + 67) * 0.12,
+            depth: 0.018 + hash01(index * 311 + 71) * 0.075,
+            kind: AtmosphericParticleKind::Dust,
+        });
+    }
+
+    for index in 0..tracer_count {
+        let seed = (
+            0.10 + hash01(index * 331 + 79) * 0.80,
+            0.18 + hash01(index * 337 + 83) * 0.64,
+        );
+        let anchor = atmospheric_energy_anchor(field, seed, index);
+        let position = advect_atmospheric_position(
+            anchor,
+            if index.is_multiple_of(2) { 1.0 } else { -1.0 },
+            time,
+            0.007 + hash01(index * 347 + 89) * 0.003,
+            flow,
+            0.06,
+            motion,
+        );
+        let local_energy = field.local_energy(position, 2.4);
+        particles.push(AtmosphericParticle {
+            position,
+            energy: 0.125 + local_energy.clamp(0.0, 0.28) * 0.060,
+            radius: 0.38 + hash01(index * 353 + 97) * 0.12,
+            depth: 0.14 + hash01(index * 359 + 101) * 0.15,
+            kind: AtmosphericParticleKind::Tracer,
+        });
+    }
+
+    for index in 0..glint_count {
+        let phase = hash01(index * 367 + 103) * TAU;
+        let angle = phase + health.volatility() * 0.35;
+        let radius = flow.core.radius * (1.15 + hash01(index * 373 + 107) * 0.85);
+        let seed = (
+            (core.0 + angle.cos() * radius).clamp(0.04, 0.96),
+            (core.1 + angle.sin() * radius * 0.72).clamp(0.06, 0.94),
+        );
+        if field.local_energy(seed, 2.6) <= FIELD_THRESHOLD {
+            continue;
+        }
+        let position = advect_atmospheric_position(
+            seed,
+            if index.is_multiple_of(2) { 1.0 } else { -1.0 },
+            time,
+            0.0015,
+            flow,
+            0.04,
+            motion,
+        );
+        let local_energy = field.local_energy(position, 2.6);
+        if local_energy <= FIELD_THRESHOLD {
+            continue;
+        }
+        particles.push(AtmosphericParticle {
+            position,
+            energy: 0.255 + local_energy.clamp(0.0, 0.40) * 0.14,
+            radius: 0.52 + hash01(index * 379 + 109) * 0.16,
+            depth: 0.62 + hash01(index * 383 + 113) * 0.22,
+            kind: AtmosphericParticleKind::Glint,
+        });
+    }
+
+    particles
+}
+
+fn atmospheric_energy_anchor(field: &FieldFrame, seed: (f32, f32), index: usize) -> (f32, f32) {
+    let mut best = seed;
+    let mut best_energy = field.local_energy(seed, 2.4);
+    for candidate in 0..7 {
+        let candidate_position = (
+            (seed.0 + (hash01(index * 389 + candidate * 17 + 127) - 0.5) * 0.30)
+                .clamp(0.035, 0.965),
+            (seed.1 + (hash01(index * 397 + candidate * 19 + 131) - 0.5) * 0.24)
+                .clamp(0.055, 0.945),
+        );
+        let candidate_energy = field.local_energy(candidate_position, 2.4);
+        if candidate_energy > best_energy {
+            best = candidate_position;
+            best_energy = candidate_energy;
+        }
+    }
+    best
+}
+
+fn advect_atmospheric_position(
+    mut position: (f32, f32),
+    direction: f32,
+    time: f32,
+    speed: f32,
+    flow: &FlowField,
+    virtual_margin: f32,
+    motion: f32,
+) -> (f32, f32) {
+    let distance = time.max(0.0) * speed * motion;
+    let integration_steps = 8;
+    for _ in 0..integration_steps {
+        let velocity = flow.velocity(position);
+        position.0 = wrap_virtual(
+            position.0 + velocity.0 * distance / integration_steps as f32 * direction,
+            virtual_margin,
+        );
+        position.1 += velocity.1 * distance / integration_steps as f32 * direction;
+        position.1 = reflect(position.1, 0.035, 0.965);
+    }
+    position
+}
+
+fn rasterize_atmospheric_particles(field: &mut FieldFrame, particles: &[AtmosphericParticle]) {
+    for particle in particles {
+        let layer = match particle.kind {
+            AtmosphericParticleKind::Dust => AMBIENT_DUST_LAYER,
+            AtmosphericParticleKind::Tracer => AMBIENT_TRACER_LAYER,
+            AtmosphericParticleKind::Glint => AMBIENT_GLINT_LAYER,
+        };
+        field.deposit(
+            particle.position,
+            particle.energy,
+            particle.radius,
+            layer,
+            particle.depth,
+        );
+    }
 }
 
 fn active_particle_count(base: usize, health: PulseHealth, pulse: &PulseModel) -> usize {
@@ -1307,6 +1817,29 @@ fn perceptual_intensity(energy: f32, lighting: LightingRange, dot_count: u32) ->
     intensity.clamp(0.0, 0.96)
 }
 
+fn hierarchy_luminance(sample: EnergySample) -> f32 {
+    let depth = sample.depth.clamp(0.0, 1.0);
+    if sample.layer >= AMBIENT_GLINT_LAYER {
+        return (0.88 + depth * 0.08).clamp(0.0, 1.0);
+    }
+    if sample.layer >= AMBIENT_TRACER_LAYER {
+        return (0.70 + depth * 0.10).clamp(0.0, 1.0);
+    }
+    if sample.layer >= AMBIENT_DUST_LAYER {
+        return (0.52 + depth * 0.08).clamp(0.0, 1.0);
+    }
+    if sample.layer >= RETURN_LAYER_BASE {
+        return (0.70 + depth * 0.12).clamp(0.0, 1.0);
+    }
+    if sample.layer >= ATMOSPHERE_LAYER_BASE {
+        return (0.56 + depth * 0.10).clamp(0.0, 1.0);
+    }
+
+    // Main-field depth is produced by compression, convergence and reconnection.
+    // It therefore supplies the natural lift that guides the eye to the core.
+    (0.86 + depth * 0.14).clamp(0.0, 1.0)
+}
+
 fn sample_style(
     theme: &Theme,
     health: PulseHealth,
@@ -1342,8 +1875,7 @@ fn sample_style(
     let intensity = perceptual_intensity(sample.energy, lighting, dot_count);
     let color_lift = (0.035 + flow * 0.055 + energetic * 0.12 + peak * 0.24).clamp(0.0, 0.42);
     color = blend_color(color, theme.text, color_lift);
-    let depth_signal = 0.78 + sample.depth * 0.22;
-    let brightness = (intensity * depth_signal).clamp(0.0, 0.96);
+    let brightness = (intensity * hierarchy_luminance(sample)).clamp(0.0, 0.96);
     let mut style = Style::default().fg(scale_color(color, brightness));
     if peak > 0.76 || (energetic > 0.82 && dot_count >= 3) {
         style = style.add_modifier(Modifier::BOLD);
@@ -1417,11 +1949,15 @@ mod tests {
     use ratatui::{layout::Rect, style::Modifier};
 
     use super::{
-        ACTIVE_ENERGY_EPSILON, ConvergenceState, EnergyLandscape, EnergySample, FIELD_THRESHOLD,
-        FieldFrame, FlowField, LightingRange, PulsePreset, apply_discharges, braille_lines,
-        build_field, core_state, detect_convergence, domain_aspect, field_for_area,
-        illuminate_convergence, perceptual_intensity, preset_for, sample_style, unicode_lines,
-        unicode_symbol, uses_braille,
+        ACTIVE_ENERGY_EPSILON, AMBIENT_DUST_LAYER, AMBIENT_GLINT_LAYER, ATMOSPHERE_FLOOR,
+        ATMOSPHERE_LAYER_BASE, AtmosphericParticleKind, CompressionZone, ConvergenceState,
+        EnergyLandscape, EnergySample, FIELD_THRESHOLD, FieldFrame, FilamentClass, FlowField,
+        LightingRange, Particle, PulsePreset, RETURN_FLOOR, RETURN_LAYER_BASE, apply_discharges,
+        atmospheric_particle_budget, braille_lines, build_atmospheric_layer,
+        build_atmospheric_particles, build_field, build_return_layer, core_state,
+        detect_convergence, domain_aspect, field_for_area, filament_profile, hierarchy_luminance,
+        illuminate_convergence, perceptual_intensity, preset_for, rasterize_atmospheric_particles,
+        sample_style, unicode_lines, unicode_symbol, uses_braille,
     };
     use crate::{
         pulse::{HealthState, PulseInput, PulseModel},
@@ -1623,6 +2159,46 @@ mod tests {
     }
 
     #[test]
+    fn filament_morphology_has_stable_tiers_and_continuous_variation() {
+        let particle = |depth| Particle {
+            position: (0.24, 0.42),
+            phase: 0.7,
+            direction: 1.0,
+            depth,
+            layer: 1,
+            edge: false,
+        };
+        let primary = filament_profile(particle(0.86), 0.42, 0.0);
+        let secondary = filament_profile(particle(0.50), 0.42, 0.0);
+        let ghost = filament_profile(particle(0.20), 0.42, 0.0);
+
+        assert_eq!(primary.class, FilamentClass::Primary);
+        assert_eq!(secondary.class, FilamentClass::Secondary);
+        assert_eq!(ghost.class, FilamentClass::Ghost);
+        assert!(primary.radius_scale > secondary.radius_scale);
+        assert!(secondary.radius_scale > ghost.radius_scale);
+
+        for depth in [0.20, 0.50, 0.86] {
+            let particle = particle(depth);
+            let previous = filament_profile(particle, 0.42, 0.0);
+            let next = filament_profile(particle, 0.43, 0.0);
+            assert!((previous.radius_scale - next.radius_scale).abs() < 0.02);
+            assert!((0.68..=1.18).contains(&next.radius_scale));
+        }
+
+        let pulse = pulse();
+        let first = field_for_area(80, 20, true, &pulse);
+        let same = field_for_area(80, 20, true, &pulse);
+        assert_eq!(first, same);
+        assert!(
+            first
+                .samples
+                .iter()
+                .all(|sample| { (0.0..=1.0).contains(&sample.energy) && sample.depth.is_finite() })
+        );
+    }
+
+    #[test]
     fn adjacent_times_preserve_a_shared_energy_structure() {
         let pulse = pulse();
         let first = build_field(
@@ -1694,6 +2270,82 @@ mod tests {
         assert!(energy > field.samples.len() / 80);
         assert!(peaks > 0);
         assert!(peaks * 8 < field.samples.len());
+    }
+
+    #[test]
+    fn lighting_hierarchy_keeps_the_core_above_ambient_planes() {
+        let energy = 0.34;
+        let upper = hierarchy_luminance(EnergySample {
+            energy,
+            layer: ATMOSPHERE_LAYER_BASE,
+            depth: 0.10,
+        });
+        let lower = hierarchy_luminance(EnergySample {
+            energy,
+            layer: RETURN_LAYER_BASE,
+            depth: 0.12,
+        });
+        let main = hierarchy_luminance(EnergySample {
+            energy,
+            layer: 0,
+            depth: 0.16,
+        });
+        let compression = hierarchy_luminance(EnergySample {
+            energy,
+            layer: 0,
+            depth: 0.82,
+        });
+        let dust = hierarchy_luminance(EnergySample {
+            energy,
+            layer: AMBIENT_DUST_LAYER,
+            depth: 0.06,
+        });
+        let glint = hierarchy_luminance(EnergySample {
+            energy,
+            layer: AMBIENT_GLINT_LAYER,
+            depth: 0.80,
+        });
+
+        assert!(upper < lower);
+        assert!(lower < main);
+        assert!(main < compression);
+        assert!(dust < main);
+        assert!(glint < compression);
+
+        let pulse = pulse();
+        let health = pulse.health();
+        let field = build_field(240, 120, true, PulsePreset::Widescreen, health, 0.0, &pulse);
+        let core = core_state(0.0, health, &pulse);
+        let lighting = field.lighting_range();
+        let core_peak = field
+            .samples
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| {
+                let x = *index % field.width;
+                let y = *index / field.width;
+                let position = (
+                    x as f32 / field.width.saturating_sub(1).max(1) as f32,
+                    y as f32 / field.height.saturating_sub(1).max(1) as f32,
+                );
+                (position.0 - core.position.0)
+                    .hypot((position.1 - core.position.1) * field.dot_aspect)
+                    < core.radius * 2.5
+            })
+            .map(|(_, sample)| {
+                perceptual_intensity(sample.energy, lighting, 8) * hierarchy_luminance(*sample)
+            })
+            .fold(0.0, f32::max);
+        let ambient_peak = field
+            .samples
+            .iter()
+            .filter(|sample| sample.layer >= ATMOSPHERE_LAYER_BASE)
+            .map(|sample| {
+                perceptual_intensity(sample.energy, lighting, 8) * hierarchy_luminance(*sample)
+            })
+            .fold(0.0, f32::max);
+
+        assert!(core_peak > ambient_peak);
     }
 
     #[test]
@@ -1994,6 +2646,422 @@ mod tests {
 
         assert!(before > 0.0);
         assert!(after > 0.0);
+    }
+
+    #[test]
+    fn compression_zone_reduces_spread_then_reopens_it() {
+        let pulse = pulse();
+        let health = pulse.health();
+        let core = core_state(0.0, health, &pulse);
+        let flow = FlowField::new(domain_aspect(240, 120, true), 0.0, health, &pulse, core);
+        let zone = CompressionZone::from(&flow, health);
+        let y_values = [0.20, 0.34, 0.48, 0.62, 0.78];
+        let incoming_x = zone.entry_x + (zone.center.0 - zone.entry_x) * 0.72;
+        let fused_x = zone.center.0;
+        let outgoing_x = zone.center.0 + (zone.exit_x - zone.center.0) * 0.72;
+        let spread = |x: f32| {
+            let projected = y_values
+                .iter()
+                .map(|y| zone.project((x, *y), 1.2, 1, 0.6))
+                .map(|position| position.1);
+            let (minimum, maximum) =
+                projected.fold((1.0_f32, 0.0_f32), |(min, max), y| (min.min(y), max.max(y)));
+            maximum - minimum
+        };
+
+        assert!(zone.exit_x - zone.entry_x > zone.fusion_half_width * 4.0);
+        assert!(zone.center.0 > 0.5);
+        assert!(spread(fused_x) < spread(incoming_x) * 0.45);
+        assert!(spread(outgoing_x) > spread(fused_x) * 2.0);
+    }
+
+    #[test]
+    fn compression_forms_a_continuous_bridge_and_reorients_the_exit() {
+        let pulse = pulse();
+        let health = pulse.health();
+        let field = build_field(240, 120, true, PulsePreset::Widescreen, health, 0.0, &pulse);
+        let core = core_state(0.0, health, &pulse);
+        let flow = FlowField::new(domain_aspect(240, 120, true), 0.0, health, &pulse, core);
+        let zone = CompressionZone::from(&flow, health);
+        let samples = [
+            zone.center.0 - zone.fusion_half_width * 2.0,
+            zone.center.0 - zone.fusion_half_width,
+            zone.center.0,
+            zone.center.0 + zone.fusion_half_width,
+        ];
+        let bridge = samples
+            .iter()
+            .map(|x| field.local_energy((*x, zone.center.1), 4.5))
+            .collect::<Vec<_>>();
+        assert!(bridge.iter().all(|energy| *energy > FIELD_THRESHOLD));
+        assert!(bridge[2] >= bridge[0] * 0.82);
+        assert!(bridge[2] >= bridge[3] * 0.82);
+
+        let incoming_a = zone.project((zone.entry_x + 0.06, zone.center.1 + 0.16), 0.9, 0, 0.35);
+        let incoming_b = zone.project((zone.entry_x + 0.16, zone.center.1 + 0.16), 0.9, 0, 0.35);
+        let outgoing_a = zone.project((zone.center.0 + 0.05, zone.center.1 + 0.16), 0.9, 0, 0.35);
+        let outgoing_b = zone.project((zone.center.0 + 0.15, zone.center.1 + 0.16), 0.9, 0, 0.35);
+        let incoming_slope = (incoming_b.1 - incoming_a.1) / (incoming_b.0 - incoming_a.0);
+        let outgoing_slope = (outgoing_b.1 - outgoing_a.1) / (outgoing_b.0 - outgoing_a.0);
+        assert!(incoming_slope * outgoing_slope < 0.0);
+        assert!(field.local_energy((zone.center.0 + 0.15, zone.center.1), 5.0) > 0.0);
+    }
+
+    #[test]
+    fn distant_atmosphere_is_sparse_upper_and_subordinate() {
+        let pulse = pulse();
+        let health = pulse.health();
+        let presets = [
+            PulsePreset::Compact,
+            PulsePreset::Standard,
+            PulsePreset::Widescreen,
+            PulsePreset::LargeWidescreen,
+        ];
+        let base = FieldFrame::new(160, 80, true);
+
+        for preset in presets {
+            let core = core_state(0.0, health, &pulse);
+            let flow = FlowField::new(domain_aspect(160, 80, true), 0.0, health, &pulse, core);
+            let atmosphere = build_atmospheric_layer(&base, preset, health, 0.0, &pulse, &flow);
+            let active = atmosphere
+                .samples
+                .iter()
+                .enumerate()
+                .filter(|(_, sample)| sample.energy > FIELD_THRESHOLD)
+                .collect::<Vec<_>>();
+
+            let maximum = atmosphere
+                .samples
+                .iter()
+                .map(|sample| sample.energy)
+                .fold(0.0, f32::max);
+            assert!(
+                !active.is_empty(),
+                "missing distant layer for {preset:?}, maximum={maximum}"
+            );
+            assert!(active.len() < atmosphere.samples.len() / 5);
+            assert!(
+                active
+                    .iter()
+                    .all(|(index, _)| index / atmosphere.width < atmosphere.height / 2)
+            );
+            assert!(active.iter().all(|(index, _)| index / atmosphere.width
+                < (atmosphere.height as f32 * ATMOSPHERE_FLOOR) as usize + 2));
+
+            let atmospheric_max = active
+                .iter()
+                .map(|(_, sample)| sample.energy)
+                .fold(0.0, f32::max);
+            let main = build_field(160, 80, true, preset, health, 0.0, &pulse);
+            let core_peak = main
+                .samples
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| {
+                    let x = index % main.width;
+                    let y = index / main.width;
+                    let position = (x as f32 / main.width as f32, y as f32 / main.height as f32);
+                    (position.0 - core.position.0)
+                        .hypot((position.1 - core.position.1) * main.dot_aspect)
+                        < core.radius * 2.5
+                })
+                .map(|(_, sample)| sample.energy)
+                .fold(0.0, f32::max);
+            assert!(atmospheric_max < core_peak);
+            assert!(
+                atmosphere
+                    .samples
+                    .iter()
+                    .all(|sample| (0.0..=1.0).contains(&sample.energy))
+            );
+        }
+    }
+
+    #[test]
+    fn distant_atmosphere_is_deterministic_and_reduced_motion_is_static() {
+        let pulse = pulse();
+        let health = pulse.health();
+        let base = FieldFrame::new(160, 80, true);
+        let core = core_state(0.0, health, &pulse);
+        let flow = FlowField::new(domain_aspect(160, 80, true), 0.0, health, &pulse, core);
+        let first =
+            build_atmospheric_layer(&base, PulsePreset::Widescreen, health, 0.0, &pulse, &flow);
+        let same =
+            build_atmospheric_layer(&base, PulsePreset::Widescreen, health, 0.0, &pulse, &flow);
+        assert_eq!(first, same);
+
+        let mut reduced = pulse;
+        reduced.set_reduced_motion(true);
+        let reduced_health = reduced.health();
+        let reduced_core = core_state(0.0, reduced_health, &reduced);
+        let reduced_flow = FlowField::new(
+            domain_aspect(160, 80, true),
+            0.0,
+            reduced_health,
+            &reduced,
+            reduced_core,
+        );
+        let reduced_first = build_atmospheric_layer(
+            &base,
+            PulsePreset::Widescreen,
+            reduced_health,
+            0.0,
+            &reduced,
+            &reduced_flow,
+        );
+        let reduced_later = build_atmospheric_layer(
+            &base,
+            PulsePreset::Widescreen,
+            reduced_health,
+            10.0,
+            &reduced,
+            &reduced_flow,
+        );
+        assert_eq!(reduced_first, reduced_later);
+    }
+
+    #[test]
+    fn return_layer_is_deep_long_and_subordinate() {
+        let pulse = pulse();
+        let health = pulse.health();
+        let presets = [
+            PulsePreset::Compact,
+            PulsePreset::Standard,
+            PulsePreset::Widescreen,
+            PulsePreset::LargeWidescreen,
+        ];
+        let base = FieldFrame::new(160, 80, true);
+
+        for preset in presets {
+            let core = core_state(0.0, health, &pulse);
+            let flow = FlowField::new(domain_aspect(160, 80, true), 0.0, health, &pulse, core);
+            let return_layer = build_return_layer(&base, preset, health, 0.0, &pulse, &flow);
+            let lower_start = (return_layer.height as f32 * RETURN_FLOOR).floor() as usize;
+            let active = return_layer
+                .samples
+                .iter()
+                .enumerate()
+                .filter(|(index, sample)| {
+                    index / return_layer.width >= lower_start && sample.energy > FIELD_THRESHOLD
+                })
+                .collect::<Vec<_>>();
+
+            assert!(!active.is_empty(), "missing return plane for {preset:?}");
+            assert!(active.len() < return_layer.samples.len() / 5);
+            assert!(
+                active
+                    .iter()
+                    .all(|(index, _)| { index / return_layer.width >= return_layer.height / 2 })
+            );
+
+            let columns = active
+                .iter()
+                .map(|(index, _)| index % return_layer.width)
+                .collect::<std::collections::HashSet<_>>();
+            assert!(columns.len() > return_layer.width / 4);
+
+            let maximum = active
+                .iter()
+                .map(|(_, sample)| sample.energy)
+                .fold(0.0, f32::max);
+            assert!(maximum < 0.30);
+            assert!(
+                return_layer
+                    .samples
+                    .iter()
+                    .all(|sample| (0.0..=1.0).contains(&sample.energy))
+            );
+        }
+
+        let core = core_state(0.0, health, &pulse);
+        let flow = FlowField::new(domain_aspect(160, 80, true), 0.0, health, &pulse, core);
+        let return_layer =
+            build_return_layer(&base, PulsePreset::Widescreen, health, 0.0, &pulse, &flow);
+        let left = return_layer
+            .samples
+            .chunks(return_layer.width)
+            .skip((return_layer.height as f32 * RETURN_FLOOR).floor() as usize)
+            .map(|row| row[0].energy)
+            .sum::<f32>();
+        let right = return_layer
+            .samples
+            .chunks(return_layer.width)
+            .skip((return_layer.height as f32 * RETURN_FLOOR).floor() as usize)
+            .map(|row| row[return_layer.width - 1].energy)
+            .sum::<f32>();
+        assert!(left > 0.0);
+        assert!(right > 0.0);
+    }
+
+    #[test]
+    fn return_layer_is_deterministic_and_reduced_motion_is_static() {
+        let pulse = pulse();
+        let health = pulse.health();
+        let base = FieldFrame::new(160, 80, true);
+        let core = core_state(0.0, health, &pulse);
+        let flow = FlowField::new(domain_aspect(160, 80, true), 0.0, health, &pulse, core);
+        let first = build_return_layer(&base, PulsePreset::Widescreen, health, 0.0, &pulse, &flow);
+        let same = build_return_layer(&base, PulsePreset::Widescreen, health, 0.0, &pulse, &flow);
+        assert_eq!(first, same);
+
+        let mut reduced = pulse;
+        reduced.set_reduced_motion(true);
+        let reduced_health = reduced.health();
+        let reduced_core = core_state(0.0, reduced_health, &reduced);
+        let reduced_flow = FlowField::new(
+            domain_aspect(160, 80, true),
+            0.0,
+            reduced_health,
+            &reduced,
+            reduced_core,
+        );
+        let reduced_first = build_return_layer(
+            &base,
+            PulsePreset::Widescreen,
+            reduced_health,
+            0.0,
+            &reduced,
+            &reduced_flow,
+        );
+        let reduced_later = build_return_layer(
+            &base,
+            PulsePreset::Widescreen,
+            reduced_health,
+            10.0,
+            &reduced,
+            &reduced_flow,
+        );
+        assert_eq!(reduced_first, reduced_later);
+    }
+
+    #[test]
+    fn atmospheric_particles_are_sparse_layered_and_bounded() {
+        let pulse = pulse();
+        let health = pulse.health();
+        let presets = [
+            PulsePreset::Compact,
+            PulsePreset::Standard,
+            PulsePreset::Widescreen,
+            PulsePreset::LargeWidescreen,
+        ];
+
+        for preset in presets {
+            let field = build_field(160, 80, true, preset, health, 0.0, &pulse);
+            let core = core_state(0.0, health, &pulse);
+            let flow = FlowField::new(domain_aspect(160, 80, true), 0.0, health, &pulse, core);
+            let particles = build_atmospheric_particles(&field, preset, health, 0.0, &pulse, &flow);
+            let (dust_limit, tracer_limit, glint_limit) = atmospheric_particle_budget(preset);
+            let dust = particles
+                .iter()
+                .filter(|particle| particle.kind == AtmosphericParticleKind::Dust)
+                .collect::<Vec<_>>();
+            let tracers = particles
+                .iter()
+                .filter(|particle| particle.kind == AtmosphericParticleKind::Tracer)
+                .collect::<Vec<_>>();
+            let glints = particles
+                .iter()
+                .filter(|particle| particle.kind == AtmosphericParticleKind::Glint)
+                .collect::<Vec<_>>();
+
+            assert!(!particles.is_empty());
+            assert_eq!(dust.len(), dust_limit);
+            assert_eq!(tracers.len(), tracer_limit);
+            assert!(glints.len() <= glint_limit);
+            assert!(particles.len() <= dust_limit + tracer_limit + glint_limit);
+            assert!(particles.iter().all(|particle| {
+                particle.position.0.is_finite()
+                    && particle.position.1.is_finite()
+                    && (0.0..=1.0).contains(&particle.position.0)
+                    && (0.0..=1.0).contains(&particle.position.1)
+                    && (0.0..=1.0).contains(&particle.energy)
+                    && particle.radius.is_finite()
+                    && particle.depth.is_finite()
+            }));
+            assert!(dust.iter().any(|particle| particle.position.1 < 0.34));
+            assert!(dust.iter().any(|particle| particle.position.1 > 0.66));
+            if matches!(
+                preset,
+                PulsePreset::Widescreen | PulsePreset::LargeWidescreen
+            ) {
+                assert!((2..=6).contains(&glints.len()));
+            }
+            assert!(
+                tracers
+                    .iter()
+                    .all(|particle| field.local_energy(particle.position, 2.4) > FIELD_THRESHOLD)
+            );
+            assert!(
+                glints
+                    .iter()
+                    .all(|particle| field.local_energy(particle.position, 2.6) > FIELD_THRESHOLD)
+            );
+
+            let mut rasterized = FieldFrame::new(160, 80, true);
+            rasterize_atmospheric_particles(&mut rasterized, &particles);
+            assert_eq!(rasterized.samples.len(), 160 * 80);
+            assert!(rasterized.samples.iter().all(|sample| {
+                (0.0..=1.0).contains(&sample.energy) && sample.depth.is_finite()
+            }));
+            if dust.len() >= 3 {
+                let first_cluster = &dust[..3];
+                assert!(first_cluster.windows(2).all(|pair| {
+                    let dx = pair[0].position.0 - pair[1].position.0;
+                    let dy = pair[0].position.1 - pair[1].position.1;
+                    dx.hypot(dy) < 0.16
+                }));
+            }
+        }
+    }
+
+    #[test]
+    fn atmospheric_particles_are_deterministic_and_respect_reduced_motion() {
+        let pulse = pulse();
+        let health = pulse.health();
+        let preset = PulsePreset::Widescreen;
+        let field = build_field(160, 80, true, preset, health, 0.0, &pulse);
+        let core = core_state(0.0, health, &pulse);
+        let flow = FlowField::new(domain_aspect(160, 80, true), 0.0, health, &pulse, core);
+        let first = build_atmospheric_particles(&field, preset, health, 0.0, &pulse, &flow);
+        let same = build_atmospheric_particles(&field, preset, health, 0.0, &pulse, &flow);
+        let later = build_atmospheric_particles(&field, preset, health, 1.0, &pulse, &flow);
+        assert_eq!(first, same);
+        assert!(
+            first
+                .iter()
+                .zip(&later)
+                .any(|(first, later)| first.position != later.position)
+        );
+
+        let mut reduced = pulse;
+        reduced.set_reduced_motion(true);
+        let reduced_health = reduced.health();
+        let reduced_field = build_field(160, 80, true, preset, reduced_health, 0.0, &reduced);
+        let reduced_core = core_state(0.0, reduced_health, &reduced);
+        let reduced_flow = FlowField::new(
+            domain_aspect(160, 80, true),
+            0.0,
+            reduced_health,
+            &reduced,
+            reduced_core,
+        );
+        let reduced_first = build_atmospheric_particles(
+            &reduced_field,
+            preset,
+            reduced_health,
+            0.0,
+            &reduced,
+            &reduced_flow,
+        );
+        let reduced_later = build_atmospheric_particles(
+            &reduced_field,
+            preset,
+            reduced_health,
+            10.0,
+            &reduced,
+            &reduced_flow,
+        );
+        assert_eq!(reduced_first, reduced_later);
     }
 
     #[test]
