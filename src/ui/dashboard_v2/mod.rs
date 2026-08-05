@@ -4,6 +4,7 @@ mod layout;
 mod metrics;
 mod regions;
 mod render;
+mod terminal;
 mod types;
 mod visual;
 mod widget;
@@ -38,6 +39,8 @@ pub use render::{
     FooterBlock, IndicatorBlock, MAX_RENDER_BLOCKS, RenderBlock, RenderError, StatusBlock,
     TitleBlock, TrendBlock, ValueBlock, WidgetRenderModel, WidgetRenderer,
 };
+#[allow(unused_imports)]
+pub use terminal::{TerminalRenderError, TerminalRenderer};
 #[allow(unused_imports)]
 pub use types::{
     DashboardBounds, DashboardContext, DashboardDimensions, DashboardError, DashboardMinimum,
