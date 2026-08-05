@@ -10,6 +10,7 @@ pub(crate) mod overview;
 pub(crate) mod process_search;
 pub(crate) mod processes;
 pub(crate) mod pulse;
+pub(crate) mod pulse_v2;
 pub(crate) mod storage;
 pub(crate) mod system;
 pub(crate) mod timeline;

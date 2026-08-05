@@ -64,3 +64,66 @@
 - Processes can be searched and focused.
 - Current metrics can be exported.
 - Configuration can be opened and edited through a supported workflow.
+- ---
+
+## 14. Architectural Roadmap
+
+The Pulse V2 architecture is intentionally developed in layers.
+
+Each stage introduces a new capability while preserving the contracts established by previous stages.
+
+```text
+Infrastructure
+        ↓
+Scalar Energy Field
+        ↓
+Deterministic Noise Field
+        ↓
+Gradient Flow Field
+        ↓
+Flow-Guided Transport
+        ↓
+Energy Organization
+        ↓
+Adaptive Lighting
+        ↓
+Terminal Rasterization
+        ↓
+Integration
+```
+
+### Infrastructure
+
+Defines the engine, contracts, presets and internal data structures.
+
+### Scalar Energy Field
+
+Defines the physical energy distribution that represents the machine state.
+
+### Deterministic Noise Field
+
+Introduces procedural texture that will later be transported by the flow.
+
+### Gradient Flow Field
+
+Derives a continuous vector field from the scalar energy landscape.
+
+### Flow-Guided Transport
+
+Organizes procedural texture according to the vector field, revealing coherent structures.
+
+### Emergent Structures
+
+Transforms transported energy into recognizable filaments, convergence regions and coherent large-scale structures.
+
+### Adaptive Lighting
+
+Converts physical energy into perceptual hierarchy while preserving the phenomenon.
+
+### Terminal Rasterization
+
+Projects the continuous internal representation into Braille or Unicode cells.
+
+### Integration
+
+Connects the Pulse V2 renderer to the dashboard while preserving compatibility with Pulse V1 until the experimental implementation becomes the default.
