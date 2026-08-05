@@ -13,7 +13,7 @@ mod field;
 mod types;
 
 pub use engine::{PulseV2Engine, PulseV2Frame};
-pub use field::{FieldError, ScalarField};
+pub use field::{FieldError, FieldGradient, ScalarField};
 pub use types::{
     CoordinateError, DimensionsError, FieldDimensions, InputError, NormalizedPoint,
     NormalizedPulseInput, PresetParameters, PulseV2Preset,
@@ -21,11 +21,13 @@ pub use types::{
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use crate::pulse::PulseInput;
 
     use super::{
-        FieldDimensions, NormalizedPoint, NormalizedPulseInput, PulseV2Engine, PulseV2Preset,
-        ScalarField,
+        FieldDimensions, FieldGradient, NormalizedPoint, NormalizedPulseInput, PulseV2Engine,
+        PulseV2Frame, PulseV2Preset, ScalarField,
     };
 
     #[test]
@@ -54,6 +56,8 @@ mod tests {
             PulseV2Preset::Standard.parameters().sample_limit()
                 < PulseV2Preset::Widescreen.parameters().sample_limit()
         );
+        assert_eq!(PulseV2Preset::Compact.parameters().complexity(), 1);
+        assert_eq!(PulseV2Preset::LargeWidescreen.parameters().complexity(), 4);
     }
 
     #[test]
@@ -163,5 +167,247 @@ mod tests {
         assert_eq!(frame.preset(), PulseV2Preset::Compact);
         assert!(frame.field().is_empty());
         assert!(frame.is_empty());
+    }
+
+    #[test]
+    fn generated_field_is_populated_finite_and_bounded() {
+        let frame = generated(sample_input(), 0.0, false);
+        let values = frame.field().as_slice();
+
+        assert!(!frame.is_empty());
+        assert!(values.iter().any(|value| *value > 0.0));
+        assert!(values.iter().all(|value| value.is_finite()));
+        assert!(values.iter().all(|value| (0.0..=1.0).contains(value)));
+    }
+
+    #[test]
+    fn field_has_negative_space_midtone_energy_and_rare_peaks() {
+        let frame = generated(sample_input(), 0.0, false);
+        let values = frame.field().as_slice();
+        let silent = values.iter().filter(|value| **value < 0.025).count();
+        let midtones = values
+            .iter()
+            .filter(|value| (0.08..0.52).contains(&**value))
+            .count();
+        let peaks = values.iter().filter(|value| **value > 0.84).count();
+        assert!(silent > values.len() / 5);
+        assert!(midtones > values.len() / 20);
+        assert!(peaks > 0);
+        assert!(peaks < values.len() / 12);
+    }
+
+    #[test]
+    fn field_contains_broad_medium_and_micro_spatial_variation() {
+        let frame = generated(sample_input(), 0.0, false);
+        let field = frame.field();
+        let width = field.width();
+        let height = field.height();
+        let adjacent_variation = field
+            .as_slice()
+            .chunks(width)
+            .flat_map(|row| row.windows(2).map(|pair| (pair[1] - pair[0]).abs()))
+            .sum::<f32>();
+        let broad_variation = (0..height)
+            .flat_map(|y| (0..width.saturating_sub(8)).map(move |x| (x, y)))
+            .map(|(x, y)| (field.read(x + 8, y).unwrap() - field.read(x, y).unwrap()).abs())
+            .sum::<f32>();
+
+        assert!(adjacent_variation > 0.0);
+        assert!(broad_variation > 0.0);
+        assert!(adjacent_variation > broad_variation * 0.12);
+    }
+
+    #[test]
+    fn same_time_and_input_are_deterministic_while_time_remains_continuous() {
+        let first = generated(sample_input(), 2.0, false);
+        let same = generated(sample_input(), 2.0, false);
+        let near = generated(sample_input(), 2.01, false);
+        let distant = generated(sample_input(), 18.0, false);
+
+        assert_eq!(first, same);
+        assert_ne!(first.field(), distant.field());
+        assert!(mean_difference(first.field(), near.field()) < 0.04);
+    }
+
+    #[test]
+    fn reduced_motion_freezes_the_landscape_without_removing_it() {
+        let first = generated(sample_input(), 0.0, true);
+        let later = generated(sample_input(), 30.0, true);
+
+        assert_eq!(first.field(), later.field());
+        assert!(!first.is_empty());
+        assert!(first.reduced_motion());
+    }
+
+    #[test]
+    fn dominant_region_is_asymmetric_and_displaced_from_center() {
+        let frame = generated(sample_input(), 0.0, false);
+        let field = frame.field();
+        let (maximum_index, _) = field
+            .as_slice()
+            .iter()
+            .enumerate()
+            .max_by(|left, right| left.1.total_cmp(right.1))
+            .unwrap();
+        let x = maximum_index % field.width();
+        let y = maximum_index / field.width();
+        let normalized_x = x as f32 / field.width().saturating_sub(1).max(1) as f32;
+        let normalized_y = y as f32 / field.height().saturating_sub(1).max(1) as f32;
+        let mirrored_difference = field
+            .as_slice()
+            .chunks(field.width())
+            .enumerate()
+            .map(|(row, values)| {
+                values
+                    .iter()
+                    .enumerate()
+                    .map(|(column, value)| {
+                        let mirror = values[values.len() - column - 1];
+                        (value - mirror).abs() * (row as f32 + 1.0)
+                    })
+                    .sum::<f32>()
+            })
+            .sum::<f32>();
+
+        assert!((0.40..0.78).contains(&normalized_x));
+        assert!((0.20..0.72).contains(&normalized_y));
+        assert!((normalized_x - 0.5).abs() > 0.015 || (normalized_y - 0.5).abs() > 0.015);
+        assert!(mirrored_difference > 0.1);
+    }
+
+    #[test]
+    fn metrics_modulate_activity_compression_direction_and_deformation() {
+        let calm = NormalizedPulseInput::try_new(0.12, 0.16, None, 0.02, 0.10, 0.01).unwrap();
+        let cpu_busy = NormalizedPulseInput::try_new(0.86, 0.16, None, 0.02, 0.10, 0.01).unwrap();
+        let memory_busy =
+            NormalizedPulseInput::try_new(0.12, 0.90, None, 0.02, 0.10, 0.01).unwrap();
+        let network_busy =
+            NormalizedPulseInput::try_new(0.12, 0.16, None, 0.90, 0.10, 0.01).unwrap();
+        let volatile = NormalizedPulseInput::try_new(0.12, 0.16, None, 0.02, 0.10, 0.90).unwrap();
+
+        let calm_frame = generated(calm, 2.0, false);
+        let cpu_frame = generated(cpu_busy, 2.0, false);
+        let memory_frame = generated(memory_busy, 2.0, false);
+        let network_frame = generated(network_busy, 2.0, false);
+        let volatile_frame = generated(volatile, 2.0, false);
+
+        assert!(mean_energy(cpu_frame.field()) > mean_energy(calm_frame.field()));
+        assert!(center_energy(memory_frame.field()) > center_energy(calm_frame.field()));
+        assert!(centroid_x(network_frame.field()) > centroid_x(calm_frame.field()));
+        assert_ne!(volatile_frame.field(), calm_frame.field());
+    }
+
+    #[test]
+    fn gradients_are_finite_bounded_and_valid_at_edges() {
+        let frame = generated(sample_input(), 1.0, false);
+        let field = frame.field();
+        let coordinates = [
+            (0, 0),
+            (field.width().saturating_sub(1), 0),
+            (0, field.height().saturating_sub(1)),
+            (
+                field.width().saturating_sub(1),
+                field.height().saturating_sub(1),
+            ),
+            (field.width() / 2, field.height() / 2),
+        ];
+
+        for (x, y) in coordinates {
+            let gradient = field.gradient(x, y).unwrap();
+            assert_gradient_is_valid(gradient);
+        }
+        assert!(field.gradient(field.width(), 0).is_none());
+        assert!(field.gradient(0, field.height()).is_none());
+    }
+
+    #[test]
+    fn generated_frames_preserve_presets_and_minimum_dimensions() {
+        for (dimensions, expected) in [
+            ((1, 1), PulseV2Preset::Compact),
+            ((30, 8), PulseV2Preset::Compact),
+            ((50, 12), PulseV2Preset::Standard),
+            ((80, 20), PulseV2Preset::Widescreen),
+            ((140, 40), PulseV2Preset::LargeWidescreen),
+        ] {
+            let dimensions = FieldDimensions::new(dimensions.0, dimensions.1).unwrap();
+            let frame = PulseV2Engine::new()
+                .generate(
+                    dimensions,
+                    sample_input(),
+                    Duration::from_millis(400),
+                    false,
+                )
+                .unwrap();
+
+            assert_eq!(frame.preset(), expected);
+            assert_eq!(frame.field().as_slice().len(), dimensions.sample_count());
+        }
+    }
+
+    fn sample_input() -> NormalizedPulseInput {
+        NormalizedPulseInput::try_new(0.42, 0.48, Some(0.30), 0.18, 0.35, 0.08).unwrap()
+    }
+
+    fn generated(input: NormalizedPulseInput, seconds: f32, reduced_motion: bool) -> PulseV2Frame {
+        PulseV2Engine::new()
+            .generate(
+                FieldDimensions::new(96, 48).unwrap(),
+                input,
+                Duration::from_secs_f32(seconds),
+                reduced_motion,
+            )
+            .unwrap()
+    }
+
+    fn mean_energy(field: &ScalarField) -> f32 {
+        field.as_slice().iter().sum::<f32>() / field.as_slice().len() as f32
+    }
+
+    fn mean_difference(left: &ScalarField, right: &ScalarField) -> f32 {
+        left.as_slice()
+            .iter()
+            .zip(right.as_slice())
+            .map(|(left, right)| (left - right).abs())
+            .sum::<f32>()
+            / left.as_slice().len() as f32
+    }
+
+    fn center_energy(field: &ScalarField) -> f32 {
+        let center_x = field.width() as f32 * 0.585;
+        let center_y = field.height() as f32 * 0.455;
+        let radius_x = field.width() as f32 * 0.16;
+        let radius_y = field.height() as f32 * 0.14;
+        let mut total = 0.0;
+        let mut count = 0;
+
+        for y in 0..field.height() {
+            for x in 0..field.width() {
+                if (x as f32 - center_x).abs() <= radius_x
+                    && (y as f32 - center_y).abs() <= radius_y
+                {
+                    total += field.read(x, y).unwrap();
+                    count += 1;
+                }
+            }
+        }
+
+        total / count as f32
+    }
+
+    fn centroid_x(field: &ScalarField) -> f32 {
+        let mut weighted = 0.0;
+        let mut total = 0.0;
+        for (index, value) in field.as_slice().iter().copied().enumerate() {
+            weighted += (index % field.width()) as f32 * value;
+            total += value;
+        }
+        weighted / total.max(f32::EPSILON) / field.width().saturating_sub(1).max(1) as f32
+    }
+
+    fn assert_gradient_is_valid(gradient: FieldGradient) {
+        assert!(gradient.x().is_finite());
+        assert!(gradient.y().is_finite());
+        assert!((-1.0..=1.0).contains(&gradient.x()));
+        assert!((-1.0..=1.0).contains(&gradient.y()));
     }
 }

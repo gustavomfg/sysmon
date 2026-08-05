@@ -204,6 +204,7 @@ pub enum PulseV2Preset {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PresetParameters {
     sample_limit: usize,
+    complexity: u8,
 }
 
 impl PulseV2Preset {
@@ -223,19 +224,26 @@ impl PulseV2Preset {
     }
 
     pub fn parameters(self) -> PresetParameters {
-        let sample_limit = match self {
-            Self::Compact => 16_384,
-            Self::Standard => 65_536,
-            Self::Widescreen => 262_144,
-            Self::LargeWidescreen => MAX_FIELD_SAMPLES,
+        let (sample_limit, complexity) = match self {
+            Self::Compact => (16_384, 1),
+            Self::Standard => (65_536, 2),
+            Self::Widescreen => (262_144, 3),
+            Self::LargeWidescreen => (MAX_FIELD_SAMPLES, 4),
         };
 
-        PresetParameters { sample_limit }
+        PresetParameters {
+            sample_limit,
+            complexity,
+        }
     }
 }
 
 impl PresetParameters {
     pub fn sample_limit(self) -> usize {
         self.sample_limit
+    }
+
+    pub fn complexity(self) -> u8 {
+        self.complexity
     }
 }
