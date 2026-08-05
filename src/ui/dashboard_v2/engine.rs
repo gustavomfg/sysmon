@@ -70,7 +70,7 @@ impl DashboardEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ui::dashboard_v2::{DashboardBounds, DashboardComposition, DashboardRegion};
+    use crate::ui::dashboard_v2::{DashboardBounds, DashboardPriority, DashboardRegion};
 
     fn dimensions(width: usize, height: usize) -> DashboardDimensions {
         DashboardDimensions::new(width, height).unwrap()
@@ -183,14 +183,231 @@ mod tests {
     #[test]
     fn composition_keeps_region_contracts_and_order() {
         let context = DashboardContext::default();
-        let compact = DashboardComposition::for_preset(DashboardPreset::Compact, context);
-        let large = DashboardComposition::for_preset(DashboardPreset::LargeWidescreen, context);
+        let compact = DashboardEngine::new()
+            .compose_with_preset(dimensions(80, 24), DashboardPreset::Compact, context)
+            .unwrap()
+            .layout()
+            .composition();
+        let large = DashboardEngine::new()
+            .compose_with_preset(
+                dimensions(240, 60),
+                DashboardPreset::LargeWidescreen,
+                context,
+            )
+            .unwrap()
+            .layout()
+            .composition();
 
-        assert_eq!(compact.regions().next(), Some(DashboardRegion::Header));
+        assert_eq!(compact.regions().next(), Some(DashboardRegion::Pulse));
         assert_eq!(compact.regions().last(), Some(DashboardRegion::Footer));
         assert!(compact.contains(DashboardRegion::Pulse));
+        assert!(!compact.contains(DashboardRegion::SecondaryMetrics));
         assert!(!compact.contains(DashboardRegion::Processes));
         assert!(large.contains(DashboardRegion::Processes));
         assert_eq!(large.len(), DashboardRegion::ALL.len());
+    }
+
+    #[test]
+    fn priorities_are_explicit_and_composition_is_priority_ordered() {
+        assert_eq!(DashboardRegion::Pulse.priority(), DashboardPriority::Pulse);
+        assert_eq!(
+            DashboardRegion::PrimaryMetrics.priority(),
+            DashboardPriority::PrimaryMetrics
+        );
+        assert_eq!(
+            DashboardRegion::Header.priority(),
+            DashboardPriority::Header
+        );
+        assert_eq!(
+            DashboardRegion::Charts.priority(),
+            DashboardPriority::Charts
+        );
+        assert_eq!(
+            DashboardRegion::Processes.priority(),
+            DashboardPriority::Processes
+        );
+        assert_eq!(
+            DashboardRegion::Alerts.priority(),
+            DashboardPriority::Alerts
+        );
+        assert_eq!(
+            DashboardRegion::SecondaryMetrics.priority(),
+            DashboardPriority::SecondaryMetrics
+        );
+        assert_eq!(
+            DashboardRegion::Footer.priority(),
+            DashboardPriority::Footer
+        );
+
+        let layout = DashboardEngine::new()
+            .compose_with_preset(
+                dimensions(240, 60),
+                DashboardPreset::LargeWidescreen,
+                DashboardContext::default(),
+            )
+            .unwrap()
+            .layout();
+        let mut previous = None;
+        for region in layout.composition().regions() {
+            if let Some(previous) = previous {
+                assert!(previous <= region.priority());
+            }
+            previous = Some(region.priority());
+        }
+    }
+
+    #[test]
+    fn pulse_is_dominant_in_wide_presets() {
+        let engine = DashboardEngine::new();
+        for preset in [
+            DashboardPreset::Widescreen,
+            DashboardPreset::LargeWidescreen,
+        ] {
+            let layout = engine
+                .compose_with_preset(dimensions(240, 60), preset, DashboardContext::default())
+                .unwrap()
+                .layout();
+            let pulse = layout.section(DashboardRegion::Pulse).unwrap().bounds();
+            assert!(
+                layout
+                    .sections()
+                    .filter(|section| section.region() != DashboardRegion::Pulse)
+                    .all(|section| pulse.area() >= section.bounds().area())
+            );
+        }
+    }
+
+    #[test]
+    fn hidden_sections_leave_no_reserved_space_and_expand_neighbors() {
+        let engine = DashboardEngine::new();
+        let wide_dimensions = dimensions(160, 40);
+        let full = engine
+            .compose_with_preset(
+                wide_dimensions,
+                DashboardPreset::Widescreen,
+                DashboardContext::default(),
+            )
+            .unwrap()
+            .layout();
+        let reduced_context = DashboardContext::default()
+            .without(DashboardRegion::SecondaryMetrics)
+            .without(DashboardRegion::Processes);
+        let reduced = engine
+            .compose_with_preset(
+                wide_dimensions,
+                DashboardPreset::Widescreen,
+                reduced_context,
+            )
+            .unwrap()
+            .layout();
+
+        assert!(reduced.section(DashboardRegion::SecondaryMetrics).is_none());
+        assert!(reduced.section(DashboardRegion::Processes).is_none());
+        assert!(reduced.validate().is_ok());
+        assert!(
+            reduced
+                .section(DashboardRegion::PrimaryMetrics)
+                .unwrap()
+                .bounds()
+                .height()
+                > full
+                    .section(DashboardRegion::PrimaryMetrics)
+                    .unwrap()
+                    .bounds()
+                    .height()
+        );
+
+        let standard_context = DashboardContext::default()
+            .without(DashboardRegion::SecondaryMetrics)
+            .without(DashboardRegion::Processes)
+            .without(DashboardRegion::Charts);
+        let standard = engine
+            .compose_with_preset(
+                dimensions(140, 40),
+                DashboardPreset::Standard,
+                standard_context,
+            )
+            .unwrap()
+            .layout();
+        let alerts = standard.section(DashboardRegion::Alerts).unwrap().bounds();
+        assert_eq!(alerts.x(), 0);
+        assert_eq!(alerts.width(), 140);
+    }
+
+    #[test]
+    fn every_active_region_respects_its_architectural_minimum() {
+        let engine = DashboardEngine::new();
+        for preset in DashboardPreset::ALL {
+            let layout = engine
+                .compose_with_preset(dimensions(240, 60), preset, DashboardContext::default())
+                .unwrap()
+                .layout();
+            for region in layout.composition().regions() {
+                let bounds = layout.section(region).unwrap().bounds();
+                let minimum = region.minimum(preset);
+                assert!(bounds.width() >= minimum.width());
+                assert!(bounds.height() >= minimum.height());
+            }
+        }
+    }
+
+    #[test]
+    fn standard_keeps_metrics_and_charts_but_processes_are_optional() {
+        let engine = DashboardEngine::new();
+        let context = DashboardContext::default().without(DashboardRegion::Processes);
+        let layout = engine
+            .compose_with_preset(dimensions(140, 40), DashboardPreset::Standard, context)
+            .unwrap()
+            .layout();
+
+        assert!(layout.composition().contains(DashboardRegion::Pulse));
+        assert!(
+            layout
+                .composition()
+                .contains(DashboardRegion::PrimaryMetrics)
+        );
+        assert!(
+            layout
+                .composition()
+                .contains(DashboardRegion::SecondaryMetrics)
+        );
+        assert!(layout.composition().contains(DashboardRegion::Charts));
+        assert!(layout.composition().contains(DashboardRegion::Alerts));
+        assert!(!layout.composition().contains(DashboardRegion::Processes));
+    }
+
+    #[test]
+    fn wide_compositions_are_asymmetric_and_change_gradually() {
+        let engine = DashboardEngine::new();
+        let first = engine
+            .compose_with_preset(
+                dimensions(160, 40),
+                DashboardPreset::Widescreen,
+                DashboardContext::default(),
+            )
+            .unwrap()
+            .layout();
+        let next = engine
+            .compose_with_preset(
+                dimensions(161, 40),
+                DashboardPreset::Widescreen,
+                DashboardContext::default(),
+            )
+            .unwrap()
+            .layout();
+
+        let pulse = first.section(DashboardRegion::Pulse).unwrap().bounds();
+        let primary = first
+            .section(DashboardRegion::PrimaryMetrics)
+            .unwrap()
+            .bounds();
+        let charts = first.section(DashboardRegion::Charts).unwrap().bounds();
+        assert!(pulse.x() > primary.x());
+        assert!(charts.x() > pulse.x());
+        assert_eq!(first.composition(), next.composition());
+        let next_pulse = next.section(DashboardRegion::Pulse).unwrap().bounds();
+        assert!(pulse.width().abs_diff(next_pulse.width()) <= 1);
+        assert!(first.validate().is_ok());
+        assert!(next.validate().is_ok());
     }
 }

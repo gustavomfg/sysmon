@@ -13,6 +13,26 @@ pub enum DashboardError {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DashboardMinimum {
+    width: usize,
+    height: usize,
+}
+
+impl DashboardMinimum {
+    pub const fn new(width: usize, height: usize) -> Self {
+        Self { width, height }
+    }
+
+    pub const fn width(self) -> usize {
+        self.width
+    }
+
+    pub const fn height(self) -> usize {
+        self.height
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DashboardDimensions {
     width: usize,
     height: usize,

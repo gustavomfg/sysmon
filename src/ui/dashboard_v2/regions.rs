@@ -1,4 +1,16 @@
-use super::types::{DashboardContext, DashboardPreset, MAX_DASHBOARD_REGIONS};
+use super::types::{DashboardMinimum, DashboardPreset, MAX_DASHBOARD_REGIONS};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum DashboardPriority {
+    Pulse,
+    PrimaryMetrics,
+    Header,
+    Charts,
+    Processes,
+    Alerts,
+    SecondaryMetrics,
+    Footer,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DashboardRegion {
@@ -37,6 +49,36 @@ impl DashboardRegion {
         }
     }
 
+    pub fn priority(self) -> DashboardPriority {
+        match self {
+            Self::Pulse => DashboardPriority::Pulse,
+            Self::PrimaryMetrics => DashboardPriority::PrimaryMetrics,
+            Self::Header => DashboardPriority::Header,
+            Self::Charts => DashboardPriority::Charts,
+            Self::Processes => DashboardPriority::Processes,
+            Self::Alerts => DashboardPriority::Alerts,
+            Self::SecondaryMetrics => DashboardPriority::SecondaryMetrics,
+            Self::Footer => DashboardPriority::Footer,
+        }
+    }
+
+    pub(crate) fn minimum(self, preset: DashboardPreset) -> DashboardMinimum {
+        match self {
+            Self::Header | Self::Footer => DashboardMinimum::new(1, 1),
+            Self::Pulse => match preset {
+                DashboardPreset::Compact => DashboardMinimum::new(16, 4),
+                DashboardPreset::Standard => DashboardMinimum::new(30, 7),
+                DashboardPreset::Widescreen => DashboardMinimum::new(44, 10),
+                DashboardPreset::LargeWidescreen => DashboardMinimum::new(56, 12),
+            },
+            Self::PrimaryMetrics => DashboardMinimum::new(18, 3),
+            Self::SecondaryMetrics => DashboardMinimum::new(14, 2),
+            Self::Charts => DashboardMinimum::new(20, 4),
+            Self::Processes => DashboardMinimum::new(22, 5),
+            Self::Alerts => DashboardMinimum::new(14, 2),
+        }
+    }
+
     pub(crate) fn index(self) -> usize {
         match self {
             Self::Header => 0,
@@ -62,35 +104,31 @@ pub struct DashboardComposition {
 }
 
 impl DashboardComposition {
-    pub(crate) fn for_preset(preset: DashboardPreset, context: DashboardContext) -> Self {
+    pub(crate) fn from_active(active: [bool; MAX_DASHBOARD_REGIONS]) -> Self {
         let mut composition = Self {
             regions: [None; MAX_DASHBOARD_REGIONS],
             length: 0,
         };
-        composition.push_if(DashboardRegion::Header, context);
-        composition.push_if(DashboardRegion::Pulse, context);
-        composition.push_if(DashboardRegion::PrimaryMetrics, context);
-        composition.push_if(DashboardRegion::SecondaryMetrics, context);
 
-        match preset {
-            DashboardPreset::Compact => {}
-            DashboardPreset::Standard => {
-                composition.push_if(DashboardRegion::Charts, context);
-                composition.push_if(DashboardRegion::Alerts, context);
-            }
-            DashboardPreset::Widescreen | DashboardPreset::LargeWidescreen => {
-                composition.push_if(DashboardRegion::Charts, context);
-                composition.push_if(DashboardRegion::Processes, context);
-                composition.push_if(DashboardRegion::Alerts, context);
+        for region in [
+            DashboardRegion::Pulse,
+            DashboardRegion::PrimaryMetrics,
+            DashboardRegion::Header,
+            DashboardRegion::Charts,
+            DashboardRegion::Processes,
+            DashboardRegion::Alerts,
+            DashboardRegion::SecondaryMetrics,
+            DashboardRegion::Footer,
+        ] {
+            if active[region.index()] {
+                composition.push(region);
             }
         }
-
-        composition.push_if(DashboardRegion::Footer, context);
         composition
     }
 
-    fn push_if(&mut self, region: DashboardRegion, context: DashboardContext) {
-        if context.includes(region) && usize::from(self.length) < MAX_DASHBOARD_REGIONS {
+    fn push(&mut self, region: DashboardRegion) {
+        if usize::from(self.length) < MAX_DASHBOARD_REGIONS {
             self.regions[usize::from(self.length)] = Some(region);
             self.length += 1;
         }
