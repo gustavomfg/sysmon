@@ -10,11 +10,13 @@
 
 mod engine;
 mod field;
+mod flow;
 mod noise;
 mod types;
 
 pub use engine::{PulseV2Engine, PulseV2Frame};
 pub use field::{FieldError, FieldGradient, ScalarField};
+pub use flow::{FlowField, FlowSample};
 pub use noise::NoiseField;
 pub use types::{
     CoordinateError, DimensionsError, FieldDimensions, InputError, NormalizedPoint,
@@ -28,8 +30,8 @@ mod tests {
     use crate::pulse::PulseInput;
 
     use super::{
-        FieldDimensions, FieldGradient, NoiseField, NormalizedPoint, NormalizedPulseInput,
-        PulseV2Engine, PulseV2Frame, PulseV2Preset, ScalarField,
+        FieldDimensions, FieldGradient, FlowField, FlowSample, NoiseField, NormalizedPoint,
+        NormalizedPulseInput, PulseV2Engine, PulseV2Frame, PulseV2Preset, ScalarField,
     };
 
     #[test]
@@ -153,6 +155,12 @@ mod tests {
         assert_eq!(first.input(), input);
         assert_eq!(first.field().as_slice().len(), 80 * 20);
         assert!(first.field().as_slice().iter().all(|value| *value == 0.0));
+        assert_eq!(first.flow().as_slice().len(), 80 * 20);
+        assert!(first.flow().as_slice().iter().all(|sample| {
+            sample.direction_magnitude() == 0.0
+                && sample.intensity() == 0.0
+                && sample.convergence() == 0.0
+        }));
         assert!(first.is_empty());
     }
 
@@ -168,6 +176,7 @@ mod tests {
 
         assert_eq!(frame.preset(), PulseV2Preset::Compact);
         assert!(frame.field().is_empty());
+        assert!(frame.flow().is_empty());
         assert!(frame.is_empty());
     }
 
@@ -323,6 +332,118 @@ mod tests {
     }
 
     #[test]
+    fn flow_samples_are_normalized_finite_and_bounded() {
+        let frame = generated(sample_input(), 1.0, false);
+        let flow = frame.flow();
+        let nonzero_directions = flow
+            .as_slice()
+            .iter()
+            .filter(|sample| sample.direction_magnitude() > f32::EPSILON)
+            .count();
+
+        assert_eq!(flow.dimensions(), frame.dimensions());
+        assert!(nonzero_directions > flow.as_slice().len() / 10);
+        for sample in flow.as_slice() {
+            let magnitude = sample.direction_magnitude();
+            assert!(magnitude.is_finite());
+            assert!(magnitude <= 1.0001);
+            if magnitude > f32::EPSILON {
+                assert!((magnitude - 1.0).abs() < 0.0001);
+            }
+            assert!(sample.tangent_x().is_finite());
+            assert!(sample.tangent_y().is_finite());
+            assert!((0.0..=1.0).contains(&sample.intensity()));
+            assert!((-1.0..=1.0).contains(&sample.convergence()));
+        }
+    }
+
+    #[test]
+    fn flow_is_derived_from_the_scalar_gradient_without_texture_dependencies() {
+        let dimensions = FieldDimensions::new(5, 3).unwrap();
+        let mut scalar = ScalarField::try_new(dimensions).unwrap();
+        for y in 0..dimensions.height() {
+            for x in 0..dimensions.width() {
+                scalar
+                    .write(x, y, x as f32 / (dimensions.width() - 1) as f32)
+                    .unwrap();
+            }
+        }
+
+        let flow = FlowField::from_scalar(&scalar).unwrap();
+        for sample in flow.as_slice() {
+            assert!(sample.direction_x() > 0.99);
+            assert!(sample.direction_y().abs() < 0.001);
+            assert!(sample.tangent_x().abs() < 0.001);
+            assert!(sample.tangent_y() > 0.99);
+            assert!(sample.convergence().abs() < 0.001);
+        }
+    }
+
+    #[test]
+    fn convergence_and_divergence_are_detected_from_scalar_shape() {
+        let dimensions = FieldDimensions::new(7, 7).unwrap();
+        let mut peak = ScalarField::try_new(dimensions).unwrap();
+        let mut valley = ScalarField::try_new(dimensions).unwrap();
+        for y in 0..dimensions.height() {
+            for x in 0..dimensions.width() {
+                let dx = x as f32 - 3.0;
+                let dy = y as f32 - 3.0;
+                let distance = (dx * dx + dy * dy) / 18.0;
+                peak.write(x, y, (1.0 - distance).max(0.0)).unwrap();
+                valley.write(x, y, distance.min(1.0)).unwrap();
+            }
+        }
+
+        let peak_flow = FlowField::from_scalar(&peak).unwrap();
+        let valley_flow = FlowField::from_scalar(&valley).unwrap();
+        let peak_convergence = peak_flow
+            .as_slice()
+            .iter()
+            .map(|sample| sample.convergence())
+            .fold(f32::NEG_INFINITY, f32::max);
+        let valley_divergence = valley_flow
+            .as_slice()
+            .iter()
+            .map(|sample| sample.convergence())
+            .fold(f32::INFINITY, f32::min);
+
+        assert!(peak_convergence > 0.01);
+        assert!(valley_divergence < -0.01);
+    }
+
+    #[test]
+    fn flow_is_spatially_and_temporally_continuous() {
+        let first = generated(sample_input(), 2.0, false);
+        let same = generated(sample_input(), 2.0, false);
+        let near = generated(sample_input(), 2.01, false);
+        let distant = generated(sample_input(), 18.0, false);
+
+        assert_eq!(first.flow(), same.flow());
+        let spatial_change = mean_neighbor_flow_difference(first.flow());
+        let nearby_change = mean_flow_difference(first.flow(), near.flow());
+        let distant_change = mean_flow_difference(first.flow(), distant.flow());
+        assert!(spatial_change > 0.0);
+        assert!(spatial_change < 1.5);
+        assert!(nearby_change < 0.08);
+        assert!(distant_change > nearby_change);
+    }
+
+    #[test]
+    fn reduced_motion_freezes_flow_and_preserves_its_organization() {
+        let first = generated(sample_input(), 0.0, true);
+        let later = generated(sample_input(), 30.0, true);
+
+        assert_eq!(first.flow(), later.flow());
+        assert!(
+            first
+                .flow()
+                .as_slice()
+                .iter()
+                .any(|sample| sample.intensity() > 0.0)
+        );
+    }
+
+    #[test]
     fn generated_frames_preserve_presets_and_minimum_dimensions() {
         for (dimensions, expected) in [
             ((1, 1), PulseV2Preset::Compact),
@@ -344,6 +465,7 @@ mod tests {
             assert_eq!(frame.preset(), expected);
             assert_eq!(frame.field().as_slice().len(), dimensions.sample_count());
             assert_eq!(frame.noise().as_slice().len(), dimensions.sample_count());
+            assert_eq!(frame.flow().as_slice().len(), dimensions.sample_count());
         }
     }
 
@@ -513,6 +635,48 @@ mod tests {
             .map(|(left, right)| (left - right).abs())
             .sum::<f32>()
             / left.as_slice().len().max(1) as f32
+    }
+
+    fn mean_flow_difference(left: &FlowField, right: &FlowField) -> f32 {
+        left.as_slice()
+            .iter()
+            .zip(right.as_slice())
+            .map(|(left, right)| {
+                (left.direction_x() - right.direction_x()).abs()
+                    + (left.direction_y() - right.direction_y()).abs()
+                    + (left.intensity() - right.intensity()).abs()
+                    + (left.convergence() - right.convergence()).abs()
+            })
+            .sum::<f32>()
+            / left.as_slice().len().max(1) as f32
+    }
+
+    fn mean_neighbor_flow_difference(flow: &FlowField) -> f32 {
+        let width = flow.width();
+        let height = flow.height();
+        let mut total = 0.0;
+        let mut count = 0;
+
+        for y in 0..height {
+            for x in 0..width {
+                let current = flow.read(x, y).unwrap();
+                if let Some(right) = flow.read(x + 1, y) {
+                    total += direction_difference(current, right);
+                    count += 1;
+                }
+                if let Some(down) = flow.read(x, y + 1) {
+                    total += direction_difference(current, down);
+                    count += 1;
+                }
+            }
+        }
+
+        total / count.max(1) as f32
+    }
+
+    fn direction_difference(left: super::FlowSample, right: super::FlowSample) -> f32 {
+        (left.direction_x() - right.direction_x()).abs()
+            + (left.direction_y() - right.direction_y()).abs()
     }
 
     fn mean_horizontal_noise_difference(noise: &NoiseField, distance: usize) -> f32 {

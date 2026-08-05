@@ -1,8 +1,8 @@
 use std::time::Duration;
 
 use super::{
-    FieldDimensions, FieldError, NoiseField, NormalizedPulseInput, PulseV2Preset, ScalarField,
-    noise,
+    FieldDimensions, FieldError, FlowField, NoiseField, NormalizedPulseInput, PulseV2Preset,
+    ScalarField, noise,
 };
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -15,6 +15,7 @@ pub struct PulseV2Frame {
     input: NormalizedPulseInput,
     field: ScalarField,
     noise: NoiseField,
+    flow: FlowField,
     elapsed: Duration,
     reduced_motion: bool,
 }
@@ -32,6 +33,7 @@ impl PulseV2Engine {
         let preset = PulseV2Preset::from_dimensions(dimensions);
         let field = ScalarField::try_new(dimensions)?;
         let noise = NoiseField::try_new(dimensions)?;
+        let flow = FlowField::from_scalar(&field)?;
 
         Ok(PulseV2Frame {
             dimensions,
@@ -39,6 +41,7 @@ impl PulseV2Engine {
             input,
             field,
             noise,
+            flow,
             elapsed: Duration::ZERO,
             reduced_motion: true,
         })
@@ -69,6 +72,7 @@ impl PulseV2Engine {
         }
 
         let noise = noise::generate(dimensions, input, preset, elapsed, reduced_motion)?;
+        let flow = FlowField::from_scalar(&field)?;
 
         Ok(PulseV2Frame {
             dimensions,
@@ -76,6 +80,7 @@ impl PulseV2Engine {
             input,
             field,
             noise,
+            flow,
             elapsed,
             reduced_motion,
         })
@@ -103,9 +108,19 @@ impl PulseV2Frame {
         &self.noise
     }
 
+    pub fn flow(&self) -> &FlowField {
+        &self.flow
+    }
+
     pub fn is_empty(&self) -> bool {
         self.field.as_slice().iter().all(|value| *value == 0.0)
             && self.noise.as_slice().iter().all(|value| *value == 0.0)
+            && self.flow.as_slice().iter().all(|sample| {
+                sample.direction_x() == 0.0
+                    && sample.direction_y() == 0.0
+                    && sample.intensity() == 0.0
+                    && sample.convergence() == 0.0
+            })
     }
 
     pub fn elapsed(&self) -> Duration {
