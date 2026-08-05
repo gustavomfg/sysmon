@@ -212,6 +212,9 @@ pub struct PresetParameters {
     transport_steps: u8,
     transport_radius: f32,
     transport_strength: f32,
+    structure_radius: u8,
+    structure_contrast_strength: f32,
+    structure_convergence_strength: f32,
 }
 
 impl PulseV2Preset {
@@ -241,11 +244,33 @@ impl PulseV2Preset {
             transport_steps,
             transport_radius,
             transport_strength,
+            structure_radius,
+            structure_contrast_strength,
+            structure_convergence_strength,
         ) = match self {
-            Self::Compact => (16_384, 1, 1.20, 3, 0.065, 0.075, 2, 0.032, 0.72),
-            Self::Standard => (65_536, 2, 1.40, 3, 0.080, 0.090, 3, 0.046, 0.78),
-            Self::Widescreen => (262_144, 3, 1.58, 4, 0.095, 0.105, 4, 0.060, 0.82),
-            Self::LargeWidescreen => (MAX_FIELD_SAMPLES, 4, 1.76, 5, 0.110, 0.120, 5, 0.074, 0.85),
+            Self::Compact => (
+                16_384, 1, 1.20, 3, 0.065, 0.075, 2, 0.032, 0.72, 1, 0.14, 0.15,
+            ),
+            Self::Standard => (
+                65_536, 2, 1.40, 3, 0.080, 0.090, 3, 0.046, 0.78, 1, 0.18, 0.19,
+            ),
+            Self::Widescreen => (
+                262_144, 3, 1.58, 4, 0.095, 0.105, 4, 0.060, 0.82, 1, 0.22, 0.23,
+            ),
+            Self::LargeWidescreen => (
+                MAX_FIELD_SAMPLES,
+                4,
+                1.76,
+                5,
+                0.110,
+                0.120,
+                5,
+                0.074,
+                0.85,
+                2,
+                0.25,
+                0.27,
+            ),
         };
 
         PresetParameters {
@@ -258,6 +283,9 @@ impl PulseV2Preset {
             transport_steps,
             transport_radius,
             transport_strength,
+            structure_radius,
+            structure_contrast_strength,
+            structure_convergence_strength,
         }
     }
 }
@@ -297,5 +325,17 @@ impl PresetParameters {
 
     pub(crate) fn transport_strength(self) -> f32 {
         self.transport_strength
+    }
+
+    pub(crate) fn structure_radius(self) -> u8 {
+        self.structure_radius
+    }
+
+    pub(crate) fn structure_contrast_strength(self) -> f32 {
+        self.structure_contrast_strength
+    }
+
+    pub(crate) fn structure_convergence_strength(self) -> f32 {
+        self.structure_convergence_strength
     }
 }

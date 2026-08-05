@@ -12,6 +12,7 @@ mod engine;
 mod field;
 mod flow;
 mod noise;
+mod structure;
 mod transport;
 mod types;
 
@@ -19,6 +20,7 @@ pub use engine::{PulseV2Engine, PulseV2Frame};
 pub use field::{FieldError, FieldGradient, ScalarField};
 pub use flow::{FlowField, FlowSample};
 pub use noise::NoiseField;
+pub use structure::StructuredField;
 pub use transport::TransportedField;
 pub use types::{
     CoordinateError, DimensionsError, FieldDimensions, InputError, NormalizedPoint,
@@ -34,7 +36,7 @@ mod tests {
     use super::{
         FieldDimensions, FieldGradient, FlowField, FlowSample, NoiseField, NormalizedPoint,
         NormalizedPulseInput, PulseV2Engine, PulseV2Frame, PulseV2Preset, ScalarField,
-        TransportedField,
+        StructuredField, TransportedField,
     };
 
     #[test]
@@ -172,6 +174,14 @@ mod tests {
                 .iter()
                 .all(|value| *value == 0.0)
         );
+        assert_eq!(first.structured().as_slice().len(), 80 * 20);
+        assert!(
+            first
+                .structured()
+                .as_slice()
+                .iter()
+                .all(|value| *value == 0.0)
+        );
         assert!(first.is_empty());
     }
 
@@ -189,6 +199,7 @@ mod tests {
         assert!(frame.field().is_empty());
         assert!(frame.flow().is_empty());
         assert!(frame.transported().is_empty());
+        assert!(frame.structured().is_empty());
         assert!(frame.is_empty());
     }
 
@@ -482,7 +493,196 @@ mod tests {
                 frame.transported().as_slice().len(),
                 dimensions.sample_count()
             );
+            assert_eq!(
+                frame.structured().as_slice().len(),
+                dimensions.sample_count()
+            );
         }
+    }
+
+    #[test]
+    fn structured_field_is_bounded_non_uniform_and_preserves_negative_space() {
+        let frame = generated(sample_input(), 2.0, false);
+        let values = frame.structured().as_slice();
+        let mean = values.iter().sum::<f32>() / values.len() as f32;
+        let variance = values
+            .iter()
+            .map(|value| (*value - mean).powi(2))
+            .sum::<f32>()
+            / values.len() as f32;
+        let silence = values.iter().filter(|value| **value < 0.025).count();
+        let midtones = values
+            .iter()
+            .filter(|value| (0.08..0.62).contains(&**value))
+            .count();
+        let peaks = values.iter().filter(|value| **value > 0.78).count();
+
+        assert!(!frame.structured().is_empty());
+        assert!(
+            values
+                .iter()
+                .all(|value| value.is_finite() && (0.0..=1.0).contains(value))
+        );
+        assert!(variance > 0.001);
+        assert!(silence > values.len() / 10);
+        assert!(midtones > values.len() / 20);
+        assert!(peaks > 0);
+        assert!(peaks < values.len() / 8);
+    }
+
+    #[test]
+    fn structured_field_is_deterministic_temporally_continuous_and_static_in_reduced_motion() {
+        let first = generated(sample_input(), 2.0, false);
+        let same = generated(sample_input(), 2.0, false);
+        let near = generated(sample_input(), 2.01, false);
+        let distant = generated(sample_input(), 18.0, false);
+        let reduced_first = generated(sample_input(), 0.0, true);
+        let reduced_later = generated(sample_input(), 30.0, true);
+
+        assert_eq!(first.structured(), same.structured());
+        let nearby_change = mean_structured_difference(first.structured(), near.structured());
+        let distant_change = mean_structured_difference(first.structured(), distant.structured());
+        assert!(nearby_change < 0.08);
+        assert!(distant_change > nearby_change);
+        assert_eq!(reduced_first.structured(), reduced_later.structured());
+    }
+
+    #[test]
+    fn local_contrast_reveals_a_crista_without_creating_a_halo() {
+        let dimensions = FieldDimensions::new(9, 5).unwrap();
+        let mut scalar = ScalarField::try_new(dimensions).unwrap();
+        let mut noise = NoiseField::try_new(dimensions).unwrap();
+        scalar.fill(0.8).unwrap();
+        noise.fill(0.25).unwrap();
+        noise.write(4, 2, 1.0).unwrap();
+        let flow = FlowField::from_scalar(&scalar).unwrap();
+        let transported =
+            TransportedField::from_fields(&scalar, &noise, &flow, PulseV2Preset::Standard, false)
+                .unwrap();
+        let structured =
+            StructuredField::from_fields(&scalar, &transported, &flow, PulseV2Preset::Standard)
+                .unwrap();
+
+        let center = structured.read(4, 2).unwrap();
+        let neighbor = structured.read(3, 2).unwrap();
+        let corner = structured.read(0, 0).unwrap();
+        assert!(center > neighbor);
+        assert!(neighbor >= corner * 0.75);
+    }
+
+    #[test]
+    fn convergence_reinforces_organized_energy_over_a_non_convergent_flow() {
+        let dimensions = FieldDimensions::new(9, 9).unwrap();
+        let mut peak = ScalarField::try_new(dimensions).unwrap();
+        let mut noise = NoiseField::try_new(dimensions).unwrap();
+        let mut linear = ScalarField::try_new(dimensions).unwrap();
+        noise.fill(0.55).unwrap();
+        for y in 0..dimensions.height() {
+            for x in 0..dimensions.width() {
+                let dx = x as f32 - 4.0;
+                let dy = y as f32 - 4.0;
+                peak.write(x, y, (1.0 - (dx * dx + dy * dy) / 24.0).max(0.0))
+                    .unwrap();
+                linear
+                    .write(x, y, x as f32 / (dimensions.width() - 1) as f32)
+                    .unwrap();
+            }
+        }
+        let convergent_flow = FlowField::from_scalar(&peak).unwrap();
+        let non_convergent_flow = FlowField::from_scalar(&linear).unwrap();
+        let transported = TransportedField::from_fields(
+            &peak,
+            &noise,
+            &convergent_flow,
+            PulseV2Preset::Standard,
+            false,
+        )
+        .unwrap();
+        let organized = StructuredField::from_fields(
+            &peak,
+            &transported,
+            &convergent_flow,
+            PulseV2Preset::Standard,
+        )
+        .unwrap();
+        let without_convergence = StructuredField::from_fields(
+            &peak,
+            &transported,
+            &non_convergent_flow,
+            PulseV2Preset::Standard,
+        )
+        .unwrap();
+
+        let organized_peak = organized
+            .as_slice()
+            .iter()
+            .copied()
+            .max_by(f32::total_cmp)
+            .unwrap();
+        let non_convergent_peak = without_convergence
+            .as_slice()
+            .iter()
+            .copied()
+            .max_by(f32::total_cmp)
+            .unwrap();
+        assert!(organized_peak > non_convergent_peak);
+    }
+
+    #[test]
+    fn dominant_structure_is_displaced_irregular_and_connected_before_and_after() {
+        let frame = generated(sample_input(), 2.0, false);
+        let field = frame.structured();
+        let (maximum_index, _) = field
+            .as_slice()
+            .iter()
+            .enumerate()
+            .max_by(|left, right| left.1.total_cmp(right.1))
+            .unwrap();
+        let maximum_x = maximum_index % field.width();
+        let maximum_y = maximum_index / field.width();
+        let normalized_x = maximum_x as f32 / field.width().saturating_sub(1).max(1) as f32;
+        let normalized_y = maximum_y as f32 / field.height().saturating_sub(1).max(1) as f32;
+        let mirror_difference = field
+            .as_slice()
+            .chunks(field.width())
+            .map(|row| {
+                row.iter()
+                    .enumerate()
+                    .map(|(x, value)| (value - row[row.len() - x - 1]).abs())
+                    .sum::<f32>()
+            })
+            .sum::<f32>();
+        let before = mean_region(field, 0, field.width() / 3);
+        let after = mean_region(field, field.width() * 2 / 3, field.width());
+        let connected_pairs = count_adjacent_active(field, 0.08);
+
+        assert!((0.30..0.82).contains(&normalized_x));
+        assert!((0.15..0.82).contains(&normalized_y));
+        assert!((normalized_x - 0.5).abs() > 0.01 || (normalized_y - 0.5).abs() > 0.01);
+        assert!(mirror_difference > 0.05);
+        assert!(before > 0.02);
+        assert!(after > 0.02);
+        assert!(connected_pairs > field.as_slice().len() / 8);
+    }
+
+    #[test]
+    fn structured_presets_keep_a_bounded_structural_progression() {
+        let parameters = [
+            PulseV2Preset::Compact.parameters(),
+            PulseV2Preset::Standard.parameters(),
+            PulseV2Preset::Widescreen.parameters(),
+            PulseV2Preset::LargeWidescreen.parameters(),
+        ];
+        assert!(
+            parameters
+                .windows(2)
+                .all(|pair| pair[1].structure_radius() >= pair[0].structure_radius())
+        );
+        assert!(parameters.windows(2).all(|pair| {
+            pair[1].structure_contrast_strength() > pair[0].structure_contrast_strength()
+                && pair[1].structure_convergence_strength()
+                    > pair[0].structure_convergence_strength()
+        }));
     }
 
     #[test]
@@ -799,6 +999,46 @@ mod tests {
             .map(|(left, right)| (left - right).abs())
             .sum::<f32>()
             / left.as_slice().len().max(1) as f32
+    }
+
+    fn mean_structured_difference(left: &StructuredField, right: &StructuredField) -> f32 {
+        left.as_slice()
+            .iter()
+            .zip(right.as_slice())
+            .map(|(left, right)| (left - right).abs())
+            .sum::<f32>()
+            / left.as_slice().len().max(1) as f32
+    }
+
+    fn mean_region(field: &StructuredField, start_x: usize, end_x: usize) -> f32 {
+        let mut total = 0.0;
+        let mut count = 0;
+        for y in 0..field.height() {
+            for x in start_x..end_x.min(field.width()) {
+                total += field.read(x, y).unwrap_or(0.0);
+                count += 1;
+            }
+        }
+        total / count.max(1) as f32
+    }
+
+    fn count_adjacent_active(field: &StructuredField, threshold: f32) -> usize {
+        let mut count = 0;
+        for y in 0..field.height() {
+            for x in 0..field.width() {
+                let current = field.read(x, y).unwrap_or(0.0);
+                if current <= threshold {
+                    continue;
+                }
+                if field.read(x + 1, y).is_some_and(|value| value > threshold) {
+                    count += 1;
+                }
+                if field.read(x, y + 1).is_some_and(|value| value > threshold) {
+                    count += 1;
+                }
+            }
+        }
+        count
     }
 
     fn mean_horizontal_noise_source_difference(noise: &NoiseField) -> f32 {

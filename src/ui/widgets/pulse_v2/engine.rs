@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use super::{
     FieldDimensions, FieldError, FlowField, NoiseField, NormalizedPulseInput, PulseV2Preset,
-    ScalarField, TransportedField, noise,
+    ScalarField, StructuredField, TransportedField, noise,
 };
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -17,6 +17,7 @@ pub struct PulseV2Frame {
     noise: NoiseField,
     flow: FlowField,
     transported: TransportedField,
+    structured: StructuredField,
     elapsed: Duration,
     reduced_motion: bool,
 }
@@ -36,6 +37,7 @@ impl PulseV2Engine {
         let noise = NoiseField::try_new(dimensions)?;
         let flow = FlowField::from_scalar(&field)?;
         let transported = TransportedField::try_new(dimensions)?;
+        let structured = StructuredField::try_new(dimensions)?;
 
         Ok(PulseV2Frame {
             dimensions,
@@ -45,6 +47,7 @@ impl PulseV2Engine {
             noise,
             flow,
             transported,
+            structured,
             elapsed: Duration::ZERO,
             reduced_motion: true,
         })
@@ -78,6 +81,7 @@ impl PulseV2Engine {
         let flow = FlowField::from_scalar(&field)?;
         let transported =
             TransportedField::from_fields(&field, &noise, &flow, preset, reduced_motion)?;
+        let structured = StructuredField::from_fields(&field, &transported, &flow, preset)?;
 
         Ok(PulseV2Frame {
             dimensions,
@@ -87,6 +91,7 @@ impl PulseV2Engine {
             noise,
             flow,
             transported,
+            structured,
             elapsed,
             reduced_motion,
         })
@@ -122,6 +127,10 @@ impl PulseV2Frame {
         &self.transported
     }
 
+    pub fn structured(&self) -> &StructuredField {
+        &self.structured
+    }
+
     pub fn is_empty(&self) -> bool {
         self.field.as_slice().iter().all(|value| *value == 0.0)
             && self.noise.as_slice().iter().all(|value| *value == 0.0)
@@ -136,6 +145,7 @@ impl PulseV2Frame {
                 .as_slice()
                 .iter()
                 .all(|value| *value == 0.0)
+            && self.structured.as_slice().iter().all(|value| *value == 0.0)
     }
 
     pub fn elapsed(&self) -> Duration {
