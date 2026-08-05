@@ -607,6 +607,69 @@ struct CoreState {
     breath: f32,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct CompressionZone {
+    center: (f32, f32),
+    entry_x: f32,
+    exit_x: f32,
+    fusion_half_width: f32,
+    skew: f32,
+}
+
+impl CompressionZone {
+    fn from(flow: &FlowField, health: PulseHealth) -> Self {
+        let pressure = health.pressure();
+        let center = (
+            (flow.core.position.0 + 0.026 + flow.network_bias * 0.014).clamp(0.34, 0.68),
+            (flow.core.position.1 - 0.018 + flow.network_bias * 0.010).clamp(0.30, 0.70),
+        );
+        let entry_span = (0.25 + flow.core.radius * 0.85 + pressure * 0.035).clamp(0.25, 0.38);
+        let exit_span = (0.23 + flow.core.radius * 0.72 + pressure * 0.030).clamp(0.23, 0.36);
+
+        Self {
+            center,
+            entry_x: (center.0 - entry_span).clamp(0.12, 0.46),
+            exit_x: (center.0 + exit_span).clamp(0.54, 0.88),
+            fusion_half_width: (0.065 + flow.core.radius * 0.22 + pressure * 0.014)
+                .clamp(0.065, 0.11),
+            skew: 0.058 + pressure * 0.024 + flow.network_bias.abs() * 0.012,
+        }
+    }
+
+    fn project(&self, position: (f32, f32), phase: f32, layer: usize, depth: f32) -> (f32, f32) {
+        if position.0 < self.entry_x || position.0 > self.exit_x {
+            return position;
+        }
+
+        let incoming =
+            smoothstep((position.0 - self.entry_x) / (self.center.0 - self.entry_x).max(0.001));
+        let outgoing =
+            smoothstep((position.0 - self.center.0) / (self.exit_x - self.center.0).max(0.001));
+        let strand = ((phase * 0.61 + layer as f32 * 1.17).sin() * 0.72
+            + (phase * 1.31 + depth * TAU).cos() * 0.28)
+            .clamp(-1.0, 1.0);
+        let centerline = if position.0 <= self.center.0 {
+            self.center.1 + self.skew * (1.0 - incoming)
+        } else {
+            self.center.1 + self.skew * 0.55 * outgoing
+        };
+        let width_factor = if position.0 <= self.center.0 {
+            1.0 - incoming * 0.78
+        } else {
+            0.22 + outgoing * 0.78
+        };
+        let strand_offset = strand * (0.009 + depth * 0.014 * outgoing);
+        let mut y = centerline + (position.1 - centerline) * width_factor + strand_offset;
+
+        let fusion = 1.0
+            - smoothstep(((position.0 - self.center.0).abs() / self.fusion_half_width).max(0.0));
+        let fused_center = self.center.1 + strand * 0.008;
+        y = y + (fused_center - y) * fusion * 0.46;
+        (position.0, y.clamp(-0.06, 1.06))
+    }
+
+}
+
 #[derive(Debug, Clone, PartialEq)]
 struct EnergyLandscape {
     width: usize,
@@ -909,6 +972,7 @@ fn build_field(
         field_time,
         pulse.reduced_motion(),
     );
+    let compression_zone = CompressionZone::from(&flow, health);
     let particle_count = active_particle_count(parameters.particles, health, pulse);
 
     for particle_index in 0..particle_count {
@@ -971,9 +1035,21 @@ fn build_field(
                     + if glint { 0.18 } else { 0.0 };
                 let depth = (particle.depth * (0.46 + compression * 0.36 + reconnection * 0.18))
                     .clamp(0.0, 1.0);
-                field.deposit_segment(
+                let visual_start = compression_zone.project(
                     segment_start,
+                    particle.phase,
+                    particle.layer,
+                    particle.depth,
+                );
+                let visual_end = compression_zone.project(
                     next_position,
+                    particle.phase,
+                    particle.layer,
+                    particle.depth,
+                );
+                field.deposit_segment(
+                    visual_start,
+                    visual_end,
                     energy,
                     radius,
                     particle.layer,
@@ -1417,9 +1493,9 @@ mod tests {
     use ratatui::{layout::Rect, style::Modifier};
 
     use super::{
-        ACTIVE_ENERGY_EPSILON, ConvergenceState, EnergyLandscape, EnergySample, FIELD_THRESHOLD,
-        FieldFrame, FlowField, LightingRange, PulsePreset, apply_discharges, braille_lines,
-        build_field, core_state, detect_convergence, domain_aspect, field_for_area,
+        ACTIVE_ENERGY_EPSILON, CompressionZone, ConvergenceState, EnergyLandscape, EnergySample,
+        FIELD_THRESHOLD, FieldFrame, FlowField, LightingRange, PulsePreset, apply_discharges,
+        braille_lines, build_field, core_state, detect_convergence, domain_aspect, field_for_area,
         illuminate_convergence, perceptual_intensity, preset_for, sample_style, unicode_lines,
         unicode_symbol, uses_braille,
     };
@@ -1994,6 +2070,65 @@ mod tests {
 
         assert!(before > 0.0);
         assert!(after > 0.0);
+    }
+
+    #[test]
+    fn compression_zone_reduces_spread_then_reopens_it() {
+        let pulse = pulse();
+        let health = pulse.health();
+        let core = core_state(0.0, health, &pulse);
+        let flow = FlowField::new(domain_aspect(240, 120, true), 0.0, health, &pulse, core);
+        let zone = CompressionZone::from(&flow, health);
+        let y_values = [0.20, 0.34, 0.48, 0.62, 0.78];
+        let incoming_x = zone.entry_x + (zone.center.0 - zone.entry_x) * 0.72;
+        let fused_x = zone.center.0;
+        let outgoing_x = zone.center.0 + (zone.exit_x - zone.center.0) * 0.72;
+        let spread = |x: f32| {
+            let projected = y_values
+                .iter()
+                .map(|y| zone.project((x, *y), 1.2, 1, 0.6))
+                .map(|position| position.1);
+            let (minimum, maximum) =
+                projected.fold((1.0_f32, 0.0_f32), |(min, max), y| (min.min(y), max.max(y)));
+            maximum - minimum
+        };
+
+        assert!(zone.exit_x - zone.entry_x > zone.fusion_half_width * 4.0);
+        assert!(zone.center.0 > 0.5);
+        assert!(spread(fused_x) < spread(incoming_x) * 0.45);
+        assert!(spread(outgoing_x) > spread(fused_x) * 2.0);
+    }
+
+    #[test]
+    fn compression_forms_a_continuous_bridge_and_reorients_the_exit() {
+        let pulse = pulse();
+        let health = pulse.health();
+        let field = build_field(240, 120, true, PulsePreset::Widescreen, health, 0.0, &pulse);
+        let core = core_state(0.0, health, &pulse);
+        let flow = FlowField::new(domain_aspect(240, 120, true), 0.0, health, &pulse, core);
+        let zone = CompressionZone::from(&flow, health);
+        let samples = [
+            zone.center.0 - zone.fusion_half_width * 2.0,
+            zone.center.0 - zone.fusion_half_width,
+            zone.center.0,
+            zone.center.0 + zone.fusion_half_width,
+        ];
+        let bridge = samples
+            .iter()
+            .map(|x| field.local_energy((*x, zone.center.1), 4.5))
+            .collect::<Vec<_>>();
+        assert!(bridge.iter().all(|energy| *energy > FIELD_THRESHOLD));
+        assert!(bridge[2] >= bridge[0] * 0.82);
+        assert!(bridge[2] >= bridge[3] * 0.82);
+
+        let incoming_a = zone.project((zone.entry_x + 0.06, zone.center.1 + 0.16), 0.9, 0, 0.35);
+        let incoming_b = zone.project((zone.entry_x + 0.16, zone.center.1 + 0.16), 0.9, 0, 0.35);
+        let outgoing_a = zone.project((zone.center.0 + 0.05, zone.center.1 + 0.16), 0.9, 0, 0.35);
+        let outgoing_b = zone.project((zone.center.0 + 0.15, zone.center.1 + 0.16), 0.9, 0, 0.35);
+        let incoming_slope = (incoming_b.1 - incoming_a.1) / (incoming_b.0 - incoming_a.0);
+        let outgoing_slope = (outgoing_b.1 - outgoing_a.1) / (outgoing_b.0 - outgoing_a.0);
+        assert!(incoming_slope * outgoing_slope < 0.0);
+        assert!(field.local_energy((zone.center.0 + 0.15, zone.center.1), 5.0) > 0.0);
     }
 
     #[test]
