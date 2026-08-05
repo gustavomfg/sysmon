@@ -2,6 +2,7 @@ mod engine;
 mod layout;
 mod regions;
 mod types;
+mod visual;
 mod widget;
 
 #[allow(unused_imports)]
@@ -14,6 +15,11 @@ pub use regions::{DashboardComposition, DashboardPriority, DashboardRegion};
 pub use types::{
     DashboardBounds, DashboardContext, DashboardDimensions, DashboardError, DashboardMinimum,
     DashboardPreset, MAX_DASHBOARD_CELLS, MAX_DASHBOARD_DIMENSION, MAX_DASHBOARD_REGIONS,
+};
+#[allow(unused_imports)]
+pub use visual::{
+    Highlight, Intensity, MetricAvailability, MetricIndicators, MetricUnit, MetricValue,
+    MetricVisual, PeriodComparison, Trend, TrendDirection, VisualPriority,
 };
 #[allow(unused_imports)]
 pub use widget::{
