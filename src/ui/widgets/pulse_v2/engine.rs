@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use super::{
     FieldDimensions, FieldError, FlowField, NoiseField, NormalizedPulseInput, PulseV2Preset,
-    ScalarField, noise,
+    ScalarField, TransportedField, noise,
 };
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -16,6 +16,7 @@ pub struct PulseV2Frame {
     field: ScalarField,
     noise: NoiseField,
     flow: FlowField,
+    transported: TransportedField,
     elapsed: Duration,
     reduced_motion: bool,
 }
@@ -34,6 +35,7 @@ impl PulseV2Engine {
         let field = ScalarField::try_new(dimensions)?;
         let noise = NoiseField::try_new(dimensions)?;
         let flow = FlowField::from_scalar(&field)?;
+        let transported = TransportedField::try_new(dimensions)?;
 
         Ok(PulseV2Frame {
             dimensions,
@@ -42,6 +44,7 @@ impl PulseV2Engine {
             field,
             noise,
             flow,
+            transported,
             elapsed: Duration::ZERO,
             reduced_motion: true,
         })
@@ -73,6 +76,8 @@ impl PulseV2Engine {
 
         let noise = noise::generate(dimensions, input, preset, elapsed, reduced_motion)?;
         let flow = FlowField::from_scalar(&field)?;
+        let transported =
+            TransportedField::from_fields(&field, &noise, &flow, preset, reduced_motion)?;
 
         Ok(PulseV2Frame {
             dimensions,
@@ -81,6 +86,7 @@ impl PulseV2Engine {
             field,
             noise,
             flow,
+            transported,
             elapsed,
             reduced_motion,
         })
@@ -112,6 +118,10 @@ impl PulseV2Frame {
         &self.flow
     }
 
+    pub fn transported(&self) -> &TransportedField {
+        &self.transported
+    }
+
     pub fn is_empty(&self) -> bool {
         self.field.as_slice().iter().all(|value| *value == 0.0)
             && self.noise.as_slice().iter().all(|value| *value == 0.0)
@@ -121,6 +131,11 @@ impl PulseV2Frame {
                     && sample.intensity() == 0.0
                     && sample.convergence() == 0.0
             })
+            && self
+                .transported
+                .as_slice()
+                .iter()
+                .all(|value| *value == 0.0)
     }
 
     pub fn elapsed(&self) -> Duration {

@@ -53,7 +53,7 @@ impl NoiseField {
         Some(self.values[y * self.width() + x])
     }
 
-    fn write(&mut self, x: usize, y: usize, value: f32) -> Result<(), FieldError> {
+    pub fn write(&mut self, x: usize, y: usize, value: f32) -> Result<(), FieldError> {
         if !value.is_finite() {
             return Err(FieldError::NonFiniteValue);
         }

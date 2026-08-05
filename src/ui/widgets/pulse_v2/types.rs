@@ -209,6 +209,9 @@ pub struct PresetParameters {
     noise_octaves: u8,
     noise_micro_amplitude: f32,
     noise_time_speed: f32,
+    transport_steps: u8,
+    transport_radius: f32,
+    transport_strength: f32,
 }
 
 impl PulseV2Preset {
@@ -235,11 +238,14 @@ impl PulseV2Preset {
             noise_octaves,
             noise_micro_amplitude,
             noise_time_speed,
+            transport_steps,
+            transport_radius,
+            transport_strength,
         ) = match self {
-            Self::Compact => (16_384, 1, 1.20, 3, 0.065, 0.075),
-            Self::Standard => (65_536, 2, 1.40, 3, 0.080, 0.090),
-            Self::Widescreen => (262_144, 3, 1.58, 4, 0.095, 0.105),
-            Self::LargeWidescreen => (MAX_FIELD_SAMPLES, 4, 1.76, 5, 0.110, 0.120),
+            Self::Compact => (16_384, 1, 1.20, 3, 0.065, 0.075, 2, 0.032, 0.72),
+            Self::Standard => (65_536, 2, 1.40, 3, 0.080, 0.090, 3, 0.046, 0.78),
+            Self::Widescreen => (262_144, 3, 1.58, 4, 0.095, 0.105, 4, 0.060, 0.82),
+            Self::LargeWidescreen => (MAX_FIELD_SAMPLES, 4, 1.76, 5, 0.110, 0.120, 5, 0.074, 0.85),
         };
 
         PresetParameters {
@@ -249,6 +255,9 @@ impl PulseV2Preset {
             noise_octaves,
             noise_micro_amplitude,
             noise_time_speed,
+            transport_steps,
+            transport_radius,
+            transport_strength,
         }
     }
 }
@@ -276,5 +285,17 @@ impl PresetParameters {
 
     pub(crate) fn noise_time_speed(self) -> f32 {
         self.noise_time_speed
+    }
+
+    pub(crate) fn transport_steps(self) -> u8 {
+        self.transport_steps
+    }
+
+    pub(crate) fn transport_radius(self) -> f32 {
+        self.transport_radius
+    }
+
+    pub(crate) fn transport_strength(self) -> f32 {
+        self.transport_strength
     }
 }

@@ -3,6 +3,7 @@ use super::types::{DimensionsError, FieldDimensions, MAX_FIELD_SAMPLES};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FieldError {
     Dimensions(DimensionsError),
+    DimensionsMismatch,
     OutOfBounds,
     NonFiniteValue,
     ValueOutOfRange,

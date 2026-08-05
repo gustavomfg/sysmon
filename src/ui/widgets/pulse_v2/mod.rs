@@ -12,12 +12,14 @@ mod engine;
 mod field;
 mod flow;
 mod noise;
+mod transport;
 mod types;
 
 pub use engine::{PulseV2Engine, PulseV2Frame};
 pub use field::{FieldError, FieldGradient, ScalarField};
 pub use flow::{FlowField, FlowSample};
 pub use noise::NoiseField;
+pub use transport::TransportedField;
 pub use types::{
     CoordinateError, DimensionsError, FieldDimensions, InputError, NormalizedPoint,
     NormalizedPulseInput, PresetParameters, PulseV2Preset,
@@ -32,6 +34,7 @@ mod tests {
     use super::{
         FieldDimensions, FieldGradient, FlowField, FlowSample, NoiseField, NormalizedPoint,
         NormalizedPulseInput, PulseV2Engine, PulseV2Frame, PulseV2Preset, ScalarField,
+        TransportedField,
     };
 
     #[test]
@@ -161,6 +164,14 @@ mod tests {
                 && sample.intensity() == 0.0
                 && sample.convergence() == 0.0
         }));
+        assert_eq!(first.transported().as_slice().len(), 80 * 20);
+        assert!(
+            first
+                .transported()
+                .as_slice()
+                .iter()
+                .all(|value| *value == 0.0)
+        );
         assert!(first.is_empty());
     }
 
@@ -177,6 +188,7 @@ mod tests {
         assert_eq!(frame.preset(), PulseV2Preset::Compact);
         assert!(frame.field().is_empty());
         assert!(frame.flow().is_empty());
+        assert!(frame.transported().is_empty());
         assert!(frame.is_empty());
     }
 
@@ -466,7 +478,149 @@ mod tests {
             assert_eq!(frame.field().as_slice().len(), dimensions.sample_count());
             assert_eq!(frame.noise().as_slice().len(), dimensions.sample_count());
             assert_eq!(frame.flow().as_slice().len(), dimensions.sample_count());
+            assert_eq!(
+                frame.transported().as_slice().len(),
+                dimensions.sample_count()
+            );
         }
+    }
+
+    #[test]
+    fn transported_field_is_bounded_and_keeps_source_fields_unchanged() {
+        let frame = generated(sample_input(), 2.0, false);
+        let scalar_before = frame.field().clone();
+        let noise_before = frame.noise().clone();
+        let flow_before = frame.flow().clone();
+        let transported = frame.transported();
+
+        assert!(!transported.is_empty());
+        assert_eq!(transported.dimensions(), frame.dimensions());
+        assert!(
+            transported
+                .as_slice()
+                .iter()
+                .all(|value| value.is_finite() && (0.0..=1.0).contains(value))
+        );
+        assert_eq!(frame.field(), &scalar_before);
+        assert_eq!(frame.noise(), &noise_before);
+        assert_eq!(frame.flow(), &flow_before);
+    }
+
+    #[test]
+    fn transport_is_deterministic_and_temporally_continuous() {
+        let first = generated(sample_input(), 2.0, false);
+        let same = generated(sample_input(), 2.0, false);
+        let near = generated(sample_input(), 2.01, false);
+        let distant = generated(sample_input(), 18.0, false);
+
+        assert_eq!(first.transported(), same.transported());
+        let nearby_change = mean_transport_difference(first.transported(), near.transported());
+        let distant_change = mean_transport_difference(first.transported(), distant.transported());
+        assert!(nearby_change < 0.08);
+        assert!(distant_change > nearby_change);
+    }
+
+    #[test]
+    fn transport_smooths_texture_along_the_local_flow_direction() {
+        let dimensions = FieldDimensions::new(21, 5).unwrap();
+        let mut scalar = ScalarField::try_new(dimensions).unwrap();
+        let mut noise = NoiseField::try_new(dimensions).unwrap();
+        for y in 0..dimensions.height() {
+            for x in 0..dimensions.width() {
+                scalar
+                    .write(x, y, x as f32 / (dimensions.width() - 1) as f32)
+                    .unwrap();
+                noise
+                    .write(x, y, if x % 2 == 0 { 0.0 } else { 1.0 })
+                    .unwrap();
+            }
+        }
+        let flow = FlowField::from_scalar(&scalar).unwrap();
+        let transported =
+            TransportedField::from_fields(&scalar, &noise, &flow, PulseV2Preset::Standard, false)
+                .unwrap();
+
+        assert!(
+            mean_horizontal_value_difference(&transported)
+                < mean_horizontal_noise_source_difference(&noise)
+        );
+        assert!(
+            transported
+                .read(10, 2)
+                .is_some_and(|value| (0.0..=1.0).contains(&value))
+        );
+        assert!(
+            flow.as_slice()
+                .iter()
+                .all(|sample| sample.direction_x() > 0.99)
+        );
+    }
+
+    #[test]
+    fn flat_flow_preserves_noise_without_inventing_artifacts() {
+        let dimensions = FieldDimensions::new(8, 4).unwrap();
+        let mut scalar = ScalarField::try_new(dimensions).unwrap();
+        let mut noise = NoiseField::try_new(dimensions).unwrap();
+        scalar.fill(0.5).unwrap();
+        for y in 0..dimensions.height() {
+            for x in 0..dimensions.width() {
+                noise.write(x, y, ((x + y) % 3) as f32 / 2.0).unwrap();
+            }
+        }
+        let flow = FlowField::from_scalar(&scalar).unwrap();
+        let transported =
+            TransportedField::from_fields(&scalar, &noise, &flow, PulseV2Preset::Standard, false)
+                .unwrap();
+
+        assert!(
+            flow.as_slice()
+                .iter()
+                .all(|sample| sample.direction_magnitude() == 0.0)
+        );
+        assert_eq!(transported.as_slice(), noise.as_slice());
+    }
+
+    #[test]
+    fn reduced_motion_freezes_transport_and_presets_bound_its_distance() {
+        let first = generated(sample_input(), 0.0, true);
+        let later = generated(sample_input(), 30.0, true);
+        assert_eq!(first.transported(), later.transported());
+
+        let parameters = [
+            PulseV2Preset::Compact.parameters(),
+            PulseV2Preset::Standard.parameters(),
+            PulseV2Preset::Widescreen.parameters(),
+            PulseV2Preset::LargeWidescreen.parameters(),
+        ];
+        assert!(
+            parameters
+                .windows(2)
+                .all(|pair| pair[1].transport_steps() > pair[0].transport_steps())
+        );
+        assert!(
+            parameters
+                .windows(2)
+                .all(|pair| pair[1].transport_radius() > pair[0].transport_radius())
+        );
+        assert!(
+            parameters
+                .iter()
+                .all(|parameters| (0.0..=1.0).contains(&parameters.transport_strength()))
+        );
+    }
+
+    #[test]
+    fn transport_rejects_mismatched_dimensions_without_panicking() {
+        let scalar_dimensions = FieldDimensions::new(4, 4).unwrap();
+        let noise_dimensions = FieldDimensions::new(5, 4).unwrap();
+        let scalar = ScalarField::try_new(scalar_dimensions).unwrap();
+        let noise = NoiseField::try_new(noise_dimensions).unwrap();
+        let flow = FlowField::from_scalar(&scalar).unwrap();
+
+        assert_eq!(
+            TransportedField::from_fields(&scalar, &noise, &flow, PulseV2Preset::Compact, false,),
+            Err(super::FieldError::DimensionsMismatch)
+        );
     }
 
     #[test]
@@ -583,6 +737,7 @@ mod tests {
         for dimensions in [
             FieldDimensions::new(0, 0).unwrap(),
             FieldDimensions::new(1, 1).unwrap(),
+            FieldDimensions::new(1, 2).unwrap(),
             FieldDimensions::new(2, 1).unwrap(),
             FieldDimensions::new(160, 80).unwrap(),
         ] {
@@ -635,6 +790,39 @@ mod tests {
             .map(|(left, right)| (left - right).abs())
             .sum::<f32>()
             / left.as_slice().len().max(1) as f32
+    }
+
+    fn mean_transport_difference(left: &TransportedField, right: &TransportedField) -> f32 {
+        left.as_slice()
+            .iter()
+            .zip(right.as_slice())
+            .map(|(left, right)| (left - right).abs())
+            .sum::<f32>()
+            / left.as_slice().len().max(1) as f32
+    }
+
+    fn mean_horizontal_noise_source_difference(noise: &NoiseField) -> f32 {
+        let mut total = 0.0;
+        let mut count = 0;
+        for y in 0..noise.height() {
+            for x in 0..noise.width().saturating_sub(1) {
+                total += (noise.read(x + 1, y).unwrap() - noise.read(x, y).unwrap()).abs();
+                count += 1;
+            }
+        }
+        total / count.max(1) as f32
+    }
+
+    fn mean_horizontal_value_difference(field: &TransportedField) -> f32 {
+        let mut total = 0.0;
+        let mut count = 0;
+        for y in 0..field.height() {
+            for x in 0..field.width().saturating_sub(1) {
+                total += (field.read(x + 1, y).unwrap() - field.read(x, y).unwrap()).abs();
+                count += 1;
+            }
+        }
+        total / count.max(1) as f32
     }
 
     fn mean_flow_difference(left: &FlowField, right: &FlowField) -> f32 {
