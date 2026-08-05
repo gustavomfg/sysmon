@@ -8,6 +8,7 @@
 // exercised by this module's pure tests and will be consumed by later phases.
 #![allow(dead_code, unused_imports)]
 
+mod color;
 mod engine;
 mod field;
 mod flow;
@@ -19,13 +20,16 @@ mod structure;
 mod transport;
 mod types;
 
+pub use color::{SemanticColorField, SemanticColorSample};
 pub use engine::{PulseV2Engine, PulseV2Frame};
 pub use field::{FieldError, FieldGradient, ScalarField};
 pub use flow::{FlowField, FlowSample};
 pub use lighting::{LightingField, LightingSample};
 pub use noise::NoiseField;
 pub use refinement::{RefinedEnergyField, RefinedEnergySample};
-pub use renderer::{PulseV2Rasterizer, RasterDimensions, RasterFrame, RasterMode};
+pub use renderer::{
+    ColorRasterCell, ColorRasterFrame, PulseV2Rasterizer, RasterDimensions, RasterFrame, RasterMode,
+};
 pub use structure::StructuredField;
 pub use transport::TransportedField;
 pub use types::{

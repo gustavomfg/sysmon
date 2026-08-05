@@ -1,6 +1,10 @@
 #[path = "../ui/widgets/pulse_v2/mod.rs"]
 mod pulse_v2;
 
+#[allow(dead_code)]
+#[path = "../theme/mod.rs"]
+mod theme;
+
 mod pulse {
     #[derive(Debug, Clone, Copy, Default, PartialEq)]
     pub struct PulseInput {
@@ -13,24 +17,25 @@ mod pulse {
     }
 }
 
-use std::{
-    fmt::Write,
-    io::{self, Write as IoWrite},
-    time::{Duration, Instant},
-};
+use std::io::{self, Write as IoWrite};
+use std::time::{Duration, Instant};
 
 use crossterm::{
     cursor::{Hide, MoveTo, Show},
     event::{self, Event, KeyCode, KeyEventKind},
-    execute,
+    execute, queue,
+    style::{Color as TerminalColor, Print, ResetColor, SetForegroundColor},
     terminal::{
         Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode,
         enable_raw_mode, size,
     },
 };
+use ratatui::style::Color as RatatuiColor;
+use theme::Theme;
 
 use pulse_v2::{
-    FieldDimensions, NormalizedPulseInput, PulseV2Engine, PulseV2Preset, PulseV2Rasterizer,
+    ColorRasterFrame, FieldDimensions, NormalizedPulseInput, PulseV2Engine, PulseV2Preset,
+    PulseV2Rasterizer, SemanticColorField,
 };
 
 const FRAME_INTERVAL: Duration = Duration::from_millis(33);
@@ -146,6 +151,7 @@ fn run_viewer() -> io::Result<()> {
     let mut last_tick = Instant::now();
     let mut last_frame_time = Duration::ZERO;
     let mut stdout = io::stdout();
+    let theme = Theme::pulse();
 
     loop {
         if event::poll(FRAME_INTERVAL)? {
@@ -166,7 +172,7 @@ fn run_viewer() -> io::Result<()> {
             state.elapsed = state.elapsed.saturating_add(delta);
         }
 
-        last_frame_time = draw_frame(&mut stdout, &engine, state, last_frame_time)?;
+        last_frame_time = draw_frame(&mut stdout, &engine, &theme, state, last_frame_time)?;
     }
 }
 
@@ -187,6 +193,7 @@ fn handle_key(code: KeyCode, state: &mut ViewerState) -> bool {
 fn draw_frame(
     stdout: &mut io::Stdout,
     engine: &PulseV2Engine,
+    theme: &Theme,
     state: ViewerState,
     previous_frame_time: Duration,
 ) -> io::Result<Duration> {
@@ -207,15 +214,13 @@ fn draw_frame(
             state.reduced_motion,
         )
         .map_err(|error| io::Error::other(format!("Pulse V2 generation failed: {error:?}")))?;
-    let raster = PulseV2Rasterizer::braille(frame.lighting())
+    let semantic_colors = SemanticColorField::from_lighting(frame.lighting(), frame.input(), theme)
+        .map_err(|error| io::Error::other(format!("Pulse V2 color mapping failed: {error:?}")))?;
+    let raster = PulseV2Rasterizer::braille_colored(frame.lighting(), &semantic_colors)
         .map_err(|error| io::Error::other(format!("Pulse V2 rasterization failed: {error:?}")))?;
 
-    let mut output = String::new();
-    writeln!(&mut output, "Pulse V2 Debug Viewer")
-        .map_err(|error| io::Error::other(error.to_string()))?;
-    writeln!(
-        &mut output,
-        "Preset: {} | State: {} | Time: {:.2}s{}",
+    let header = format!(
+        "Pulse V2 Debug Viewer\r\nPreset: {} | State: {} | Time: {:.2}s{}\r\n",
         preset_label(state.preset()),
         state.scenario.label(),
         state.elapsed.as_secs_f32(),
@@ -224,12 +229,7 @@ fn draw_frame(
         } else {
             ""
         }
-    )
-    .map_err(|error| io::Error::other(error.to_string()))?;
-    if !raster.is_empty() {
-        output.push_str(&raster.to_text());
-        output.push('\n');
-    }
+    );
 
     let frame_time = started.elapsed();
     let fps = if previous_frame_time.is_zero() {
@@ -237,24 +237,74 @@ fn draw_frame(
     } else {
         1.0 / previous_frame_time.as_secs_f64()
     };
-    writeln!(
-        &mut output,
-        "Preset: {} | FPS: {:.1} | Frame Time: {:.2} ms | Time: {:.2}s",
+    let footer = format!(
+        "\r\nPreset: {} | FPS: {:.1} | Frame Time: {:.2} ms | Time: {:.2}s\r\n",
         preset_label(state.preset()),
         fps,
         frame_time.as_secs_f64() * 1_000.0,
         state.elapsed.as_secs_f32()
-    )
-    .map_err(|error| io::Error::other(error.to_string()))?;
+    );
 
-    execute!(
-        stdout,
+    let mut output = Vec::with_capacity(raster.width().saturating_mul(raster.height()) * 4);
+    queue!(
+        output,
         MoveTo(0, 0),
         Clear(ClearType::All),
-        crossterm::style::Print(output)
+        ResetColor,
+        Print(header)
     )?;
+    write_colored_raster(&mut output, &raster)?;
+    queue!(output, ResetColor, Print(footer))?;
+    stdout.write_all(&output)?;
     stdout.flush()?;
     Ok(frame_time)
+}
+
+fn write_colored_raster(output: &mut Vec<u8>, raster: &ColorRasterFrame) -> io::Result<()> {
+    for y in 0..raster.height() {
+        let mut active_color = None;
+        for x in 0..raster.width() {
+            let cell = raster
+                .read(x, y)
+                .ok_or_else(|| io::Error::other("colored raster cell out of bounds"))?;
+            if cell.character() == ' ' {
+                queue!(output, Print(' '))?;
+            } else {
+                let color = to_terminal_color(cell.foreground());
+                if active_color != Some(color) {
+                    queue!(output, SetForegroundColor(color))?;
+                    active_color = Some(color);
+                }
+                queue!(output, Print(cell.character()))?;
+            }
+        }
+        queue!(output, ResetColor, Print("\r\n"))?;
+    }
+    Ok(())
+}
+
+fn to_terminal_color(color: RatatuiColor) -> TerminalColor {
+    match color {
+        RatatuiColor::Reset => TerminalColor::Reset,
+        RatatuiColor::Black => TerminalColor::Black,
+        RatatuiColor::Red => TerminalColor::DarkRed,
+        RatatuiColor::Green => TerminalColor::DarkGreen,
+        RatatuiColor::Yellow => TerminalColor::DarkYellow,
+        RatatuiColor::Blue => TerminalColor::DarkBlue,
+        RatatuiColor::Magenta => TerminalColor::DarkMagenta,
+        RatatuiColor::Cyan => TerminalColor::DarkCyan,
+        RatatuiColor::Gray => TerminalColor::Grey,
+        RatatuiColor::DarkGray => TerminalColor::DarkGrey,
+        RatatuiColor::LightRed => TerminalColor::Red,
+        RatatuiColor::LightGreen => TerminalColor::Green,
+        RatatuiColor::LightYellow => TerminalColor::Yellow,
+        RatatuiColor::LightBlue => TerminalColor::Blue,
+        RatatuiColor::LightMagenta => TerminalColor::Magenta,
+        RatatuiColor::LightCyan => TerminalColor::Cyan,
+        RatatuiColor::White => TerminalColor::White,
+        RatatuiColor::Rgb(r, g, b) => TerminalColor::Rgb { r, g, b },
+        RatatuiColor::Indexed(value) => TerminalColor::AnsiValue(value),
+    }
 }
 
 fn preset_label(preset: PulseV2Preset) -> &'static str {
