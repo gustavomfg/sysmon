@@ -14,6 +14,6 @@ pub use storage::{
     StorageMetricInput, StorageMetricModel,
 };
 pub use types::{
-    CPU_THRESHOLDS, GPU_THRESHOLDS, MEMORY_THRESHOLDS, MetricModelError, MetricModelSummary,
-    MetricReading, MetricThresholds, NETWORK_THRESHOLDS, STORAGE_THRESHOLDS,
+    CHART_POINTS, CPU_THRESHOLDS, GPU_THRESHOLDS, MAX_PEAKS, MEMORY_THRESHOLDS, MetricModelError,
+    MetricModelSummary, MetricReading, MetricThresholds, NETWORK_THRESHOLDS, STORAGE_THRESHOLDS,
 };

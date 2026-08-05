@@ -3,6 +3,7 @@ mod engine;
 mod layout;
 mod metrics;
 mod regions;
+mod render;
 mod types;
 mod visual;
 mod widget;
@@ -31,6 +32,12 @@ pub use metrics::{
 };
 #[allow(unused_imports)]
 pub use regions::{DashboardComposition, DashboardPriority, DashboardRegion};
+#[allow(unused_imports)]
+pub use render::{
+    BlockId, BlockMetadata, BlockRequirement, BlockVisibility, ChartBlock, ChartContent,
+    FooterBlock, IndicatorBlock, MAX_RENDER_BLOCKS, RenderBlock, RenderError, StatusBlock,
+    TitleBlock, TrendBlock, ValueBlock, WidgetRenderModel, WidgetRenderer,
+};
 #[allow(unused_imports)]
 pub use types::{
     DashboardBounds, DashboardContext, DashboardDimensions, DashboardError, DashboardMinimum,
