@@ -34,6 +34,11 @@ const ATMOSPHERE_FLOOR: f32 = 0.30;
 const ATMOSPHERE_CEILING: f32 = 0.045;
 const RETURN_FLOOR: f32 = 0.64;
 const RETURN_CEILING: f32 = 0.96;
+const ATMOSPHERE_LAYER_BASE: usize = FLOW_LAYERS;
+const RETURN_LAYER_BASE: usize = FLOW_LAYERS * 2;
+const AMBIENT_DUST_LAYER: usize = FLOW_LAYERS * 3;
+const AMBIENT_TRACER_LAYER: usize = AMBIENT_DUST_LAYER + 1;
+const AMBIENT_GLINT_LAYER: usize = AMBIENT_DUST_LAYER + 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PulsePreset {
@@ -444,6 +449,48 @@ struct Particle {
     depth: f32,
     layer: usize,
     edge: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FilamentClass {
+    Primary,
+    Secondary,
+    Ghost,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct FilamentProfile {
+    class: FilamentClass,
+    radius_scale: f32,
+}
+
+fn filament_profile(particle: Particle, progress: f32, time: f32) -> FilamentProfile {
+    let class = if particle.depth >= 0.68 {
+        FilamentClass::Primary
+    } else if particle.depth >= 0.38 {
+        FilamentClass::Secondary
+    } else {
+        FilamentClass::Ghost
+    };
+    let progress = progress.clamp(0.0, 1.0);
+    let phase = particle.phase
+        + time * (0.035 + particle.depth * 0.025)
+        + progress * TAU * (0.28 + particle.depth * 0.16)
+        + particle.layer as f32 * 0.37;
+    let broad_variation = phase.sin();
+    let fine_variation = (phase * 0.71 + particle.phase * 0.23).cos();
+    let radius_variation =
+        (0.995 + broad_variation * 0.006 + fine_variation * 0.004).clamp(0.985, 1.005);
+    let class_radius = match class {
+        FilamentClass::Primary => 1.04,
+        FilamentClass::Secondary => 1.00,
+        FilamentClass::Ghost => 0.96,
+    };
+
+    FilamentProfile {
+        class,
+        radius_scale: (class_radius * radius_variation).clamp(0.68, 1.18),
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1006,6 +1053,9 @@ fn build_field(
                 parameters.virtual_margin,
             );
             if step % parameters.splat_stride == 0 || step + 1 == parameters.advection_steps {
+                let progress =
+                    step as f32 / parameters.advection_steps.saturating_sub(1).max(1) as f32;
+                let morphology = filament_profile(particle, progress, field_time);
                 let (_, compression, reconnection) = flow.convergence(position, particle.direction);
                 let sampler_weight = landscape.sampler_weight(position);
                 let rhythm = 0.68
@@ -1030,12 +1080,13 @@ fn build_field(
                 } else {
                     energy
                 };
-                let radius = parameters.splat_radius
+                let radius = (parameters.splat_radius
                     + particle.depth * 0.16
                     + compression * 0.52
                     + sampler_weight * 0.12
                     + if particle.edge { 0.42 } else { 0.0 }
-                    + if glint { 0.18 } else { 0.0 };
+                    + if glint { 0.18 } else { 0.0 })
+                    * morphology.radius_scale;
                 let depth = (particle.depth * (0.46 + compression * 0.36 + reconnection * 0.18))
                     .clamp(0.0, 1.0);
                 let visual_start = compression_zone.project(
@@ -1168,7 +1219,7 @@ fn merge_atmospheric_layer(field: &mut FieldFrame, atmosphere: &FieldFrame) {
             let existing_energy = sample.energy;
             sample.energy = (existing_energy + contribution).clamp(0.0, 1.0);
             if distant.energy > existing_energy {
-                sample.layer = distant.layer;
+                sample.layer = ATMOSPHERE_LAYER_BASE + distant.layer % FLOW_LAYERS;
                 sample.depth = distant.depth;
             }
         }
@@ -1255,7 +1306,7 @@ fn merge_return_layer(field: &mut FieldFrame, return_layer: &FieldFrame) {
             let existing_energy = sample.energy;
             sample.energy = (existing_energy + contribution).clamp(0.0, 1.0);
             if distant.energy > existing_energy {
-                sample.layer = distant.layer;
+                sample.layer = RETURN_LAYER_BASE + distant.layer % FLOW_LAYERS;
                 sample.depth = distant.depth;
             }
         }
@@ -1450,12 +1501,11 @@ fn advect_atmospheric_position(
 
 fn rasterize_atmospheric_particles(field: &mut FieldFrame, particles: &[AtmosphericParticle]) {
     for particle in particles {
-        let layer = FLOW_LAYERS
-            + match particle.kind {
-                AtmosphericParticleKind::Dust => 0,
-                AtmosphericParticleKind::Tracer => 1,
-                AtmosphericParticleKind::Glint => 2,
-            };
+        let layer = match particle.kind {
+            AtmosphericParticleKind::Dust => AMBIENT_DUST_LAYER,
+            AtmosphericParticleKind::Tracer => AMBIENT_TRACER_LAYER,
+            AtmosphericParticleKind::Glint => AMBIENT_GLINT_LAYER,
+        };
         field.deposit(
             particle.position,
             particle.energy,
@@ -1767,6 +1817,29 @@ fn perceptual_intensity(energy: f32, lighting: LightingRange, dot_count: u32) ->
     intensity.clamp(0.0, 0.96)
 }
 
+fn hierarchy_luminance(sample: EnergySample) -> f32 {
+    let depth = sample.depth.clamp(0.0, 1.0);
+    if sample.layer >= AMBIENT_GLINT_LAYER {
+        return (0.88 + depth * 0.08).clamp(0.0, 1.0);
+    }
+    if sample.layer >= AMBIENT_TRACER_LAYER {
+        return (0.70 + depth * 0.10).clamp(0.0, 1.0);
+    }
+    if sample.layer >= AMBIENT_DUST_LAYER {
+        return (0.52 + depth * 0.08).clamp(0.0, 1.0);
+    }
+    if sample.layer >= RETURN_LAYER_BASE {
+        return (0.70 + depth * 0.12).clamp(0.0, 1.0);
+    }
+    if sample.layer >= ATMOSPHERE_LAYER_BASE {
+        return (0.56 + depth * 0.10).clamp(0.0, 1.0);
+    }
+
+    // Main-field depth is produced by compression, convergence and reconnection.
+    // It therefore supplies the natural lift that guides the eye to the core.
+    (0.86 + depth * 0.14).clamp(0.0, 1.0)
+}
+
 fn sample_style(
     theme: &Theme,
     health: PulseHealth,
@@ -1802,8 +1875,7 @@ fn sample_style(
     let intensity = perceptual_intensity(sample.energy, lighting, dot_count);
     let color_lift = (0.035 + flow * 0.055 + energetic * 0.12 + peak * 0.24).clamp(0.0, 0.42);
     color = blend_color(color, theme.text, color_lift);
-    let depth_signal = 0.78 + sample.depth * 0.22;
-    let brightness = (intensity * depth_signal).clamp(0.0, 0.96);
+    let brightness = (intensity * hierarchy_luminance(sample)).clamp(0.0, 0.96);
     let mut style = Style::default().fg(scale_color(color, brightness));
     if peak > 0.76 || (energetic > 0.82 && dot_count >= 3) {
         style = style.add_modifier(Modifier::BOLD);
@@ -1877,11 +1949,13 @@ mod tests {
     use ratatui::{layout::Rect, style::Modifier};
 
     use super::{
-        ACTIVE_ENERGY_EPSILON, ATMOSPHERE_FLOOR, AtmosphericParticleKind, CompressionZone,
-        ConvergenceState, EnergyLandscape, EnergySample, FIELD_THRESHOLD, FieldFrame, FlowField,
-        LightingRange, PulsePreset, RETURN_FLOOR, apply_discharges, atmospheric_particle_budget,
-        braille_lines, build_atmospheric_layer, build_atmospheric_particles, build_field,
-        build_return_layer, core_state, detect_convergence, domain_aspect, field_for_area,
+        ACTIVE_ENERGY_EPSILON, AMBIENT_DUST_LAYER, AMBIENT_GLINT_LAYER, ATMOSPHERE_FLOOR,
+        ATMOSPHERE_LAYER_BASE, AtmosphericParticleKind, CompressionZone, ConvergenceState,
+        EnergyLandscape, EnergySample, FIELD_THRESHOLD, FieldFrame, FilamentClass, FlowField,
+        LightingRange, Particle, PulsePreset, RETURN_FLOOR, RETURN_LAYER_BASE, apply_discharges,
+        atmospheric_particle_budget, braille_lines, build_atmospheric_layer,
+        build_atmospheric_particles, build_field, build_return_layer, core_state,
+        detect_convergence, domain_aspect, field_for_area, filament_profile, hierarchy_luminance,
         illuminate_convergence, perceptual_intensity, preset_for, rasterize_atmospheric_particles,
         sample_style, unicode_lines, unicode_symbol, uses_braille,
     };
@@ -2085,6 +2159,46 @@ mod tests {
     }
 
     #[test]
+    fn filament_morphology_has_stable_tiers_and_continuous_variation() {
+        let particle = |depth| Particle {
+            position: (0.24, 0.42),
+            phase: 0.7,
+            direction: 1.0,
+            depth,
+            layer: 1,
+            edge: false,
+        };
+        let primary = filament_profile(particle(0.86), 0.42, 0.0);
+        let secondary = filament_profile(particle(0.50), 0.42, 0.0);
+        let ghost = filament_profile(particle(0.20), 0.42, 0.0);
+
+        assert_eq!(primary.class, FilamentClass::Primary);
+        assert_eq!(secondary.class, FilamentClass::Secondary);
+        assert_eq!(ghost.class, FilamentClass::Ghost);
+        assert!(primary.radius_scale > secondary.radius_scale);
+        assert!(secondary.radius_scale > ghost.radius_scale);
+
+        for depth in [0.20, 0.50, 0.86] {
+            let particle = particle(depth);
+            let previous = filament_profile(particle, 0.42, 0.0);
+            let next = filament_profile(particle, 0.43, 0.0);
+            assert!((previous.radius_scale - next.radius_scale).abs() < 0.02);
+            assert!((0.68..=1.18).contains(&next.radius_scale));
+        }
+
+        let pulse = pulse();
+        let first = field_for_area(80, 20, true, &pulse);
+        let same = field_for_area(80, 20, true, &pulse);
+        assert_eq!(first, same);
+        assert!(
+            first
+                .samples
+                .iter()
+                .all(|sample| { (0.0..=1.0).contains(&sample.energy) && sample.depth.is_finite() })
+        );
+    }
+
+    #[test]
     fn adjacent_times_preserve_a_shared_energy_structure() {
         let pulse = pulse();
         let first = build_field(
@@ -2156,6 +2270,82 @@ mod tests {
         assert!(energy > field.samples.len() / 80);
         assert!(peaks > 0);
         assert!(peaks * 8 < field.samples.len());
+    }
+
+    #[test]
+    fn lighting_hierarchy_keeps_the_core_above_ambient_planes() {
+        let energy = 0.34;
+        let upper = hierarchy_luminance(EnergySample {
+            energy,
+            layer: ATMOSPHERE_LAYER_BASE,
+            depth: 0.10,
+        });
+        let lower = hierarchy_luminance(EnergySample {
+            energy,
+            layer: RETURN_LAYER_BASE,
+            depth: 0.12,
+        });
+        let main = hierarchy_luminance(EnergySample {
+            energy,
+            layer: 0,
+            depth: 0.16,
+        });
+        let compression = hierarchy_luminance(EnergySample {
+            energy,
+            layer: 0,
+            depth: 0.82,
+        });
+        let dust = hierarchy_luminance(EnergySample {
+            energy,
+            layer: AMBIENT_DUST_LAYER,
+            depth: 0.06,
+        });
+        let glint = hierarchy_luminance(EnergySample {
+            energy,
+            layer: AMBIENT_GLINT_LAYER,
+            depth: 0.80,
+        });
+
+        assert!(upper < lower);
+        assert!(lower < main);
+        assert!(main < compression);
+        assert!(dust < main);
+        assert!(glint < compression);
+
+        let pulse = pulse();
+        let health = pulse.health();
+        let field = build_field(240, 120, true, PulsePreset::Widescreen, health, 0.0, &pulse);
+        let core = core_state(0.0, health, &pulse);
+        let lighting = field.lighting_range();
+        let core_peak = field
+            .samples
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| {
+                let x = *index % field.width;
+                let y = *index / field.width;
+                let position = (
+                    x as f32 / field.width.saturating_sub(1).max(1) as f32,
+                    y as f32 / field.height.saturating_sub(1).max(1) as f32,
+                );
+                (position.0 - core.position.0)
+                    .hypot((position.1 - core.position.1) * field.dot_aspect)
+                    < core.radius * 2.5
+            })
+            .map(|(_, sample)| {
+                perceptual_intensity(sample.energy, lighting, 8) * hierarchy_luminance(*sample)
+            })
+            .fold(0.0, f32::max);
+        let ambient_peak = field
+            .samples
+            .iter()
+            .filter(|sample| sample.layer >= ATMOSPHERE_LAYER_BASE)
+            .map(|sample| {
+                perceptual_intensity(sample.energy, lighting, 8) * hierarchy_luminance(*sample)
+            })
+            .fold(0.0, f32::max);
+
+        assert!(core_peak > ambient_peak);
     }
 
     #[test]
