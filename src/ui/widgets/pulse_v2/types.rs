@@ -215,6 +215,9 @@ pub struct PresetParameters {
     structure_radius: u8,
     structure_contrast_strength: f32,
     structure_convergence_strength: f32,
+    lighting_radius: u8,
+    lighting_contrast_strength: f32,
+    lighting_peak_cutoff: f32,
 }
 
 impl PulseV2Preset {
@@ -247,15 +250,18 @@ impl PulseV2Preset {
             structure_radius,
             structure_contrast_strength,
             structure_convergence_strength,
+            lighting_radius,
+            lighting_contrast_strength,
+            lighting_peak_cutoff,
         ) = match self {
             Self::Compact => (
-                16_384, 1, 1.20, 3, 0.065, 0.075, 2, 0.032, 0.72, 1, 0.14, 0.15,
+                16_384, 1, 1.20, 3, 0.065, 0.075, 2, 0.032, 0.72, 1, 0.14, 0.15, 1, 0.16, 0.78,
             ),
             Self::Standard => (
-                65_536, 2, 1.40, 3, 0.080, 0.090, 3, 0.046, 0.78, 1, 0.18, 0.19,
+                65_536, 2, 1.40, 3, 0.080, 0.090, 3, 0.046, 0.78, 1, 0.18, 0.19, 1, 0.19, 0.74,
             ),
             Self::Widescreen => (
-                262_144, 3, 1.58, 4, 0.095, 0.105, 4, 0.060, 0.82, 1, 0.22, 0.23,
+                262_144, 3, 1.58, 4, 0.095, 0.105, 4, 0.060, 0.82, 1, 0.22, 0.23, 1, 0.22, 0.72,
             ),
             Self::LargeWidescreen => (
                 MAX_FIELD_SAMPLES,
@@ -270,6 +276,9 @@ impl PulseV2Preset {
                 2,
                 0.25,
                 0.27,
+                2,
+                0.24,
+                0.70,
             ),
         };
 
@@ -286,6 +295,9 @@ impl PulseV2Preset {
             structure_radius,
             structure_contrast_strength,
             structure_convergence_strength,
+            lighting_radius,
+            lighting_contrast_strength,
+            lighting_peak_cutoff,
         }
     }
 }
@@ -337,5 +349,17 @@ impl PresetParameters {
 
     pub(crate) fn structure_convergence_strength(self) -> f32 {
         self.structure_convergence_strength
+    }
+
+    pub(crate) fn lighting_radius(self) -> u8 {
+        self.lighting_radius
+    }
+
+    pub(crate) fn lighting_contrast_strength(self) -> f32 {
+        self.lighting_contrast_strength
+    }
+
+    pub(crate) fn lighting_peak_cutoff(self) -> f32 {
+        self.lighting_peak_cutoff
     }
 }

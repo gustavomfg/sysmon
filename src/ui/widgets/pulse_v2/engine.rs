@@ -1,8 +1,8 @@
 use std::time::Duration;
 
 use super::{
-    FieldDimensions, FieldError, FlowField, NoiseField, NormalizedPulseInput, PulseV2Preset,
-    ScalarField, StructuredField, TransportedField, noise,
+    FieldDimensions, FieldError, FlowField, LightingField, NoiseField, NormalizedPulseInput,
+    PulseV2Preset, ScalarField, StructuredField, TransportedField, noise,
 };
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -18,6 +18,7 @@ pub struct PulseV2Frame {
     flow: FlowField,
     transported: TransportedField,
     structured: StructuredField,
+    lighting: LightingField,
     elapsed: Duration,
     reduced_motion: bool,
 }
@@ -38,6 +39,7 @@ impl PulseV2Engine {
         let flow = FlowField::from_scalar(&field)?;
         let transported = TransportedField::try_new(dimensions)?;
         let structured = StructuredField::try_new(dimensions)?;
+        let lighting = LightingField::try_new(dimensions)?;
 
         Ok(PulseV2Frame {
             dimensions,
@@ -48,6 +50,7 @@ impl PulseV2Engine {
             flow,
             transported,
             structured,
+            lighting,
             elapsed: Duration::ZERO,
             reduced_motion: true,
         })
@@ -82,6 +85,8 @@ impl PulseV2Engine {
         let transported =
             TransportedField::from_fields(&field, &noise, &flow, preset, reduced_motion)?;
         let structured = StructuredField::from_fields(&field, &transported, &flow, preset)?;
+        let lighting =
+            LightingField::from_fields(&structured, &flow, input, preset, reduced_motion)?;
 
         Ok(PulseV2Frame {
             dimensions,
@@ -92,6 +97,7 @@ impl PulseV2Engine {
             flow,
             transported,
             structured,
+            lighting,
             elapsed,
             reduced_motion,
         })
@@ -131,6 +137,10 @@ impl PulseV2Frame {
         &self.structured
     }
 
+    pub fn lighting(&self) -> &LightingField {
+        &self.lighting
+    }
+
     pub fn is_empty(&self) -> bool {
         self.field.as_slice().iter().all(|value| *value == 0.0)
             && self.noise.as_slice().iter().all(|value| *value == 0.0)
@@ -146,6 +156,13 @@ impl PulseV2Frame {
                 .iter()
                 .all(|value| *value == 0.0)
             && self.structured.as_slice().iter().all(|value| *value == 0.0)
+            && self.lighting.as_slice().iter().all(|sample| {
+                sample.intensity() == 0.0
+                    && sample.depth() == 0.0
+                    && sample.relative_energy() == 0.0
+                    && sample.local_highlight() == 0.0
+                    && !sample.is_peak()
+            })
     }
 
     pub fn elapsed(&self) -> Duration {

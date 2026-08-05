@@ -11,6 +11,7 @@
 mod engine;
 mod field;
 mod flow;
+mod lighting;
 mod noise;
 mod structure;
 mod transport;
@@ -19,6 +20,7 @@ mod types;
 pub use engine::{PulseV2Engine, PulseV2Frame};
 pub use field::{FieldError, FieldGradient, ScalarField};
 pub use flow::{FlowField, FlowSample};
+pub use lighting::{LightingField, LightingSample};
 pub use noise::NoiseField;
 pub use structure::StructuredField;
 pub use transport::TransportedField;
@@ -34,9 +36,9 @@ mod tests {
     use crate::pulse::PulseInput;
 
     use super::{
-        FieldDimensions, FieldGradient, FlowField, FlowSample, NoiseField, NormalizedPoint,
-        NormalizedPulseInput, PulseV2Engine, PulseV2Frame, PulseV2Preset, ScalarField,
-        StructuredField, TransportedField,
+        FieldDimensions, FieldGradient, FlowField, FlowSample, LightingField, NoiseField,
+        NormalizedPoint, NormalizedPulseInput, PulseV2Engine, PulseV2Frame, PulseV2Preset,
+        ScalarField, StructuredField, TransportedField,
     };
 
     #[test]
@@ -548,6 +550,208 @@ mod tests {
     }
 
     #[test]
+    fn lighting_uses_active_energy_recovers_midtone_depth_and_preserves_silence() {
+        let frame = generated(sample_input(), 2.0, false);
+        let structured = frame.structured();
+        let values = frame.lighting().as_slice();
+        let active_count = structured
+            .as_slice()
+            .iter()
+            .filter(|value| **value > 0.02)
+            .count();
+        let silent_count = structured
+            .as_slice()
+            .iter()
+            .filter(|value| **value <= 0.02)
+            .count();
+        let visible_active = values
+            .iter()
+            .zip(structured.as_slice())
+            .filter(|(sample, energy)| **energy > 0.02 && sample.intensity() >= 0.10)
+            .count();
+        let midtones = values
+            .iter()
+            .filter(|sample| (0.20..0.82).contains(&sample.intensity()))
+            .count();
+        let peaks = values.iter().filter(|sample| sample.is_peak()).count();
+        let depths = values
+            .iter()
+            .map(|sample| sample.depth())
+            .collect::<Vec<_>>();
+
+        assert_eq!(values.len(), structured.as_slice().len());
+        assert!(active_count > 0);
+        assert!(silent_count > values.len() / 10);
+        assert!(visible_active >= active_count / 2);
+        assert!(midtones > active_count / 8);
+        assert!(peaks > 0);
+        assert!(peaks <= 8);
+        assert!(peaks <= active_count / 8 + 1);
+        assert!(values.iter().all(|sample| {
+            sample.intensity().is_finite()
+                && sample.depth().is_finite()
+                && sample.relative_energy().is_finite()
+                && sample.local_highlight().is_finite()
+                && (0.0..=1.0).contains(&sample.intensity())
+                && (0.0..=1.0).contains(&sample.depth())
+                && (0.0..=1.0).contains(&sample.relative_energy())
+                && (0.0..=1.0).contains(&sample.local_highlight())
+        }));
+        assert!(
+            values
+                .iter()
+                .zip(structured.as_slice())
+                .filter(|(_, energy)| **energy <= 0.02)
+                .all(|(sample, _)| {
+                    sample.intensity() == 0.0
+                        && sample.depth() == 0.0
+                        && sample.relative_energy() == 0.0
+                        && !sample.is_peak()
+                })
+        );
+        assert!(depths.iter().any(|depth| *depth < 0.35));
+        assert!(depths.iter().any(|depth| (0.35..=0.68).contains(depth)));
+        assert!(depths.iter().any(|depth| *depth > 0.68));
+    }
+
+    #[test]
+    fn lighting_is_deterministic_temporally_continuous_and_reduced_motion_static() {
+        let first = generated(sample_input(), 2.0, false);
+        let same = generated(sample_input(), 2.0, false);
+        let near = generated(sample_input(), 2.01, false);
+        let distant = generated(sample_input(), 18.0, false);
+        let reduced_first = generated(sample_input(), 0.0, true);
+        let reduced_later = generated(sample_input(), 30.0, true);
+
+        assert_eq!(first.lighting(), same.lighting());
+        assert!(mean_lighting_difference(first.lighting(), near.lighting()) < 0.08);
+        assert!(
+            mean_lighting_difference(first.lighting(), distant.lighting())
+                > mean_lighting_difference(first.lighting(), near.lighting())
+        );
+        assert_eq!(reduced_first.lighting(), reduced_later.lighting());
+    }
+
+    #[test]
+    fn lighting_hierarchy_responds_to_health_without_global_saturation() {
+        let calm = NormalizedPulseInput::try_new(0.05, 0.10, Some(0.05), 0.04, 0.06, 0.02).unwrap();
+        let busy = NormalizedPulseInput::try_new(0.86, 0.82, Some(0.78), 0.72, 0.88, 0.62).unwrap();
+        let critical = NormalizedPulseInput::try_new(1.0, 1.0, Some(1.0), 0.95, 1.0, 1.0).unwrap();
+        let base = generated(sample_input(), 2.0, false);
+        let calm_lighting =
+            LightingField::from_fields(base.structured(), base.flow(), calm, base.preset(), false)
+                .unwrap();
+        let busy_lighting =
+            LightingField::from_fields(base.structured(), base.flow(), busy, base.preset(), false)
+                .unwrap();
+        let critical_lighting = LightingField::from_fields(
+            base.structured(),
+            base.flow(),
+            critical,
+            base.preset(),
+            false,
+        )
+        .unwrap();
+        let calm_mean = mean_lighting(&calm_lighting);
+        let busy_mean = mean_lighting(&busy_lighting);
+
+        assert!(calm_mean > 0.0);
+        assert!(busy_mean > calm_mean);
+        assert!(
+            busy_lighting
+                .as_slice()
+                .iter()
+                .any(|sample| sample.intensity() > 0.75)
+        );
+        assert!(
+            critical_lighting
+                .as_slice()
+                .iter()
+                .all(|sample| sample.intensity().is_finite() && sample.intensity() <= 1.0)
+        );
+        assert!(
+            critical_lighting
+                .as_slice()
+                .iter()
+                .any(|sample| sample.intensity() < 0.95)
+        );
+    }
+
+    #[test]
+    fn lighting_keeps_source_fields_unchanged_and_local_contrast_localized() {
+        let dimensions = FieldDimensions::new(17, 9).unwrap();
+        let mut scalar = ScalarField::try_new(dimensions).unwrap();
+        let mut noise = NoiseField::try_new(dimensions).unwrap();
+        scalar.fill(0.46).unwrap();
+        noise.fill(0.18).unwrap();
+        noise.write(8, 4, 1.0).unwrap();
+        let flow = FlowField::from_scalar(&scalar).unwrap();
+        let transported =
+            TransportedField::from_fields(&scalar, &noise, &flow, PulseV2Preset::Standard, false)
+                .unwrap();
+        let structured =
+            StructuredField::from_fields(&scalar, &transported, &flow, PulseV2Preset::Standard)
+                .unwrap();
+        let scalar_before = scalar.clone();
+        let noise_before = noise.clone();
+        let flow_before = flow.clone();
+        let transported_before = transported.clone();
+        let structured_before = structured.clone();
+        let lighting = LightingField::from_fields(
+            &structured,
+            &flow,
+            sample_input(),
+            PulseV2Preset::Standard,
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(scalar, scalar_before);
+        assert_eq!(noise, noise_before);
+        assert_eq!(flow, flow_before);
+        assert_eq!(transported, transported_before);
+        assert_eq!(structured, structured_before);
+        assert!(
+            lighting.read(8, 4).unwrap().intensity() > lighting.read(0, 0).unwrap().intensity()
+        );
+        assert!(lighting.read(8, 4).unwrap().local_highlight() > 0.0);
+    }
+
+    #[test]
+    fn lighting_preserves_responsive_dimensions_and_empty_contract() {
+        let engine = PulseV2Engine::new();
+        for (width, height) in [(0, 0), (1, 1), (2, 1), (50, 12), (140, 40)] {
+            let dimensions = FieldDimensions::new(width, height).unwrap();
+            let frame = engine
+                .generate(
+                    dimensions,
+                    sample_input(),
+                    Duration::from_millis(400),
+                    false,
+                )
+                .unwrap();
+            assert_eq!(frame.lighting().as_slice().len(), dimensions.sample_count());
+            assert_eq!(frame.lighting().dimensions(), dimensions);
+            assert!(
+                frame
+                    .lighting()
+                    .as_slice()
+                    .iter()
+                    .all(|sample| sample.intensity().is_finite())
+            );
+        }
+
+        let empty = engine
+            .empty_frame(
+                FieldDimensions::new(0, 0).unwrap(),
+                NormalizedPulseInput::default(),
+            )
+            .unwrap();
+        assert!(empty.lighting().is_empty());
+        assert!(empty.is_empty());
+    }
+
+    #[test]
     fn local_contrast_reveals_a_crista_without_creating_a_halo() {
         let dimensions = FieldDimensions::new(9, 5).unwrap();
         let mut scalar = ScalarField::try_new(dimensions).unwrap();
@@ -1006,6 +1210,29 @@ mod tests {
             .iter()
             .zip(right.as_slice())
             .map(|(left, right)| (left - right).abs())
+            .sum::<f32>()
+            / left.as_slice().len().max(1) as f32
+    }
+
+    fn mean_lighting(field: &LightingField) -> f32 {
+        field
+            .as_slice()
+            .iter()
+            .map(|sample| sample.intensity())
+            .sum::<f32>()
+            / field.as_slice().len().max(1) as f32
+    }
+
+    fn mean_lighting_difference(left: &LightingField, right: &LightingField) -> f32 {
+        left.as_slice()
+            .iter()
+            .zip(right.as_slice())
+            .map(|(left, right)| {
+                (left.intensity() - right.intensity()).abs()
+                    + (left.depth() - right.depth()).abs()
+                    + (left.relative_energy() - right.relative_energy()).abs()
+                    + (left.local_highlight() - right.local_highlight()).abs()
+            })
             .sum::<f32>()
             / left.as_slice().len().max(1) as f32
     }
