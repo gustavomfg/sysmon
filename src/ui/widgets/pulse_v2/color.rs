@@ -97,12 +97,20 @@ impl SemanticColorField {
                     + state_purple_shift * (0.45 + organized_energy * 0.55))
                     .clamp(0.0, 1.0);
 
-                let blue_to_cyan = smoothstep((spatial_position - 0.02) / 0.34);
-                let cyan_to_purple = smoothstep((spatial_position - 0.30) / 0.42);
-                let purple_to_magenta = smoothstep((spatial_position - 0.62) / 0.35);
-                let mut color = blend_color(theme.info, theme.secondary, blue_to_cyan);
-                color = blend_color(color, theme.primary, cyan_to_purple);
-                color = blend_color(color, theme.accent, purple_to_magenta);
+                // Keep cyan as a restrained cool-layer cue. The previous broad
+                // info -> secondary ramp occupied too much of the active field,
+                // making intermediate regions read as one flat cyan plane.
+                // Violet arrives earlier and carries the organized middle of
+                // the composition, while the theme tokens remain the only
+                // color sources.
+                let cyan_hint = smoothstep((spatial_position - 0.03) / 0.18)
+                    * (1.0 - smoothstep((spatial_position - 0.16) / 0.20))
+                    * 0.30;
+                let cool_to_violet = smoothstep((spatial_position - 0.10) / 0.30);
+                let violet_to_magenta = smoothstep((spatial_position - 0.48) / 0.34);
+                let mut color = blend_color(theme.info, theme.secondary, cyan_hint);
+                color = blend_color(color, theme.primary, cool_to_violet);
+                color = blend_color(color, theme.accent, violet_to_magenta);
 
                 let energetic_region = smoothstep((organized_energy - 0.46) / 0.42);
                 let critical_mix = criticality
@@ -200,6 +208,8 @@ fn interpolate_channel(from: u8, to: u8, amount: f32) -> u8 {
 mod tests {
     use std::time::Duration;
 
+    use ratatui::style::Color;
+
     use super::super::{FieldDimensions, NormalizedPulseInput, PulseV2Engine, PulseV2Preset};
     use super::{SemanticColorField, system_stress};
     use crate::pulse::PulseInput;
@@ -266,6 +276,68 @@ mod tests {
 
         assert!(bottom.spatial_position() < top.spatial_position());
         assert_ne!(bottom.color(), top.color());
+    }
+
+    #[test]
+    fn intermediate_regions_prefer_violet_over_cyan() {
+        let frame = generated(input(0.22, 0.20, Some(0.18), 0.18), false);
+        let colors =
+            SemanticColorField::from_lighting(frame.lighting(), frame.input(), &Theme::pulse())
+                .unwrap();
+        let theme = Theme::pulse();
+        let intermediate = colors
+            .as_slice()
+            .iter()
+            .zip(frame.lighting().as_slice())
+            .filter(|(sample, lighting)| {
+                lighting.intensity() > f32::EPSILON
+                    && (0.28..=0.58).contains(&sample.spatial_position())
+            })
+            .collect::<Vec<_>>();
+
+        assert!(intermediate.len() > 8);
+        let violet_favored = intermediate
+            .iter()
+            .filter(|(sample, _)| {
+                color_distance(sample.color(), theme.primary)
+                    < color_distance(sample.color(), theme.secondary)
+            })
+            .count();
+
+        assert!(violet_favored * 2 >= intermediate.len());
+    }
+
+    #[test]
+    fn cold_and_organized_layers_remain_chromatically_separated() {
+        let frame = generated(input(0.22, 0.20, Some(0.18), 0.18), false);
+        let colors =
+            SemanticColorField::from_lighting(frame.lighting(), frame.input(), &Theme::pulse())
+                .unwrap();
+        let theme = Theme::pulse();
+        let mut cold = Vec::new();
+        let mut organized = Vec::new();
+
+        for (sample, lighting) in colors.as_slice().iter().zip(frame.lighting().as_slice()) {
+            if lighting.intensity() <= f32::EPSILON {
+                continue;
+            }
+            if sample.spatial_position() <= 0.20 {
+                cold.push(sample.color());
+            } else if sample.spatial_position() >= 0.62 {
+                organized.push(sample.color());
+            }
+        }
+
+        assert!(cold.len() > 4);
+        assert!(organized.len() > 4);
+        let cold_info_distance = mean_distance(&cold, theme.info);
+        let cold_violet_distance = mean_distance(&cold, theme.primary);
+        let organized_violet_distance =
+            mean_nearest_distance(&organized, theme.primary, theme.accent);
+        let organized_cyan_distance = mean_distance(&organized, theme.secondary);
+
+        assert!(cold_info_distance < cold_violet_distance);
+        assert!(organized_violet_distance < organized_cyan_distance);
     }
 
     #[test]
@@ -396,5 +468,37 @@ mod tests {
         assert_eq!(theme.accent, Theme::pulse().accent);
         assert_eq!(theme.danger, Theme::pulse().danger);
         assert_eq!(theme.text, Theme::pulse().text);
+    }
+
+    fn mean_distance(colors: &[Color], target: Color) -> f32 {
+        colors
+            .iter()
+            .map(|color| color_distance(*color, target))
+            .sum::<f32>()
+            / colors.len() as f32
+    }
+
+    fn mean_nearest_distance(colors: &[Color], first: Color, second: Color) -> f32 {
+        colors
+            .iter()
+            .map(|color| color_distance(*color, first).min(color_distance(*color, second)))
+            .sum::<f32>()
+            / colors.len() as f32
+    }
+
+    fn color_distance(from: Color, to: Color) -> f32 {
+        let (fr, fg, fb) = rgb(from);
+        let (tr, tg, tb) = rgb(to);
+        let red = f32::from(fr) - f32::from(tr);
+        let green = f32::from(fg) - f32::from(tg);
+        let blue = f32::from(fb) - f32::from(tb);
+        (red * red + green * green + blue * blue).sqrt()
+    }
+
+    fn rgb(color: Color) -> (u8, u8, u8) {
+        match color {
+            Color::Rgb(red, green, blue) => (red, green, blue),
+            _ => panic!("Pulse theme colors must be RGB values"),
+        }
     }
 }
