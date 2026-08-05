@@ -1,3 +1,4 @@
+mod chart;
 mod engine;
 mod layout;
 mod regions;
@@ -5,6 +6,14 @@ mod types;
 mod visual;
 mod widget;
 
+#[allow(unused_imports)]
+pub use chart::{
+    AreaModel, ChartError, ChartEventKind, ChartPoint, ChartSegment, DownsampledSeries,
+    EventMarker, MAX_REFERENCE_BANDS, MovingAverage, MovingAverageKind, PeakEvent, PeakSet,
+    PointAggregation, PushOutcome, ReferenceBands, ReferenceKind, ReferenceRange, SegmentId,
+    SegmentedBars, SeriesComparison, SeriesStats, SparklineModel, TimeSample, TimeSeries,
+    TimeWindow, Volatility,
+};
 #[allow(unused_imports)]
 pub use engine::{DashboardEngine, DashboardFrame};
 #[allow(unused_imports)]
