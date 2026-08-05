@@ -49,7 +49,7 @@ impl DashboardRegion {
         }
     }
 
-    pub fn priority(self) -> DashboardPriority {
+    pub const fn priority(self) -> DashboardPriority {
         match self {
             Self::Pulse => DashboardPriority::Pulse,
             Self::PrimaryMetrics => DashboardPriority::PrimaryMetrics,

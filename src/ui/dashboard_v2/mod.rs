@@ -2,6 +2,7 @@ mod engine;
 mod layout;
 mod regions;
 mod types;
+mod widget;
 
 #[allow(unused_imports)]
 pub use engine::{DashboardEngine, DashboardFrame};
@@ -13,4 +14,10 @@ pub use regions::{DashboardComposition, DashboardPriority, DashboardRegion};
 pub use types::{
     DashboardBounds, DashboardContext, DashboardDimensions, DashboardError, DashboardMinimum,
     DashboardPreset, MAX_DASHBOARD_CELLS, MAX_DASHBOARD_DIMENSION, MAX_DASHBOARD_REGIONS,
+};
+#[allow(unused_imports)]
+pub use widget::{
+    DashboardState, DashboardWidgetId, MAX_DASHBOARD_WIDGETS, WidgetAvailability, WidgetContext,
+    WidgetDescriptor, WidgetFrame, WidgetModel, WidgetPlacement, WidgetPresetSupport,
+    WidgetRegistry, WidgetRequirements, WidgetSelection, WidgetState,
 };
