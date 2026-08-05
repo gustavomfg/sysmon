@@ -6,60 +6,38 @@ use ratatui::{
 
 use crate::theme::Theme;
 
+use super::super::metrics::MAX_PEAKS;
 use super::super::{
-    ChartBlock, ChartContent, ChartEventKind, PointAggregation, SegmentId, SegmentedBars,
-    TrendDirection,
+    ChartBlock, ChartContent, ChartEventKind, DashboardWidgetId, MetricVisual, PeakSet,
+    PointAggregation, SegmentId, SegmentedBars, TrendDirection,
 };
 use super::blocks::{semantic_style, write};
 
-pub(crate) fn render(block: ChartBlock, area: Rect, theme: &Theme, buffer: &mut Buffer) {
+pub(crate) fn render(
+    block: ChartBlock,
+    visual: MetricVisual,
+    area: Rect,
+    theme: &Theme,
+    buffer: &mut Buffer,
+) {
     match block.content() {
         ChartContent::Sparkline(sparkline) => {
-            render_sparkline(sparkline, block, area, theme, buffer);
+            render_sparkline(sparkline, block, visual, area, theme, buffer);
         }
-        ChartContent::Area(area_model) => render_area(area_model, block, area, theme, buffer),
-        ChartContent::Segments2(segments) => render_segments(segments, block, area, theme, buffer),
-        ChartContent::Segments3(segments) => render_segments(segments, block, area, theme, buffer),
+        ChartContent::Area(area_model) => {
+            render_area(area_model, block, visual, area, theme, buffer);
+        }
+        ChartContent::Segments2(segments) => {
+            render_segments(segments, block, visual, area, theme, buffer);
+        }
+        ChartContent::Segments3(segments) => {
+            render_segments(segments, block, visual, area, theme, buffer);
+        }
         ChartContent::Comparison(comparison) => {
-            let direction = match comparison.direction() {
-                TrendDirection::Rising => "↑",
-                TrendDirection::Falling => "↓",
-                TrendDirection::Stable => "→",
-                TrendDirection::Unknown => "·",
-            };
-            let difference = comparison
-                .difference()
-                .map_or_else(|| "—".to_owned(), |value| format!("{value:+.2}"));
-            let ratio = comparison
-                .ratio()
-                .map_or_else(|| "—".to_owned(), |value| format!("{value:.2}x"));
-            write(
-                buffer,
-                area,
-                &format!("comparison {direction}  Δ {difference}  {ratio}"),
-                chart_style(block, theme, theme.chart_secondary),
-            );
+            render_comparison(comparison, visual, block, area, theme, buffer);
         }
         ChartContent::Peaks(peaks) => {
-            let mut text = String::new();
-            for peak in peaks.iter() {
-                let symbol = match peak.kind() {
-                    ChartEventKind::Critical => "◆",
-                    ChartEventKind::Warning => "◇",
-                    ChartEventKind::Transition => "·",
-                    ChartEventKind::Peak => "•",
-                };
-                text.push_str(symbol);
-            }
-            if text.is_empty() {
-                text.push('·');
-            }
-            write(
-                buffer,
-                area,
-                &format!("peaks {text}"),
-                chart_style(block, theme, theme.chart_primary),
-            );
+            render_peaks(peaks, block, area, theme, buffer);
         }
     }
 }
@@ -67,6 +45,7 @@ pub(crate) fn render(block: ChartBlock, area: Rect, theme: &Theme, buffer: &mut 
 fn render_sparkline<const POINTS: usize>(
     sparkline: super::super::SparklineModel<POINTS>,
     block: ChartBlock,
+    visual: MetricVisual,
     area: Rect,
     theme: &Theme,
     buffer: &mut Buffer,
@@ -127,11 +106,21 @@ fn render_sparkline<const POINTS: usize>(
                 .set_style(style);
         }
     }
+    let marker = chart_marker(visual.widget_id(), block.metadata().id());
+    if !marker.is_empty() {
+        write(
+            buffer,
+            area,
+            marker,
+            semantic_style(block.metadata(), theme).fg(theme.text_muted),
+        );
+    }
 }
 
 fn render_area(
     area_model: super::super::AreaModel,
     block: ChartBlock,
+    visual: MetricVisual,
     area: Rect,
     theme: &Theme,
     buffer: &mut Buffer,
@@ -151,16 +140,54 @@ fn render_area(
         chart_style(block, theme, theme.chart_secondary),
         buffer,
     );
+    let marker = chart_marker(visual.widget_id(), block.metadata().id());
+    if !marker.is_empty() {
+        write(
+            buffer,
+            area,
+            marker,
+            semantic_style(block.metadata(), theme).fg(theme.text_muted),
+        );
+    }
 }
 
 fn render_segments<const MAX_SEGMENTS: usize>(
     segments: SegmentedBars<MAX_SEGMENTS>,
     block: ChartBlock,
+    visual: MetricVisual,
     area: Rect,
     theme: &Theme,
     buffer: &mut Buffer,
 ) {
     if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let label = segment_label(visual.widget_id(), block.metadata().id());
+    let label_width = if label.is_empty() {
+        0
+    } else {
+        label.len().saturating_add(1).min(usize::from(area.width))
+    };
+    if label_width > 0 {
+        write(
+            buffer,
+            Rect::new(
+                area.x,
+                area.y,
+                u16::try_from(label_width).unwrap_or(area.width),
+                1,
+            ),
+            label,
+            semantic_style(block.metadata(), theme).fg(theme.text_muted),
+        );
+    }
+    let bar_start = area
+        .x
+        .saturating_add(u16::try_from(label_width).unwrap_or(area.width));
+    let bar_width = area
+        .width
+        .saturating_sub(u16::try_from(label_width).unwrap_or(area.width));
+    if bar_width == 0 {
         return;
     }
     let mut normalized = [(SegmentId::Other, 0.0); MAX_SEGMENTS];
@@ -183,8 +210,8 @@ fn render_segments<const MAX_SEGMENTS: usize>(
         );
         return;
     }
-    for column in 0..area.width {
-        let position = (f64::from(column) + 0.5) / f64::from(area.width);
+    for column in 0..bar_width {
+        let position = (f64::from(column) + 0.5) / f64::from(bar_width);
         let mut cursor = 0.0;
         let mut color = theme.chart_grid;
         let mut found = false;
@@ -198,7 +225,7 @@ fn render_segments<const MAX_SEGMENTS: usize>(
         }
         let style = chart_style(block, theme, color);
         let character = if found { '█' } else { '·' };
-        buffer[(area.x + column, area.y)]
+        buffer[(bar_start + column, area.y)]
             .set_char(character)
             .set_style(style);
     }
@@ -237,4 +264,87 @@ fn chart_style(block: ChartBlock, theme: &Theme, color: ratatui::style::Color) -
         style = style.fg(color);
     }
     style
+}
+
+fn render_comparison(
+    comparison: super::super::SeriesComparison,
+    visual: MetricVisual,
+    block: ChartBlock,
+    area: Rect,
+    theme: &Theme,
+    buffer: &mut Buffer,
+) {
+    let direction = match comparison.direction() {
+        TrendDirection::Rising => "↑",
+        TrendDirection::Falling => "↓",
+        TrendDirection::Stable => "→",
+        TrendDirection::Unknown => "·",
+    };
+    let difference = comparison
+        .difference()
+        .map_or_else(|| "—".to_owned(), |value| format!("{value:+.1}"));
+    let ratio = comparison
+        .ratio()
+        .map_or_else(|| "—".to_owned(), |value| format!("{value:.1}×"));
+    let label = match visual.widget_id() {
+        DashboardWidgetId::Network => "d/u",
+        DashboardWidgetId::Storage => "r/w",
+        _ => "",
+    };
+    write(
+        buffer,
+        area,
+        &format!("{label} {direction} {difference}  {ratio}"),
+        chart_style(block, theme, theme.chart_secondary),
+    );
+}
+
+fn render_peaks(
+    peaks: PeakSet<MAX_PEAKS>,
+    block: ChartBlock,
+    area: Rect,
+    theme: &Theme,
+    buffer: &mut Buffer,
+) {
+    let mut text = String::new();
+    for peak in peaks.iter() {
+        let symbol = match peak.kind() {
+            ChartEventKind::Critical => "◆",
+            ChartEventKind::Warning => "◇",
+            ChartEventKind::Transition => "·",
+            ChartEventKind::Peak => "•",
+        };
+        text.push_str(symbol);
+    }
+    if text.is_empty() {
+        text.push('·');
+    }
+    write(
+        buffer,
+        area,
+        &text,
+        chart_style(block, theme, theme.chart_primary),
+    );
+}
+
+fn segment_label(widget: DashboardWidgetId, block: super::super::BlockId) -> &'static str {
+    match (widget, block) {
+        (DashboardWidgetId::Cpu, super::super::BlockId::Segments) => "u/s/i",
+        (DashboardWidgetId::Memory, super::super::BlockId::Segments) => "u/c/f",
+        (DashboardWidgetId::Gpu, super::super::BlockId::Segments) => "vram",
+        (DashboardWidgetId::Storage, super::super::BlockId::Segments) => "cap",
+        _ => "",
+    }
+}
+
+fn chart_marker(widget: DashboardWidgetId, block: super::super::BlockId) -> &'static str {
+    match (widget, block) {
+        (DashboardWidgetId::Network, super::super::BlockId::PrimarySparkline) => "↓",
+        (DashboardWidgetId::Network, super::super::BlockId::SecondarySparkline) => "↑",
+        (DashboardWidgetId::Storage, super::super::BlockId::PrimarySparkline) => "▰",
+        (DashboardWidgetId::Storage, super::super::BlockId::SecondarySparkline) => "r",
+        (DashboardWidgetId::Storage, super::super::BlockId::TertiarySparkline) => "w",
+        (DashboardWidgetId::Memory, super::super::BlockId::Area) => "p",
+        _ => "",
+    }
 }

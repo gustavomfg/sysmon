@@ -392,8 +392,8 @@ impl WidgetRenderModel {
 
     fn allows(&self, id: BlockId) -> bool {
         match self.preset {
-            DashboardPreset::Compact => false,
-            DashboardPreset::Standard => matches!(id, BlockId::PrimarySparkline),
+            DashboardPreset::Compact => matches!(id, BlockId::Status),
+            DashboardPreset::Standard => matches!(id, BlockId::PrimarySparkline | BlockId::Status),
             DashboardPreset::Widescreen => matches!(
                 id,
                 BlockId::PrimarySparkline
@@ -541,7 +541,7 @@ impl WidgetRenderModel {
             metadata: self.metadata(
                 BlockId::Status,
                 VisualPriority::Contextual,
-                BlockRequirement::Hideable,
+                BlockRequirement::Required,
                 false,
             ),
             state: self.visual.state(),
@@ -578,9 +578,11 @@ impl WidgetRenderer {
         let Some(mut render) = Self::render(model.visual(), context, "CPU")? else {
             return Ok(None);
         };
-        render.add_sparkline(BlockId::PrimarySparkline, model.sparkline())?;
-        render.add_segments3(model.composition())?;
-        render.add_peaks(model.peaks())?;
+        if model.is_available() {
+            render.add_sparkline(BlockId::PrimarySparkline, model.sparkline())?;
+            render.add_segments3(model.composition())?;
+            render.add_peaks(model.peaks())?;
+        }
         render.add_indicators()?;
         render.add_status()?;
         Ok(Some(render))
@@ -593,12 +595,14 @@ impl WidgetRenderer {
         let Some(mut render) = Self::render(model.visual(), context, "Memory")? else {
             return Ok(None);
         };
-        render.add_sparkline(BlockId::PrimarySparkline, model.sparkline())?;
-        if let Some(area) = model.area() {
-            render.add_area(area)?;
+        if model.is_available() {
+            render.add_sparkline(BlockId::PrimarySparkline, model.sparkline())?;
+            if let Some(area) = model.area() {
+                render.add_area(area)?;
+            }
+            render.add_segments3(model.composition())?;
+            render.add_peaks(model.peaks())?;
         }
-        render.add_segments3(model.composition())?;
-        render.add_peaks(model.peaks())?;
         render.add_indicators()?;
         render.add_status()?;
         Ok(Some(render))
@@ -611,9 +615,11 @@ impl WidgetRenderer {
         let Some(mut render) = Self::render(model.visual(), context, "GPU")? else {
             return Ok(None);
         };
-        render.add_sparkline(BlockId::PrimarySparkline, model.sparkline())?;
-        render.add_segments2(model.vram())?;
-        render.add_peaks(model.peaks())?;
+        if model.is_available() {
+            render.add_sparkline(BlockId::PrimarySparkline, model.sparkline())?;
+            render.add_segments2(model.vram())?;
+            render.add_peaks(model.peaks())?;
+        }
         render.add_indicators()?;
         render.add_status()?;
         Ok(Some(render))
@@ -626,9 +632,11 @@ impl WidgetRenderer {
         let Some(mut render) = Self::render(model.visual(), context, "Network")? else {
             return Ok(None);
         };
-        render.add_sparkline(BlockId::PrimarySparkline, model.download_sparkline())?;
-        render.add_sparkline(BlockId::SecondarySparkline, model.upload_sparkline())?;
-        render.add_comparison(model.comparison())?;
+        if model.is_available() {
+            render.add_sparkline(BlockId::PrimarySparkline, model.download_sparkline())?;
+            render.add_sparkline(BlockId::SecondarySparkline, model.upload_sparkline())?;
+            render.add_comparison(model.comparison())?;
+        }
         render.add_indicators()?;
         render.add_status()?;
         Ok(Some(render))
@@ -641,12 +649,14 @@ impl WidgetRenderer {
         let Some(mut render) = Self::render(model.visual(), context, "Storage")? else {
             return Ok(None);
         };
-        render.add_sparkline(BlockId::PrimarySparkline, model.occupancy_sparkline())?;
-        render.add_sparkline(BlockId::SecondarySparkline, model.read_sparkline())?;
-        render.add_sparkline(BlockId::TertiarySparkline, model.write_sparkline())?;
-        render.add_segments2(model.capacity())?;
-        render.add_comparison(model.comparison())?;
-        render.add_peaks(model.peaks())?;
+        if model.is_available() {
+            render.add_sparkline(BlockId::PrimarySparkline, model.occupancy_sparkline())?;
+            render.add_sparkline(BlockId::SecondarySparkline, model.read_sparkline())?;
+            render.add_sparkline(BlockId::TertiarySparkline, model.write_sparkline())?;
+            render.add_segments2(model.capacity())?;
+            render.add_comparison(model.comparison())?;
+            render.add_peaks(model.peaks())?;
+        }
         render.add_indicators()?;
         render.add_status()?;
         Ok(Some(render))
@@ -747,7 +757,8 @@ mod tests {
         let large = WidgetRenderer::render_cpu(cpu(), context(DashboardPreset::LargeWidescreen))
             .unwrap()
             .unwrap();
-        assert_eq!(compact.block_count(), 3);
+        assert_eq!(compact.block_count(), 4);
+        assert!(compact.block(BlockId::Status).is_some());
         assert!(standard.block(BlockId::PrimarySparkline).is_some());
         assert!(wide.block(BlockId::Segments).is_some());
         assert!(wide.block(BlockId::Indicators).is_some());

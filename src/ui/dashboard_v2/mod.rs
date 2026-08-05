@@ -8,6 +8,7 @@ mod terminal;
 mod types;
 mod visual;
 mod widget;
+pub mod widgets;
 
 #[allow(unused_imports)]
 pub use chart::{
@@ -57,3 +58,5 @@ pub use widget::{
     WidgetDescriptor, WidgetFrame, WidgetModel, WidgetPlacement, WidgetPresetSupport,
     WidgetRegistry, WidgetRequirements, WidgetSelection, WidgetState,
 };
+#[allow(unused_imports)]
+pub use widgets::PrimaryWidget;

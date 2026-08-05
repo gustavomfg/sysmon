@@ -23,8 +23,8 @@ pub(crate) fn render_block(
     match block {
         RenderBlock::Title(block) => render_title(block, area, theme, buffer),
         RenderBlock::Value(block) => render_value(block, visual, area, theme, buffer),
-        RenderBlock::Trend(block) => render_trend(block, area, theme, buffer),
-        RenderBlock::Chart(block) => charts::render(block, area, theme, buffer),
+        RenderBlock::Trend(block) => render_trend(block, visual, area, theme, buffer),
+        RenderBlock::Chart(block) => charts::render(block, visual, area, theme, buffer),
         RenderBlock::Indicators(block) => render_indicators(block, area, theme, buffer),
         RenderBlock::Status(block) => render_status(block, area, theme, buffer),
         RenderBlock::Footer(block) => render_footer(block, area, theme, buffer),
@@ -69,13 +69,17 @@ fn render_title(block: TitleBlock, area: Rect, theme: &Theme, buffer: &mut Buffe
     let prefix = if block.metadata().is_focused() {
         "› "
     } else {
-        "  "
+        ""
     };
+    let mut style = semantic_style(block.metadata(), theme).fg(theme.text_muted);
+    if block.metadata().is_focused() {
+        style = style.add_modifier(Modifier::BOLD);
+    }
     write(
         buffer,
         area,
-        &format!("{prefix}{}", block.label()),
-        semantic_style(block.metadata(), theme),
+        &format!("{prefix}{} {}", title_icon(block.label()), block.label()),
+        style,
     );
 }
 
@@ -94,41 +98,93 @@ fn render_value(
         .secondary()
         .filter(|value| value.is_usable())
         .map(format_metric_value);
-    let text = secondary.map_or(primary.clone(), |secondary| {
-        format!("{primary}  {secondary}")
-    });
-    write(buffer, area, &text, semantic_style(block.metadata(), theme));
+    let primary_style = semantic_style(block.metadata(), theme)
+        .fg(theme.text)
+        .add_modifier(Modifier::BOLD);
+    let primary_prefix = match visual.widget_id() {
+        super::super::DashboardWidgetId::Network => "↓ ",
+        super::super::DashboardWidgetId::Storage => "▰ ",
+        _ => "",
+    };
+    write(
+        buffer,
+        area,
+        &format!("{primary_prefix}{primary}"),
+        primary_style,
+    );
+    if let Some(secondary) = secondary {
+        let secondary_prefix = match visual.widget_id() {
+            super::super::DashboardWidgetId::Network => "↑ ",
+            super::super::DashboardWidgetId::Storage => "• ",
+            _ => "",
+        };
+        let secondary_style = semantic_style(block.metadata(), theme).fg(theme.text_muted);
+        if area.height > 1 {
+            write(
+                buffer,
+                Rect::new(area.x, area.y.saturating_add(1), area.width, 1),
+                &format!("{secondary_prefix}{secondary}"),
+                secondary_style,
+            );
+        } else {
+            let primary_width = primary_prefix.chars().count() + primary.chars().count();
+            let offset = primary_width.saturating_add(2);
+            if offset < usize::from(area.width) {
+                let x = area
+                    .x
+                    .saturating_add(u16::try_from(offset).unwrap_or(area.width));
+                buffer.set_stringn(
+                    x,
+                    area.y,
+                    format!("{secondary_prefix}{secondary}"),
+                    usize::from(area.width).saturating_sub(offset),
+                    secondary_style,
+                );
+            }
+        }
+    }
 }
 
-fn render_trend(block: TrendBlock, area: Rect, theme: &Theme, buffer: &mut Buffer) {
+fn title_icon(label: &str) -> &'static str {
+    match label {
+        "CPU" => "◈",
+        "Memory" => "▦",
+        "GPU" => "◇",
+        "Network" => "⇄",
+        "Storage" => "▰",
+        _ => "·",
+    }
+}
+
+fn render_trend(
+    block: TrendBlock,
+    visual: MetricVisual,
+    area: Rect,
+    theme: &Theme,
+    buffer: &mut Buffer,
+) {
     let direction = match block.trend().direction() {
         TrendDirection::Rising => "↑",
         TrendDirection::Falling => "↓",
         TrendDirection::Stable => "→",
         TrendDirection::Unknown => "·",
     };
-    let intensity = match block.intensity() {
-        super::super::Intensity::VeryLow => "low",
-        super::super::Intensity::Low => "quiet",
-        super::super::Intensity::Normal => "normal",
-        super::super::Intensity::High => "high",
-        super::super::Intensity::VeryHigh => "peak",
+    let change = format_change(visual);
+    let text = if change.is_empty() {
+        direction.to_owned()
+    } else {
+        format!("{direction} {change}")
     };
-    write(
-        buffer,
-        area,
-        &format!("trend {direction}  {intensity}"),
-        semantic_style(block.metadata(), theme),
-    );
+    write(buffer, area, &text, trend_style(block, theme));
 }
 
 fn render_indicators(block: IndicatorBlock, area: Rect, theme: &Theme, buffer: &mut Buffer) {
     let indicators = [
-        (MetricIndicators::PROGRESS, "progress"),
-        (MetricIndicators::OCCUPANCY, "occupancy"),
-        (MetricIndicators::TREND, "trend"),
-        (MetricIndicators::VARIATION, "variation"),
-        (MetricIndicators::ACTIVITY, "activity"),
+        (MetricIndicators::PROGRESS, "◐"),
+        (MetricIndicators::OCCUPANCY, "▰"),
+        (MetricIndicators::TREND, "↗"),
+        (MetricIndicators::VARIATION, "∿"),
+        (MetricIndicators::ACTIVITY, "•"),
     ];
     let mut text = String::new();
     for (indicator, label) in indicators {
@@ -146,12 +202,50 @@ fn render_indicators(block: IndicatorBlock, area: Rect, theme: &Theme, buffer: &
 }
 
 fn render_status(block: StatusBlock, area: Rect, theme: &Theme, buffer: &mut Buffer) {
+    let symbol = match block.state() {
+        WidgetState::Idle => "·",
+        WidgetState::Normal => "●",
+        WidgetState::Active => "◆",
+        WidgetState::Warning => "!",
+        WidgetState::Critical => "×",
+        WidgetState::Unavailable => "—",
+        WidgetState::Loading => "…",
+    };
     write(
         buffer,
         area,
-        &format!("status {}", state_label(block.state())),
+        &format!("{symbol} {}", state_label(block.state())),
         semantic_style(block.metadata(), theme),
     );
+}
+
+fn trend_style(block: TrendBlock, theme: &Theme) -> Style {
+    let style = semantic_style(block.metadata(), theme);
+    match block.intensity() {
+        super::super::Intensity::VeryHigh | super::super::Intensity::High => {
+            style.add_modifier(Modifier::BOLD)
+        }
+        _ => style,
+    }
+}
+
+fn format_change(visual: MetricVisual) -> String {
+    let Some(delta) = visual.comparison().delta() else {
+        return String::new();
+    };
+    let Some(primary) = visual.primary() else {
+        return String::new();
+    };
+    if !delta.is_finite() {
+        return String::new();
+    }
+    match primary.unit() {
+        MetricUnit::Percent => format!("{:+.0}%", delta * 100.0),
+        MetricUnit::Bytes | MetricUnit::BytesPerSecond => {
+            format!("{:+.1}", delta)
+        }
+        _ => format!("{:+.1}", delta),
+    }
 }
 
 fn render_footer(block: FooterBlock, area: Rect, theme: &Theme, buffer: &mut Buffer) {

@@ -280,6 +280,10 @@ impl<const POINTS: usize> DownsampledSeries<POINTS> {
         self.length
     }
 
+    pub const fn is_empty(self) -> bool {
+        self.length == 0
+    }
+
     pub const fn source_count(self) -> usize {
         self.source_count
     }
@@ -390,6 +394,10 @@ impl<const MAX_PEAKS: usize> PeakSet<MAX_PEAKS> {
         self.length
     }
 
+    pub const fn is_empty(self) -> bool {
+        self.length == 0
+    }
+
     pub fn iter(self) -> impl Iterator<Item = PeakEvent> {
         self.events.into_iter().take(self.length).flatten()
     }
@@ -484,6 +492,10 @@ impl ReferenceBands {
 
     pub const fn len(self) -> usize {
         self.length
+    }
+
+    pub const fn is_empty(self) -> bool {
+        self.length == 0
     }
 
     pub fn push(&mut self, range: ReferenceRange) -> Result<(), ChartError> {
@@ -637,6 +649,10 @@ impl<const MAX_SEGMENTS: usize> SegmentedBars<MAX_SEGMENTS> {
 
     pub const fn len(self) -> usize {
         self.length
+    }
+
+    pub const fn is_empty(self) -> bool {
+        self.length == 0
     }
 
     pub fn iter(self) -> impl Iterator<Item = ChartSegment> {

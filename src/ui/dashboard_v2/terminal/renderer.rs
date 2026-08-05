@@ -219,14 +219,85 @@ mod tests {
     }
 
     #[test]
+    fn card_language_prioritizes_value_and_removes_debug_labels() {
+        let standard = render_cpu(DashboardPreset::Standard, 48, 8);
+        let standard_text = buffer_text(&standard);
+        assert!(standard_text.contains("◈ CPU"));
+        assert!(standard_text.contains("42.0%"));
+        assert!(standard_text.contains("↑ +12%"));
+        assert!(standard_text.contains("● normal"));
+        assert!(!standard_text.contains("history"));
+        assert!(!standard_text.contains("trend "));
+        assert!(!standard_text.contains("status "));
+
+        let wide_text = buffer_text(&render_cpu(DashboardPreset::Widescreen, 48, 12));
+        assert!(wide_text.contains("u/s/i"));
+
+        let compact = render_cpu(DashboardPreset::Compact, 48, 8);
+        let compact_text = buffer_text(&compact);
+        assert!(compact_text.contains("42.0%"));
+        assert!(!compact_text.contains("u/s/i"));
+        assert!(!compact_text.contains('█'));
+    }
+
+    #[test]
+    fn card_layout_places_chart_beside_value_and_keeps_status_in_footer() {
+        let model = WidgetRenderer::render_cpu(cpu_model(), context(DashboardPreset::Widescreen))
+            .unwrap()
+            .unwrap();
+        let bounds = super::super::super::DashboardBounds::new(0, 0, 48, 12).unwrap();
+        let layout = TerminalLayout::new(
+            model,
+            DashboardPreset::Widescreen,
+            bounds,
+            Rect::new(0, 0, 48, 12),
+        )
+        .unwrap();
+        let value = layout
+            .block_area(super::super::super::BlockId::Value)
+            .unwrap();
+        let trend = layout
+            .block_area(super::super::super::BlockId::Trend)
+            .unwrap();
+        let chart = layout
+            .block_area(super::super::super::BlockId::PrimarySparkline)
+            .unwrap();
+        let status = layout
+            .block_area(super::super::super::BlockId::Status)
+            .unwrap();
+
+        assert_eq!(chart.y, value.y);
+        assert!(chart.x > value.x + value.width);
+        assert!((30..=45).contains(&(usize::from(chart.width) * 100 / 48)));
+        assert!(trend.y > value.y);
+        assert_eq!(status.y, bounds.height() as u16 - 1);
+    }
+
+    #[test]
     fn visual_priority_maps_hero_above_primary_and_secondary() {
         let buffer = render_cpu(DashboardPreset::Compact, 32, 4);
         let theme = crate::theme::Theme::pulse();
         assert_eq!(buffer[(0, 1)].fg, theme.text);
         assert_eq!(buffer[(0, 2)].fg, theme.primary);
 
+        let wide_model =
+            WidgetRenderer::render_cpu(cpu_model(), context(DashboardPreset::Standard))
+                .unwrap()
+                .unwrap();
+        let wide_layout = TerminalLayout::new(
+            wide_model,
+            DashboardPreset::Standard,
+            super::super::super::DashboardBounds::new(0, 0, 32, 8).unwrap(),
+            Rect::new(0, 0, 32, 8),
+        )
+        .unwrap();
+        let chart_area = wide_layout
+            .block_area(super::super::super::BlockId::PrimarySparkline)
+            .unwrap();
+        assert!(chart_area.x > 0);
+        assert!(chart_area.width < 32);
         let wide = render_cpu(DashboardPreset::Standard, 32, 8);
-        assert_eq!(wide[(0, 3)].fg, theme.chart_primary);
+        assert_eq!(wide[(chart_area.x, chart_area.y)].fg, theme.chart_primary);
     }
 
     #[test]
@@ -254,7 +325,7 @@ mod tests {
                 &mut critical,
             )
             .unwrap();
-        assert!(buffer_text(&critical).contains("status critical"));
+        assert!(buffer_text(&critical).contains("× critical"));
 
         let focused = WidgetRenderer::render_cpu(
             cpu_model(),
@@ -296,7 +367,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(unavailable_buffer[(0, 1)].symbol(), "—");
-        assert!(buffer_text(&unavailable_buffer).contains("trend ·"));
+        assert!(buffer_text(&unavailable_buffer).contains("·"));
     }
 
     #[test]
@@ -350,7 +421,7 @@ mod tests {
                 &mut comparison,
             )
             .unwrap();
-        assert!(buffer_text(&comparison).contains("comparison"));
+        assert!(buffer_text(&comparison).contains("d/u"));
     }
 
     #[test]
