@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use super::{
     FieldDimensions, FieldError, FlowField, LightingField, NoiseField, NormalizedPulseInput,
-    PulseV2Preset, ScalarField, StructuredField, TransportedField, noise,
+    PulseV2Preset, RefinedEnergyField, ScalarField, StructuredField, TransportedField, noise,
 };
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -18,6 +18,7 @@ pub struct PulseV2Frame {
     flow: FlowField,
     transported: TransportedField,
     structured: StructuredField,
+    refined: RefinedEnergyField,
     lighting: LightingField,
     elapsed: Duration,
     reduced_motion: bool,
@@ -39,6 +40,7 @@ impl PulseV2Engine {
         let flow = FlowField::from_scalar(&field)?;
         let transported = TransportedField::try_new(dimensions)?;
         let structured = StructuredField::try_new(dimensions)?;
+        let refined = RefinedEnergyField::try_new(dimensions)?;
         let lighting = LightingField::try_new(dimensions)?;
 
         Ok(PulseV2Frame {
@@ -50,6 +52,7 @@ impl PulseV2Engine {
             flow,
             transported,
             structured,
+            refined,
             lighting,
             elapsed: Duration::ZERO,
             reduced_motion: true,
@@ -63,7 +66,23 @@ impl PulseV2Engine {
         elapsed: Duration,
         reduced_motion: bool,
     ) -> Result<PulseV2Frame, FieldError> {
-        let preset = PulseV2Preset::from_dimensions(dimensions);
+        self.generate_with_preset(
+            dimensions,
+            input,
+            PulseV2Preset::from_dimensions(dimensions),
+            elapsed,
+            reduced_motion,
+        )
+    }
+
+    pub fn generate_with_preset(
+        &self,
+        dimensions: FieldDimensions,
+        input: NormalizedPulseInput,
+        preset: PulseV2Preset,
+        elapsed: Duration,
+        reduced_motion: bool,
+    ) -> Result<PulseV2Frame, FieldError> {
         let complexity = preset.parameters().complexity();
         let mut field = ScalarField::try_new(dimensions)?;
         let time = if reduced_motion {
@@ -85,8 +104,14 @@ impl PulseV2Engine {
         let transported =
             TransportedField::from_fields(&field, &noise, &flow, preset, reduced_motion)?;
         let structured = StructuredField::from_fields(&field, &transported, &flow, preset)?;
-        let lighting =
-            LightingField::from_fields(&structured, &flow, input, preset, reduced_motion)?;
+        let refined = RefinedEnergyField::from_fields(
+            &structured,
+            &transported,
+            &flow,
+            preset,
+            reduced_motion,
+        )?;
+        let lighting = LightingField::from_refined(&refined, &flow, input, preset, reduced_motion)?;
 
         Ok(PulseV2Frame {
             dimensions,
@@ -97,6 +122,7 @@ impl PulseV2Engine {
             flow,
             transported,
             structured,
+            refined,
             lighting,
             elapsed,
             reduced_motion,
@@ -137,6 +163,10 @@ impl PulseV2Frame {
         &self.structured
     }
 
+    pub fn refined(&self) -> &RefinedEnergyField {
+        &self.refined
+    }
+
     pub fn lighting(&self) -> &LightingField {
         &self.lighting
     }
@@ -156,6 +186,13 @@ impl PulseV2Frame {
                 .iter()
                 .all(|value| *value == 0.0)
             && self.structured.as_slice().iter().all(|value| *value == 0.0)
+            && self.refined.as_slice().iter().all(|sample| {
+                sample.energy() == 0.0
+                    && sample.thickness() == 0.0
+                    && sample.branching() == 0.0
+                    && sample.island() == 0.0
+                    && sample.dissipation() == 0.0
+            })
             && self.lighting.as_slice().iter().all(|sample| {
                 sample.intensity() == 0.0
                     && sample.depth() == 0.0

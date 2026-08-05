@@ -1,5 +1,8 @@
 use super::types::MAX_FIELD_SAMPLES;
-use super::{FieldError, FlowField, NormalizedPulseInput, PulseV2Preset, StructuredField};
+use super::{
+    FieldDimensions, FieldError, FlowField, NormalizedPulseInput, PulseV2Preset,
+    RefinedEnergyField, StructuredField,
+};
 
 const ACTIVE_EPSILON: f32 = 0.02;
 
@@ -63,18 +66,32 @@ impl LightingField {
         preset: PulseV2Preset,
         _reduced_motion: bool,
     ) -> Result<Self, FieldError> {
-        let dimensions = structured.dimensions();
+        Self::from_source(structured, flow, input, preset)
+    }
+
+    pub(crate) fn from_refined(
+        refined: &RefinedEnergyField,
+        flow: &FlowField,
+        input: NormalizedPulseInput,
+        preset: PulseV2Preset,
+        _reduced_motion: bool,
+    ) -> Result<Self, FieldError> {
+        Self::from_source(refined, flow, input, preset)
+    }
+
+    fn from_source<S: LightingSource + ?Sized>(
+        source: &S,
+        flow: &FlowField,
+        input: NormalizedPulseInput,
+        preset: PulseV2Preset,
+    ) -> Result<Self, FieldError> {
+        let dimensions = source.dimensions();
         if flow.dimensions() != dimensions {
             return Err(FieldError::DimensionsMismatch);
         }
 
         let mut lighting = Self::try_new(dimensions)?;
-        let active_values = structured
-            .as_slice()
-            .iter()
-            .copied()
-            .filter(|value| *value > ACTIVE_EPSILON)
-            .collect::<Vec<_>>();
+        let active_values = source.active_values();
         if active_values.is_empty() {
             return Ok(lighting);
         }
@@ -94,13 +111,13 @@ impl LightingField {
         for y in 0..dimensions.height() {
             for x in 0..dimensions.width() {
                 let index = y * dimensions.width() + x;
-                let structured_value = structured.read(x, y).ok_or(FieldError::OutOfBounds)?;
+                let structured_value = source.value(x, y).ok_or(FieldError::OutOfBounds)?;
                 if structured_value <= ACTIVE_EPSILON {
                     continue;
                 }
 
                 let relative_energy = distribution.relative(structured_value);
-                let neighborhood = structured_neighborhood_mean(structured, x, y, radius);
+                let neighborhood = source_neighborhood_mean(source, x, y, radius);
                 let local_highlight = local_highlight(structured_value, neighborhood);
                 let flow_sample = flow.read(x, y).ok_or(FieldError::OutOfBounds)?;
                 let convergence = flow_sample.convergence().max(0.0);
@@ -168,6 +185,47 @@ impl LightingField {
     }
 }
 
+trait LightingSource {
+    fn dimensions(&self) -> FieldDimensions;
+
+    fn value(&self, x: usize, y: usize) -> Option<f32>;
+
+    fn active_values(&self) -> Vec<f32> {
+        let dimensions = self.dimensions();
+        let mut values = Vec::new();
+        for y in 0..dimensions.height() {
+            for x in 0..dimensions.width() {
+                if let Some(value) = self.value(x, y)
+                    && value > ACTIVE_EPSILON
+                {
+                    values.push(value);
+                }
+            }
+        }
+        values
+    }
+}
+
+impl LightingSource for StructuredField {
+    fn dimensions(&self) -> FieldDimensions {
+        self.dimensions()
+    }
+
+    fn value(&self, x: usize, y: usize) -> Option<f32> {
+        self.read(x, y)
+    }
+}
+
+impl LightingSource for RefinedEnergyField {
+    fn dimensions(&self) -> FieldDimensions {
+        self.dimensions()
+    }
+
+    fn value(&self, x: usize, y: usize) -> Option<f32> {
+        self.read(x, y).map(|sample| sample.energy())
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 struct ActiveDistribution {
     lower: f32,
@@ -220,21 +278,26 @@ fn perceptual_intensity(relative: f32, distribution: ActiveDistribution) -> f32 
     }
 }
 
-fn structured_neighborhood_mean(field: &StructuredField, x: usize, y: usize, radius: usize) -> f32 {
+fn source_neighborhood_mean<S: LightingSource + ?Sized>(
+    field: &S,
+    x: usize,
+    y: usize,
+    radius: usize,
+) -> f32 {
     let min_x = x.saturating_sub(radius);
     let max_x = x
         .saturating_add(radius)
-        .min(field.width().saturating_sub(1));
+        .min(field.dimensions().width().saturating_sub(1));
     let min_y = y.saturating_sub(radius);
     let max_y = y
         .saturating_add(radius)
-        .min(field.height().saturating_sub(1));
+        .min(field.dimensions().height().saturating_sub(1));
     let mut total = 0.0;
     let mut count = 0;
 
     for sample_y in min_y..=max_y {
         for sample_x in min_x..=max_x {
-            total += field.read(sample_x, sample_y).unwrap_or(0.0);
+            total += field.value(sample_x, sample_y).unwrap_or(0.0);
             count += 1;
         }
     }

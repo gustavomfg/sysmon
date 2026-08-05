@@ -13,6 +13,8 @@ mod field;
 mod flow;
 mod lighting;
 mod noise;
+mod refinement;
+mod renderer;
 mod structure;
 mod transport;
 mod types;
@@ -22,6 +24,8 @@ pub use field::{FieldError, FieldGradient, ScalarField};
 pub use flow::{FlowField, FlowSample};
 pub use lighting::{LightingField, LightingSample};
 pub use noise::NoiseField;
+pub use refinement::{RefinedEnergyField, RefinedEnergySample};
+pub use renderer::{PulseV2Rasterizer, RasterDimensions, RasterFrame, RasterMode};
 pub use structure::StructuredField;
 pub use transport::TransportedField;
 pub use types::{
@@ -38,7 +42,7 @@ mod tests {
     use super::{
         FieldDimensions, FieldGradient, FlowField, FlowSample, LightingField, NoiseField,
         NormalizedPoint, NormalizedPulseInput, PulseV2Engine, PulseV2Frame, PulseV2Preset,
-        ScalarField, StructuredField, TransportedField,
+        PulseV2Rasterizer, RasterMode, ScalarField, StructuredField, TransportedField,
     };
 
     #[test]
@@ -184,6 +188,14 @@ mod tests {
                 .iter()
                 .all(|value| *value == 0.0)
         );
+        assert_eq!(first.refined().as_slice().len(), 80 * 20);
+        assert!(first.refined().as_slice().iter().all(|sample| {
+            sample.energy() == 0.0
+                && sample.thickness() == 0.0
+                && sample.branching() == 0.0
+                && sample.island() == 0.0
+                && sample.dissipation() == 0.0
+        }));
         assert!(first.is_empty());
     }
 
@@ -499,7 +511,64 @@ mod tests {
                 frame.structured().as_slice().len(),
                 dimensions.sample_count()
             );
+            assert_eq!(frame.refined().as_slice().len(), dimensions.sample_count());
         }
+    }
+
+    #[test]
+    fn refinement_adds_local_structure_without_mutating_approved_source_fields() {
+        let frame = generated(sample_input(), 2.0, false);
+        let refined = frame.refined();
+
+        assert_eq!(refined.dimensions(), frame.dimensions());
+        assert!(
+            refined
+                .as_slice()
+                .iter()
+                .any(|sample| sample.energy() > 0.0)
+        );
+        assert!(
+            refined
+                .as_slice()
+                .iter()
+                .any(|sample| sample.thickness() > 0.0)
+        );
+        assert!(
+            refined
+                .as_slice()
+                .iter()
+                .any(|sample| sample.branching() > 0.0)
+        );
+        assert!(
+            refined
+                .as_slice()
+                .iter()
+                .any(|sample| sample.island() > 0.0)
+        );
+        assert_eq!(frame.field().dimensions(), frame.dimensions());
+        assert_eq!(frame.noise().dimensions(), frame.dimensions());
+        assert_eq!(frame.flow().dimensions(), frame.dimensions());
+        assert_eq!(frame.transported().dimensions(), frame.dimensions());
+        assert_eq!(frame.structured().dimensions(), frame.dimensions());
+        assert_eq!(frame.lighting().dimensions(), frame.dimensions());
+    }
+
+    #[test]
+    fn refinement_is_deterministic_temporally_continuous_and_reduced_motion_static() {
+        let first = generated(sample_input(), 2.0, false);
+        let same = generated(sample_input(), 2.0, false);
+        let near = generated(sample_input(), 2.01, false);
+        let distant = generated(sample_input(), 18.0, false);
+        let reduced_first = generated(sample_input(), 0.0, true);
+        let reduced_later = generated(sample_input(), 30.0, true);
+
+        assert_eq!(first.refined(), same.refined());
+        assert!(mean_refined_difference(first.refined(), near.refined()) < 0.08);
+        assert!(
+            mean_refined_difference(first.refined(), distant.refined())
+                > mean_refined_difference(first.refined(), near.refined())
+        );
+        assert_eq!(reduced_first.refined(), reduced_later.refined());
     }
 
     #[test]
@@ -749,6 +818,159 @@ mod tests {
             .unwrap();
         assert!(empty.lighting().is_empty());
         assert!(empty.is_empty());
+    }
+
+    #[test]
+    fn braille_rasterization_is_deterministic_and_preserves_negative_space() {
+        let frame = generated(sample_input(), 2.0, false);
+        let first = PulseV2Rasterizer::braille(frame.lighting()).unwrap();
+        let same = PulseV2Rasterizer::render(frame.lighting(), RasterMode::Braille).unwrap();
+
+        assert_eq!(first, same);
+        assert_eq!(first.mode(), RasterMode::Braille);
+        assert_eq!((first.width(), first.height()), (48, 12));
+        assert_eq!(first.as_slice().len(), 48 * 12);
+        assert!(first.as_slice().contains(&' '));
+        assert!(first.as_slice().iter().any(|character| *character != ' '));
+        assert!(first.to_text().contains('\n'));
+    }
+
+    #[test]
+    fn braille_peaks_receive_more_occupation_than_quiet_regions() {
+        let frame = generated(sample_input(), 2.0, false);
+        let raster = PulseV2Rasterizer::braille(frame.lighting()).unwrap();
+        let max_index = frame
+            .lighting()
+            .as_slice()
+            .iter()
+            .enumerate()
+            .max_by(|(_, left), (_, right)| left.intensity().total_cmp(&right.intensity()))
+            .map(|(index, _)| index)
+            .unwrap();
+        let max_x = max_index % frame.lighting().width();
+        let max_y = max_index / frame.lighting().width();
+        let peak_character = raster.read(max_x / 2, max_y / 4).unwrap();
+        let peak_dots = braille_dot_count(peak_character);
+        let minimum_active_dots = raster
+            .as_slice()
+            .iter()
+            .map(|character| braille_dot_count(*character))
+            .filter(|count| *count > 0)
+            .min()
+            .unwrap();
+        let maximum_dots = raster
+            .as_slice()
+            .iter()
+            .map(|character| braille_dot_count(*character))
+            .max()
+            .unwrap();
+
+        assert!(peak_dots > 0);
+        assert!(maximum_dots > minimum_active_dots);
+    }
+
+    #[test]
+    fn unicode_fallback_is_simple_bounded_and_deterministic() {
+        let frame = generated(sample_input(), 2.0, false);
+        let first = PulseV2Rasterizer::unicode(frame.lighting()).unwrap();
+        let same = PulseV2Rasterizer::render(frame.lighting(), RasterMode::Unicode).unwrap();
+        let allowed = [' ', '·', '•', '▪', '■'];
+
+        assert_eq!(first, same);
+        assert_eq!(first.mode(), RasterMode::Unicode);
+        assert_eq!((first.width(), first.height()), (96, 48));
+        assert!(first.as_slice().contains(&' '));
+        assert!(first.as_slice().iter().any(|character| *character != ' '));
+        assert!(
+            first
+                .as_slice()
+                .iter()
+                .all(|character| allowed.contains(character))
+        );
+    }
+
+    #[test]
+    fn continuous_lighting_produces_connected_terminal_regions() {
+        let frame = generated(sample_input(), 2.0, false);
+        let raster = PulseV2Rasterizer::braille(frame.lighting()).unwrap();
+        let mut adjacent = 0;
+        for y in 0..raster.height() {
+            for x in 0..raster.width() {
+                if raster.read(x, y).is_some_and(|character| character != ' ') {
+                    if raster
+                        .read(x + 1, y)
+                        .is_some_and(|character| character != ' ')
+                    {
+                        adjacent += 1;
+                    }
+                    if raster
+                        .read(x, y + 1)
+                        .is_some_and(|character| character != ' ')
+                    {
+                        adjacent += 1;
+                    }
+                }
+            }
+        }
+
+        assert!(adjacent > raster.as_slice().len() / 12);
+    }
+
+    #[test]
+    fn rasterization_handles_presets_minimum_dimensions_and_reduced_motion() {
+        let engine = PulseV2Engine::new();
+        for (width, height) in [
+            (0, 0),
+            (1, 1),
+            (2, 1),
+            (30, 8),
+            (50, 12),
+            (80, 20),
+            (140, 40),
+        ] {
+            let dimensions = FieldDimensions::new(width, height).unwrap();
+            let frame = engine
+                .generate(
+                    dimensions,
+                    sample_input(),
+                    Duration::from_millis(400),
+                    false,
+                )
+                .unwrap();
+            let braille = PulseV2Rasterizer::braille(frame.lighting()).unwrap();
+            let unicode = PulseV2Rasterizer::unicode(frame.lighting()).unwrap();
+
+            assert_eq!(unicode.width(), width);
+            assert_eq!(unicode.height(), height);
+            assert!(braille.as_slice().iter().all(|character| {
+                *character == ' ' || (0x2800..=0x28ff).contains(&(*character as u32))
+            }));
+        }
+
+        let first = engine
+            .generate(
+                FieldDimensions::new(80, 20).unwrap(),
+                sample_input(),
+                Duration::ZERO,
+                true,
+            )
+            .unwrap();
+        let later = engine
+            .generate(
+                FieldDimensions::new(80, 20).unwrap(),
+                sample_input(),
+                Duration::from_secs(30),
+                true,
+            )
+            .unwrap();
+        assert_eq!(
+            PulseV2Rasterizer::braille(first.lighting()).unwrap(),
+            PulseV2Rasterizer::braille(later.lighting()).unwrap()
+        );
+        assert_eq!(
+            PulseV2Rasterizer::unicode(first.lighting()).unwrap(),
+            PulseV2Rasterizer::unicode(later.lighting()).unwrap()
+        );
     }
 
     #[test]
@@ -1214,6 +1436,24 @@ mod tests {
             / left.as_slice().len().max(1) as f32
     }
 
+    fn mean_refined_difference(
+        left: &super::RefinedEnergyField,
+        right: &super::RefinedEnergyField,
+    ) -> f32 {
+        left.as_slice()
+            .iter()
+            .zip(right.as_slice())
+            .map(|(left, right)| {
+                (left.energy() - right.energy()).abs()
+                    + (left.thickness() - right.thickness()).abs()
+                    + (left.branching() - right.branching()).abs()
+                    + (left.island() - right.island()).abs()
+                    + (left.dissipation() - right.dissipation()).abs()
+            })
+            .sum::<f32>()
+            / left.as_slice().len().max(1) as f32
+    }
+
     fn mean_lighting(field: &LightingField) -> f32 {
         field
             .as_slice()
@@ -1235,6 +1475,15 @@ mod tests {
             })
             .sum::<f32>()
             / left.as_slice().len().max(1) as f32
+    }
+
+    fn braille_dot_count(character: char) -> u32 {
+        let code = character as u32;
+        if (0x2800..=0x28ff).contains(&code) {
+            (code - 0x2800).count_ones()
+        } else {
+            0
+        }
     }
 
     fn mean_region(field: &StructuredField, start_x: usize, end_x: usize) -> f32 {
