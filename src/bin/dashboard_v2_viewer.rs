@@ -2,6 +2,10 @@
 #[path = "../ui/dashboard_v2/mod.rs"]
 pub mod dashboard_v2;
 
+#[path = "../system/mod.rs"]
+#[allow(dead_code)]
+mod system;
+
 #[path = "../ui/widgets/pulse_v2/mod.rs"]
 pub mod pulse_v2;
 
@@ -32,6 +36,8 @@ mod pulse {
 
 use std::{
     io,
+    sync::mpsc::{self, Receiver, Sender},
+    thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
 
@@ -41,10 +47,10 @@ use crossterm::{
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use dashboard_v2::{
-    CpuMetricInput, DashboardContext, DashboardPreset, DashboardState, DashboardV2Content,
-    DashboardV2Renderer, GpuMetricInput, MemoryMetricInput, MetricAvailability, MetricReading,
-    MetricUnit, NetworkMetricInput, StorageMetricInput, TerminalRenderer, TimeSample, TimeSeries,
-    WidgetContext, WidgetRenderer,
+    CpuLiveHistory, CpuLiveSample, CpuMetricInput, DashboardContext, DashboardPreset,
+    DashboardState, DashboardV2Content, DashboardV2Renderer, GpuMetricInput, MemoryMetricInput,
+    MetricAvailability, MetricReading, MetricUnit, NetworkMetricInput, StorageMetricInput,
+    TerminalRenderer, TimeSample, TimeSeries, WidgetContext, WidgetRenderer,
 };
 use pulse_v2::NormalizedPulseInput;
 use ratatui::{
@@ -54,9 +60,11 @@ use ratatui::{
     style::Style,
     widgets::{Block, Borders},
 };
+use system::info::{SystemInfo, SystemInfoCollector};
 use theme::Theme;
 
 const FRAME_INTERVAL: Duration = Duration::from_millis(33);
+const LIVE_COLLECTION_INTERVAL: Duration = Duration::from_secs(1);
 const HISTORY: usize = 12;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -150,6 +158,7 @@ struct ViewerState {
     gpu_available: bool,
     reduced_motion: bool,
     paused: bool,
+    live_cpu: bool,
     focused_cpu: bool,
     cpu_only: bool,
     cpu_preview_size: CpuPreviewSize,
@@ -164,6 +173,7 @@ impl ViewerState {
             gpu_available: true,
             reduced_motion: false,
             paused: false,
+            live_cpu: false,
             focused_cpu: false,
             cpu_only: false,
             cpu_preview_size: CpuPreviewSize::Reference,
@@ -181,6 +191,56 @@ impl ViewerState {
     }
 }
 
+enum LiveCollectorCommand {
+    Stop,
+}
+
+struct LiveCollectorGuard {
+    commands: Sender<LiveCollectorCommand>,
+    handle: Option<JoinHandle<()>>,
+}
+
+impl Drop for LiveCollectorGuard {
+    fn drop(&mut self) {
+        let _ = self.commands.send(LiveCollectorCommand::Stop);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+fn spawn_live_collector() -> (Receiver<(Instant, SystemInfo)>, LiveCollectorGuard) {
+    let (snapshot_sender, snapshot_receiver) = mpsc::channel();
+    let (command_sender, command_receiver) = mpsc::channel();
+    let handle = thread::spawn(move || {
+        let mut collector = SystemInfoCollector::new();
+        let mut next_collection = Instant::now();
+        loop {
+            let wait = next_collection.saturating_duration_since(Instant::now());
+            match command_receiver.recv_timeout(wait) {
+                Ok(LiveCollectorCommand::Stop) | Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    break;
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    let collected_at = Instant::now();
+                    let snapshot = collector.collect(collected_at);
+                    if snapshot_sender.send((collected_at, snapshot)).is_err() {
+                        break;
+                    }
+                    next_collection = collected_at + LIVE_COLLECTION_INTERVAL;
+                }
+            }
+        }
+    });
+    (
+        snapshot_receiver,
+        LiveCollectorGuard {
+            commands: command_sender,
+            handle: Some(handle),
+        },
+    )
+}
+
 fn main() -> io::Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -195,6 +255,8 @@ fn run_viewer(stdout: &mut io::Stdout) -> io::Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
     let mut state = ViewerState::new();
+    let (live_snapshots, _live_collector) = spawn_live_collector();
+    let mut live_cpu = CpuLiveHistory::new();
     let theme = Theme::pulse();
     let renderer = DashboardV2Renderer::new();
     let mut last_tick = Instant::now();
@@ -211,6 +273,10 @@ fn run_viewer(stdout: &mut io::Stdout) -> io::Result<()> {
             }
         }
 
+        for (collected_at, snapshot) in live_snapshots.try_iter() {
+            let _ = live_cpu.push(collected_at, cpu_live_sample_from_snapshot(&snapshot));
+        }
+
         let now = Instant::now();
         let delta = now.saturating_duration_since(last_tick);
         last_tick = now;
@@ -220,9 +286,9 @@ fn run_viewer(stdout: &mut io::Stdout) -> io::Result<()> {
 
         terminal.draw(|frame| {
             if state.cpu_only {
-                render_cpu_preview(frame, state, &theme);
+                render_cpu_preview(frame, state, &live_cpu, &theme);
             } else {
-                let content = content(state);
+                let content = content(state, &live_cpu);
                 let context = context_for(frame.area());
                 if renderer
                     .render(
@@ -242,6 +308,9 @@ fn run_viewer(stdout: &mut io::Stdout) -> io::Result<()> {
                         "Resize terminal or choose a smaller preset",
                         Style::default().fg(theme.text),
                     );
+                }
+                if state.live_cpu {
+                    render_live_mode_label(frame.area(), &theme, frame.buffer_mut());
                 }
             }
         })?;
@@ -271,6 +340,7 @@ fn handle_key(code: KeyCode, state: &mut ViewerState) -> bool {
         KeyCode::Char('s') | KeyCode::Char('S') => state.scenario = state.scenario.next(),
         KeyCode::Char('g') | KeyCode::Char('G') => state.gpu_available = !state.gpu_available,
         KeyCode::Char('r') | KeyCode::Char('R') => state.reduced_motion = !state.reduced_motion,
+        KeyCode::Char('l') | KeyCode::Char('L') => state.live_cpu = !state.live_cpu,
         KeyCode::Char('f') | KeyCode::Char('F') => state.focused_cpu = !state.focused_cpu,
         KeyCode::Char('c') | KeyCode::Char('C') => state.cpu_only = !state.cpu_only,
         KeyCode::Char('v') | KeyCode::Char('V') => {
@@ -283,7 +353,12 @@ fn handle_key(code: KeyCode, state: &mut ViewerState) -> bool {
     false
 }
 
-fn render_cpu_preview(frame: &mut ratatui::Frame<'_>, state: ViewerState, theme: &Theme) {
+fn render_cpu_preview(
+    frame: &mut ratatui::Frame<'_>,
+    state: ViewerState,
+    live_cpu: &CpuLiveHistory,
+    theme: &Theme,
+) {
     let area = frame.area();
     let (width, height) = state.cpu_preview_size.dimensions();
     if area.width < width || area.height < height {
@@ -326,10 +401,12 @@ fn render_cpu_preview(frame: &mut ratatui::Frame<'_>, state: ViewerState, theme:
             .focused_cpu
             .then_some(dashboard_v2::DashboardWidgetId::Cpu),
     );
-    if let Some(model) = WidgetRenderer::render_cpu(cpu_model(state.scenario), context)
-        .ok()
-        .flatten()
-    {
+    let model = if state.live_cpu {
+        compose_live_cpu(live_cpu, context)
+    } else {
+        compose_cpu(state, context)
+    };
+    if let Some(model) = model {
         let _ = TerminalRenderer::new().render_rect(
             model,
             DashboardPreset::Widescreen,
@@ -340,15 +417,26 @@ fn render_cpu_preview(frame: &mut ratatui::Frame<'_>, state: ViewerState, theme:
     }
 }
 
-fn content(state: ViewerState) -> DashboardV2Content {
-    let dashboard_state = state.scenario.dashboard_state();
+fn content(state: ViewerState, live_cpu: &CpuLiveHistory) -> DashboardV2Content {
+    let dashboard_state = if state.live_cpu {
+        live_cpu
+            .model()
+            .map(|model| dashboard_state_for_cpu(model.state()))
+            .unwrap_or_else(|_| state.scenario.dashboard_state())
+    } else {
+        state.scenario.dashboard_state()
+    };
     let context = WidgetContext::new(state.preset, dashboard_state, state.elapsed).with_focus(
         state
             .focused_cpu
             .then_some(dashboard_v2::DashboardWidgetId::Cpu),
     );
     let primary = [
-        compose_cpu(state, context),
+        if state.live_cpu {
+            compose_live_cpu(live_cpu, context)
+        } else {
+            compose_cpu(state, context)
+        },
         compose_memory(state, context),
         compose_gpu(state, context),
         compose_network(state, context),
@@ -359,6 +447,56 @@ fn content(state: ViewerState) -> DashboardV2Content {
         state.scenario.pulse_input(state.gpu_available),
         dashboard_state,
     )
+}
+
+fn compose_live_cpu(
+    live_cpu: &CpuLiveHistory,
+    context: WidgetContext,
+) -> Option<dashboard_v2::WidgetRenderModel> {
+    WidgetRenderer::render_cpu(live_cpu.model().ok()?, context)
+        .ok()
+        .flatten()
+}
+
+fn dashboard_state_for_cpu(state: dashboard_v2::WidgetState) -> DashboardState {
+    match state {
+        dashboard_v2::WidgetState::Critical => DashboardState::Critical,
+        dashboard_v2::WidgetState::Warning => DashboardState::Busy,
+        dashboard_v2::WidgetState::Active => DashboardState::Active,
+        _ => DashboardState::Calm,
+    }
+}
+
+fn cpu_live_sample_from_snapshot(snapshot: &SystemInfo) -> CpuLiveSample {
+    CpuLiveSample {
+        utilization_percent: valid_percent(f64::from(snapshot.cpu_usage)),
+        frequency_hz: valid_non_negative(snapshot.cpu_frequency_hz),
+        temperature_celsius: valid_non_negative(snapshot.cpu_temperature_celsius),
+        cores: snapshot.cpu_cores,
+    }
+}
+
+fn valid_percent(value: f64) -> Option<f64> {
+    value
+        .is_finite()
+        .then_some(value)
+        .filter(|value| (0.0..=100.0).contains(value))
+}
+
+fn valid_non_negative(value: Option<f64>) -> Option<f64> {
+    value.filter(|value| value.is_finite() && *value >= 0.0)
+}
+
+fn render_live_mode_label(area: Rect, theme: &Theme, buffer: &mut ratatui::buffer::Buffer) {
+    const LABEL: &str = "· LIVE CPU";
+    if area.width >= 24 {
+        buffer.set_string(
+            area.x.saturating_add(12),
+            area.y,
+            LABEL,
+            Style::default().fg(theme.info),
+        );
+    }
 }
 
 fn compose_cpu(
@@ -599,14 +737,15 @@ mod tests {
     #[test]
     fn viewer_fixture_covers_all_states_and_preserves_gpu_absence() {
         let mut state = ViewerState::new();
+        let live_cpu = CpuLiveHistory::new();
         for scenario in Scenario::ALL {
             state.scenario = scenario;
-            let content = content(state);
+            let content = content(state, &live_cpu);
             assert_eq!(content.state(), scenario.dashboard_state());
             assert!(content.primary().iter().all(Option::is_some));
         }
         state.gpu_available = false;
-        let unavailable = content(state).primary()[2].unwrap();
+        let unavailable = content(state, &live_cpu).primary()[2].unwrap();
         assert_eq!(unavailable.state(), dashboard_v2::WidgetState::Unavailable);
     }
 
@@ -618,8 +757,9 @@ mod tests {
         state.scenario = state.scenario.next();
         state.reduced_motion = true;
         state.paused = true;
-        let first = content(state);
-        let second = content(state);
+        let live_cpu = CpuLiveHistory::new();
+        let first = content(state, &live_cpu);
+        let second = content(state, &live_cpu);
         assert_eq!(first, second);
         assert!(state.reduced_motion);
         assert!(state.paused);
@@ -633,8 +773,46 @@ mod tests {
         handle_key(KeyCode::Char('v'), &mut state);
         assert!(state.cpu_only);
         assert_eq!(state.cpu_preview_size.dimensions(), (50, 14));
-        let first = content(state);
-        let second = content(state);
+        let live_cpu = CpuLiveHistory::new();
+        let first = content(state, &live_cpu);
+        let second = content(state, &live_cpu);
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn live_mode_uses_snapshot_cpu_fields_without_touching_demo_widgets() {
+        let snapshot = SystemInfo {
+            os_name: "Linux".to_owned(),
+            kernel: "test".to_owned(),
+            cpu_name: "CPU".to_owned(),
+            cpu_cores: 12,
+            cpu_usage: 63.5,
+            cpu_frequency_hz: Some(3.4e9),
+            cpu_temperature_celsius: Some(61.0),
+            total_ram: 1.0,
+            used_ram: 0.5,
+            total_swap: 0.0,
+            used_swap: 0.0,
+            processes: 0,
+            uptime: 0,
+            load_average: (0.0, 0.0, 0.0),
+            disks: Vec::new(),
+            processes_list: Vec::new(),
+            gpus: Vec::new(),
+            networks: Vec::new(),
+        };
+        let mut live_cpu = CpuLiveHistory::new();
+        let collected_at = Instant::now();
+        live_cpu
+            .push(collected_at, cpu_live_sample_from_snapshot(&snapshot))
+            .unwrap();
+
+        let mut state = ViewerState::new();
+        state.live_cpu = true;
+        let content = content(state, &live_cpu);
+        let cpu = content.primary()[0].unwrap();
+        assert_eq!(cpu.visual().primary().unwrap().value(), 0.635);
+        assert_eq!(live_cpu.latest().cores, 12);
+        assert!(content.primary()[1].is_some());
     }
 }

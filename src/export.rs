@@ -158,6 +158,8 @@ mod tests {
             cpu_name: "Test CPU".to_string(),
             cpu_cores: 4,
             cpu_usage: 37.5,
+            cpu_frequency_hz: None,
+            cpu_temperature_celsius: None,
             total_ram: 8.0,
             used_ram: 2.0,
             total_swap: 2.0,
