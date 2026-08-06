@@ -316,8 +316,9 @@ mod tests {
             )
             .unwrap()
             .unwrap();
-            assert_eq!(compact.block_count(), 4);
+            assert_eq!(compact.block_count(), 5);
             assert!(compact.block(BlockId::Value).is_some());
+            assert!(compact.block(BlockId::MemoryContext).is_some());
             assert!(compact.block(BlockId::Status).is_some());
             assert!(compact.block(BlockId::PrimarySparkline).is_none());
         }

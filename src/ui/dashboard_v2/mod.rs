@@ -3,6 +3,7 @@ mod engine;
 mod integration;
 mod layout;
 mod live_cpu;
+mod live_metrics;
 mod metrics;
 mod regions;
 mod render;
@@ -31,6 +32,11 @@ pub use layout::{DashboardLayout, DashboardLayoutEngine, DashboardSection};
 #[allow(unused_imports)]
 pub use live_cpu::{CPU_LIVE_HISTORY_CAPACITY, CpuLiveHistory, CpuLiveSample};
 #[allow(unused_imports)]
+pub use live_metrics::{
+    LIVE_METRICS_HISTORY_CAPACITY, LiveGpuSnapshot, LiveMetricModels, LiveMetricsError,
+    LiveMetricsHistory, LiveSnapshot, LiveStorageSnapshot,
+};
+#[allow(unused_imports)]
 pub use metrics::{
     CPU_TEMPERATURE_CRITICAL, CPU_TEMPERATURE_WARNING, CPU_THRESHOLDS, CpuMetricInput,
     CpuMetricModel, GPU_TEMPERATURE_CRITICAL, GPU_TEMPERATURE_WARNING, GPU_THRESHOLDS,
@@ -45,8 +51,9 @@ pub use regions::{DashboardComposition, DashboardPriority, DashboardRegion};
 #[allow(unused_imports)]
 pub use render::{
     BlockId, BlockMetadata, BlockRequirement, BlockVisibility, ChartBlock, ChartContent,
-    CpuContextBlock, FooterBlock, IndicatorBlock, MAX_RENDER_BLOCKS, RenderBlock, RenderError,
-    StatusBlock, TitleBlock, TrendBlock, ValueBlock, WidgetRenderModel, WidgetRenderer,
+    CpuContextBlock, FooterBlock, GpuContextBlock, IndicatorBlock, MAX_RENDER_BLOCKS,
+    MemoryContextBlock, NetworkContextBlock, RenderBlock, RenderError, StatusBlock,
+    StorageContextBlock, TitleBlock, TrendBlock, ValueBlock, WidgetRenderModel, WidgetRenderer,
 };
 #[allow(unused_imports)]
 pub use terminal::{TerminalRenderError, TerminalRenderer};
