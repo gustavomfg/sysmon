@@ -43,11 +43,17 @@ use crossterm::{
 use dashboard_v2::{
     CpuMetricInput, DashboardContext, DashboardPreset, DashboardState, DashboardV2Content,
     DashboardV2Renderer, GpuMetricInput, MemoryMetricInput, MetricAvailability, MetricReading,
-    MetricUnit, NetworkMetricInput, StorageMetricInput, TimeSample, TimeSeries, WidgetContext,
-    WidgetRenderer,
+    MetricUnit, NetworkMetricInput, StorageMetricInput, TerminalRenderer, TimeSample, TimeSeries,
+    WidgetContext, WidgetRenderer,
 };
 use pulse_v2::NormalizedPulseInput;
-use ratatui::{Terminal, backend::CrosstermBackend};
+use ratatui::{
+    Terminal,
+    backend::CrosstermBackend,
+    layout::Rect,
+    style::Style,
+    widgets::{Block, Borders},
+};
 use theme::Theme;
 
 const FRAME_INTERVAL: Duration = Duration::from_millis(33);
@@ -59,6 +65,34 @@ enum Scenario {
     Active,
     Warning,
     Critical,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CpuPreviewSize {
+    Reference,
+    Spacious,
+    Large,
+}
+
+impl CpuPreviewSize {
+    const ALL: [Self; 3] = [Self::Reference, Self::Spacious, Self::Large];
+
+    const fn dimensions(self) -> (u16, u16) {
+        match self {
+            Self::Reference => (45, 12),
+            Self::Spacious => (50, 14),
+            Self::Large => (60, 16),
+        }
+    }
+
+    const fn next(self) -> Self {
+        let index = match self {
+            Self::Reference => 0,
+            Self::Spacious => 1,
+            Self::Large => 2,
+        };
+        Self::ALL[(index + 1) % Self::ALL.len()]
+    }
 }
 
 impl Scenario {
@@ -116,6 +150,9 @@ struct ViewerState {
     gpu_available: bool,
     reduced_motion: bool,
     paused: bool,
+    focused_cpu: bool,
+    cpu_only: bool,
+    cpu_preview_size: CpuPreviewSize,
     elapsed: Duration,
 }
 
@@ -127,6 +164,9 @@ impl ViewerState {
             gpu_available: true,
             reduced_motion: false,
             paused: false,
+            focused_cpu: false,
+            cpu_only: false,
+            cpu_preview_size: CpuPreviewSize::Reference,
             elapsed: Duration::ZERO,
         }
     }
@@ -179,26 +219,30 @@ fn run_viewer(stdout: &mut io::Stdout) -> io::Result<()> {
         }
 
         terminal.draw(|frame| {
-            let content = content(state);
-            let context = context_for(frame.area());
-            if renderer
-                .render(
-                    state.preset,
-                    context,
-                    content,
-                    state.elapsed,
-                    state.reduced_motion,
-                    &theme,
-                    frame.buffer_mut(),
-                )
-                .is_err()
-            {
-                frame.buffer_mut().set_string(
-                    0,
-                    0,
-                    "Resize terminal or choose a smaller preset",
-                    ratatui::style::Style::default().fg(theme.text),
-                );
+            if state.cpu_only {
+                render_cpu_preview(frame, state, &theme);
+            } else {
+                let content = content(state);
+                let context = context_for(frame.area());
+                if renderer
+                    .render(
+                        state.preset,
+                        context,
+                        content,
+                        state.elapsed,
+                        state.reduced_motion,
+                        &theme,
+                        frame.buffer_mut(),
+                    )
+                    .is_err()
+                {
+                    frame.buffer_mut().set_string(
+                        0,
+                        0,
+                        "Resize terminal or choose a smaller preset",
+                        Style::default().fg(theme.text),
+                    );
+                }
             }
         })?;
     }
@@ -227,6 +271,11 @@ fn handle_key(code: KeyCode, state: &mut ViewerState) -> bool {
         KeyCode::Char('s') | KeyCode::Char('S') => state.scenario = state.scenario.next(),
         KeyCode::Char('g') | KeyCode::Char('G') => state.gpu_available = !state.gpu_available,
         KeyCode::Char('r') | KeyCode::Char('R') => state.reduced_motion = !state.reduced_motion,
+        KeyCode::Char('f') | KeyCode::Char('F') => state.focused_cpu = !state.focused_cpu,
+        KeyCode::Char('c') | KeyCode::Char('C') => state.cpu_only = !state.cpu_only,
+        KeyCode::Char('v') | KeyCode::Char('V') => {
+            state.cpu_preview_size = state.cpu_preview_size.next()
+        }
         KeyCode::Char(' ') => state.paused = !state.paused,
         KeyCode::Char('q') | KeyCode::Char('Q') | KeyCode::Esc => return true,
         _ => {}
@@ -234,9 +283,70 @@ fn handle_key(code: KeyCode, state: &mut ViewerState) -> bool {
     false
 }
 
+fn render_cpu_preview(frame: &mut ratatui::Frame<'_>, state: ViewerState, theme: &Theme) {
+    let area = frame.area();
+    let (width, height) = state.cpu_preview_size.dimensions();
+    if area.width < width || area.height < height {
+        frame.buffer_mut().set_string(
+            0,
+            0,
+            "Resize terminal to inspect the CPU preview",
+            Style::default().fg(theme.text),
+        );
+        return;
+    }
+
+    let outer = Rect::new(
+        area.x + (area.width - width) / 2,
+        area.y + (area.height - height) / 2,
+        width,
+        height,
+    );
+    let inner = Rect::new(
+        outer.x + 1,
+        outer.y + 1,
+        outer.width.saturating_sub(2),
+        outer.height.saturating_sub(2),
+    );
+    frame.render_widget(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(theme.border))
+            .style(Style::default().bg(theme.surface)),
+        outer,
+    );
+
+    let context = WidgetContext::new(
+        DashboardPreset::Widescreen,
+        state.scenario.dashboard_state(),
+        state.elapsed,
+    )
+    .with_focus(
+        state
+            .focused_cpu
+            .then_some(dashboard_v2::DashboardWidgetId::Cpu),
+    );
+    if let Some(model) = WidgetRenderer::render_cpu(cpu_model(state.scenario), context)
+        .ok()
+        .flatten()
+    {
+        let _ = TerminalRenderer::new().render_rect(
+            model,
+            DashboardPreset::Widescreen,
+            inner,
+            theme,
+            frame.buffer_mut(),
+        );
+    }
+}
+
 fn content(state: ViewerState) -> DashboardV2Content {
     let dashboard_state = state.scenario.dashboard_state();
-    let context = WidgetContext::new(state.preset, dashboard_state, state.elapsed);
+    let context = WidgetContext::new(state.preset, dashboard_state, state.elapsed).with_focus(
+        state
+            .focused_cpu
+            .then_some(dashboard_v2::DashboardWidgetId::Cpu),
+    );
     let primary = [
         compose_cpu(state, context),
         compose_memory(state, context),
@@ -297,14 +407,19 @@ fn compose_storage(
 }
 
 fn cpu_model(scenario: Scenario) -> dashboard_v2::CpuMetricModel<HISTORY> {
-    let (cpu, _, _, _, _, _) = scenario.values();
+    let (scenario_cpu, _, _, _, _, _) = scenario.values();
+    let cpu = if scenario == Scenario::Normal {
+        0.42
+    } else {
+        scenario_cpu
+    };
     dashboard_v2::CpuMetricModel::from_input(
         CpuMetricInput::new(
             normalized(cpu),
             normalized((cpu * 0.68).min(1.0)),
             normalized((cpu * 0.22).min(1.0)),
             normalized((1.0 - cpu * 0.90).max(0.0)),
-            non_negative(3.2),
+            non_negative(3_200_000_000.0),
             non_negative(match scenario {
                 Scenario::Normal => 52.0,
                 Scenario::Active => 68.0,
@@ -312,7 +427,11 @@ fn cpu_model(scenario: Scenario) -> dashboard_v2::CpuMetricModel<HISTORY> {
                 Scenario::Critical => 96.0,
             }),
             8,
-            history(MetricUnit::Percent, &scaled_history(cpu)),
+            history_with_step(
+                MetricUnit::Percent,
+                &cpu_history(cpu),
+                Duration::from_secs(5),
+            ),
         )
         .expect("deterministic CPU fixture is valid"),
     )
@@ -430,13 +549,28 @@ fn scaled_history(value: f64) -> [f64; HISTORY] {
     })
 }
 
+fn cpu_history(value: f64) -> [f64; HISTORY] {
+    const SHAPE: [f64; HISTORY] = [
+        0.76, 0.92, 0.82, 1.08, 0.86, 1.16, 0.90, 1.10, 0.94, 1.14, 0.81, 1.0,
+    ];
+    SHAPE.map(|factor| (value * factor).clamp(0.0, 1.0))
+}
+
 fn history<const CAPACITY: usize>(unit: MetricUnit, values: &[f64]) -> TimeSeries<CAPACITY> {
+    history_with_step(unit, values, Duration::from_secs(1))
+}
+
+fn history_with_step<const CAPACITY: usize>(
+    unit: MetricUnit,
+    values: &[f64],
+    step: Duration,
+) -> TimeSeries<CAPACITY> {
     let mut series = TimeSeries::new(unit);
     for (index, value) in values.iter().copied().enumerate() {
         series
             .push(
                 TimeSample::new(
-                    Duration::from_secs(index as u64),
+                    step.saturating_mul(index as u32),
                     Some(value),
                     MetricAvailability::Available,
                     None,
@@ -489,5 +623,18 @@ mod tests {
         assert_eq!(first, second);
         assert!(state.reduced_motion);
         assert!(state.paused);
+    }
+
+    #[test]
+    fn cpu_preview_cycles_through_reference_sizes_without_changing_semantics() {
+        let mut state = ViewerState::new();
+        assert_eq!(state.cpu_preview_size.dimensions(), (45, 12));
+        handle_key(KeyCode::Char('c'), &mut state);
+        handle_key(KeyCode::Char('v'), &mut state);
+        assert!(state.cpu_only);
+        assert_eq!(state.cpu_preview_size.dimensions(), (50, 14));
+        let first = content(state);
+        let second = content(state);
+        assert_eq!(first, second);
     }
 }
