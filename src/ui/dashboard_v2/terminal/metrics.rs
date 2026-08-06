@@ -56,7 +56,7 @@ pub(super) fn render(
 
 fn render_memory(
     model: WidgetRenderModel,
-    preset: DashboardPreset,
+    _preset: DashboardPreset,
     area: Rect,
     theme: &Theme,
     buffer: &mut Buffer,
@@ -73,7 +73,7 @@ fn render_memory(
     let RenderBlock::MemoryContext(context) = context else {
         return;
     };
-    let (left, graph) = split(body, preset);
+    let left = body;
     let used = context.used();
     let total = context.total();
     let value = match (used, total) {
@@ -85,12 +85,41 @@ fn render_memory(
         (Some(used), None) => format_bytes(used.value()),
         _ => "—".to_owned(),
     };
-    write(buffer, left, &value, value_style(model, theme));
+    let occupancy = model
+        .visual()
+        .primary()
+        .map_or_else(|| "—".to_owned(), |value| format_percent(value.value()));
+    let fraction = used
+        .zip(total)
+        .map(|(used, total)| used.value() / total.value().max(1.0))
+        .or_else(|| model.visual().primary().map(|value| value.value()));
+
+    if left.height <= 2 {
+        let compact_value = if occupancy == "—" {
+            value.clone()
+        } else {
+            format!("{value}  ·  {occupancy}")
+        };
+        write(
+            buffer,
+            line(left, 0),
+            &compact_value,
+            value_style(model, theme),
+        );
+        if left.height > 1 {
+            render_meter(
+                line(left, 1),
+                fraction.unwrap_or(0.0),
+                theme.chart_primary,
+                theme,
+                buffer,
+            );
+        }
+        return;
+    }
+
+    write(buffer, line(left, 0), &value, value_style(model, theme));
     if left.height > 1 {
-        let occupancy = model
-            .visual()
-            .primary()
-            .map_or_else(|| "—".to_owned(), |value| format_percent(value.value()));
         write(
             buffer,
             line(left, 1),
@@ -98,42 +127,50 @@ fn render_memory(
             context_style(model, theme),
         );
     }
-    if left.height > 2 {
-        let mut details = String::new();
-        if let Some(pressure) = context
-            .pressure()
-            .map(|value| format_percent(value.value()))
-        {
-            details.push_str(&pressure);
-        }
-        if let Some(cache) = context.cache().map(|value| format_bytes(value.value())) {
-            if !details.is_empty() {
-                details.push_str("  ·  ");
-            }
-            details.push_str("cache ");
-            details.push_str(&cache);
-        }
-        if let Some(swap) = context.swap().filter(|value| value.value() > 0.0) {
-            if !details.is_empty() {
-                details.push_str("  ·  ");
-            }
-            details.push_str("swap ");
-            details.push_str(&format_bytes(swap.value()));
-        }
-        if details.is_empty()
-            && let Some(available) = context.available()
-        {
-            details = format!("{} available", format_bytes(available.value()));
-        }
-        write(buffer, line(left, 2), &details, context_style(model, theme));
-    }
-    if preset != DashboardPreset::Compact
-        && graph.width >= MIN_GRAPH_WIDTH
-        && graph.height >= 2
-        && let Some(sparkline) = sparkline(model, BlockId::PrimarySparkline)
+
+    let mut details = String::new();
+    if let Some(pressure) = context
+        .pressure()
+        .map(|value| format_percent(value.value()))
     {
-        render_vital_line(sparkline, graph, 0.42, theme.chart_primary, theme, buffer);
-        render_window(sparkline, graph, theme, buffer);
+        details.push_str(&pressure);
+    }
+    if let Some(cache) = context.cache().map(|value| format_bytes(value.value())) {
+        if !details.is_empty() {
+            details.push_str("  ·  ");
+        }
+        details.push_str("cache ");
+        details.push_str(&cache);
+    }
+    if let Some(swap) = context.swap().filter(|value| value.value() > 0.0) {
+        if !details.is_empty() {
+            details.push_str("  ·  ");
+        }
+        details.push_str("swap ");
+        details.push_str(&format_bytes(swap.value()));
+    }
+    if details.is_empty()
+        && let Some(available) = context.available()
+    {
+        details = format!("{} available", format_bytes(available.value()));
+    }
+    if left.height > 3 {
+        write(buffer, line(left, 2), &details, context_style(model, theme));
+        render_meter(
+            line(left, 3),
+            fraction.unwrap_or(0.0),
+            theme.chart_primary,
+            theme,
+            buffer,
+        );
+    } else {
+        render_meter(
+            line(left, 2),
+            fraction.unwrap_or(0.0),
+            theme.chart_primary,
+            theme,
+            buffer,
+        );
     }
 }
 
@@ -202,8 +239,17 @@ fn render_gpu(
         && graph.height >= 2
         && let Some(sparkline) = sparkline(model, BlockId::PrimarySparkline)
     {
-        render_vital_line(sparkline, graph, 0.34, theme.chart_primary, theme, buffer);
-        render_window(sparkline, graph, theme, buffer);
+        let trace = Rect::new(
+            graph.x,
+            graph.y,
+            graph.width,
+            graph.height.saturating_sub(1),
+        );
+        let timestamp = Rect::new(graph.x, graph.bottom().saturating_sub(1), graph.width, 1);
+        if trace.height > 0 {
+            render_vital_line(sparkline, trace, 0.34, theme.chart_primary, theme, buffer);
+        }
+        render_window(sparkline, timestamp, theme, buffer);
     }
 }
 
@@ -260,7 +306,7 @@ fn render_network(
     }
     if preset != DashboardPreset::Compact
         && graph.width >= MIN_GRAPH_WIDTH
-        && let Some((download_area, upload_area)) = dual_graph_areas(graph)
+        && let Some((download_area, upload_area, timestamp_area)) = dual_graph_areas(graph)
     {
         if let Some(sparkline) = sparkline(model, BlockId::PrimarySparkline) {
             render_vital_line(
@@ -281,7 +327,7 @@ fn render_network(
                 theme,
                 buffer,
             );
-            render_window(sparkline, upload_area, theme, buffer);
+            render_window(sparkline, timestamp_area, theme, buffer);
         }
     }
 }
@@ -329,14 +375,28 @@ fn render_storage(
         write(buffer, line(left, 1), &text, context_style(model, theme));
     }
     if left.height > 2 {
+        let fraction = context
+            .used_space()
+            .zip(context.total_space())
+            .map(|(used, total)| used.value() / total.value().max(1.0))
+            .or_else(|| model.visual().primary().map(|value| value.value()));
+        render_meter(
+            line(left, 2),
+            fraction.unwrap_or(0.0),
+            theme.chart_primary,
+            theme,
+            buffer,
+        );
+    }
+    if left.height > 3 {
         let text = context.latency().map_or_else(String::new, |value| {
             format!("latency {:.0} ms", value.value() * 1000.0)
         });
-        write(buffer, line(left, 2), &text, context_style(model, theme));
+        write(buffer, line(left, 3), &text, context_style(model, theme));
     }
     if preset != DashboardPreset::Compact
         && graph.width >= MIN_GRAPH_WIDTH
-        && let Some((read_area, write_area)) = dual_graph_areas(graph)
+        && let Some((read_area, write_area, timestamp_area)) = dual_graph_areas(graph)
     {
         if let Some(sparkline) = sparkline(model, BlockId::SecondarySparkline) {
             render_vital_line(
@@ -357,7 +417,7 @@ fn render_storage(
                 theme,
                 buffer,
             );
-            render_window(sparkline, write_area, theme, buffer);
+            render_window(sparkline, timestamp_area, theme, buffer);
         }
     }
 }
@@ -370,10 +430,10 @@ fn render_header(
     buffer: &mut Buffer,
 ) {
     let marker = match model.state() {
-        WidgetState::Active => " ·",
+        WidgetState::Active => "",
         WidgetState::Warning => " !",
         WidgetState::Critical => " ×",
-        WidgetState::Unavailable => " ·",
+        WidgetState::Unavailable => "",
         _ => "",
     };
     write(
@@ -420,6 +480,30 @@ fn line(area: Rect, offset: u16) -> Rect {
     Rect::new(area.x, area.y.saturating_add(offset), area.width, 1)
 }
 
+fn render_meter(
+    area: Rect,
+    value: f64,
+    color: ratatui::style::Color,
+    theme: &Theme,
+    buffer: &mut Buffer,
+) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let value = value.clamp(0.0, 1.0);
+    for column in 0..area.width {
+        let position = (f64::from(column) + 0.5) / f64::from(area.width);
+        let (character, foreground) = if position <= value {
+            ('━', color)
+        } else {
+            ('·', theme.border)
+        };
+        buffer[(area.x + column, area.y)]
+            .set_char(character)
+            .set_style(Style::default().fg(foreground).bg(theme.surface));
+    }
+}
+
 fn context_block(model: WidgetRenderModel, id: BlockId) -> Option<RenderBlock> {
     model.block(id)
 }
@@ -458,7 +542,7 @@ fn render_window(
     }
 }
 
-fn dual_graph_areas(graph: Rect) -> Option<(Rect, Rect)> {
+fn dual_graph_areas(graph: Rect) -> Option<(Rect, Rect, Rect)> {
     if graph.height < 3 {
         return None;
     }
@@ -474,6 +558,7 @@ fn dual_graph_areas(graph: Rect) -> Option<(Rect, Rect)> {
                 graph.width,
                 second_height,
             ),
+            Rect::new(graph.x, graph.bottom().saturating_sub(1), graph.width, 1),
         )
     })
 }
@@ -787,10 +872,11 @@ mod tests {
     fn dual_graphs_reserve_the_window_inside_their_bounds() {
         for height in 3..=10 {
             let graph = Rect::new(4, 6, 18, height);
-            let (first, second) = dual_graph_areas(graph).unwrap();
+            let (first, second, timestamp) = dual_graph_areas(graph).unwrap();
             assert!(first.x >= graph.x && first.right() <= graph.right());
             assert!(second.x >= graph.x && second.right() <= graph.right());
-            assert!(first.y >= graph.y && second.bottom() < graph.bottom());
+            assert!(first.y >= graph.y && second.bottom() <= timestamp.y);
+            assert_eq!(timestamp.bottom(), graph.bottom());
             assert_eq!(first.bottom(), second.y);
         }
     }

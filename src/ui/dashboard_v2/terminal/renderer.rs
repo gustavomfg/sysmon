@@ -93,6 +93,7 @@ mod tests {
     use super::super::super::metrics::{
         CpuMetricInput, CpuMetricModel, GpuMetricInput, GpuMetricModel, MemoryMetricInput,
         MemoryMetricModel, MetricReading, NetworkMetricInput, NetworkMetricModel,
+        StorageMetricInput, StorageMetricModel,
     };
     use super::super::super::{
         DashboardState, DashboardWidgetId, MetricAvailability, MetricUnit, MetricValue,
@@ -187,6 +188,24 @@ mod tests {
                 MetricReading::non_negative(Some(100.0), MetricAvailability::Available).unwrap(),
                 history(MetricUnit::BytesPerSecond, &[20.0, 60.0, 80.0]),
                 history(MetricUnit::BytesPerSecond, &[10.0, 15.0, 20.0]),
+            )
+            .unwrap(),
+        )
+        .unwrap()
+    }
+
+    fn storage_model() -> StorageMetricModel<8> {
+        StorageMetricModel::from_input(
+            StorageMetricInput::new(
+                MetricReading::non_negative(Some(500.0), MetricAvailability::Available).unwrap(),
+                MetricReading::non_negative(Some(1_000.0), MetricAvailability::Available).unwrap(),
+                MetricReading::non_negative(Some(0.0), MetricAvailability::Available).unwrap(),
+                MetricReading::non_negative(Some(0.0), MetricAvailability::Available).unwrap(),
+                MetricReading::non_negative(Some(0.0), MetricAvailability::Available).unwrap(),
+                MetricReading::normalized(Some(0.0), MetricAvailability::Available).unwrap(),
+                history(MetricUnit::Percent, &[0.40, 0.50]),
+                history(MetricUnit::BytesPerSecond, &[0.0, 0.0]),
+                history(MetricUnit::BytesPerSecond, &[0.0, 0.0]),
             )
             .unwrap(),
         )
@@ -501,6 +520,12 @@ mod tests {
         let memory_text = buffer_text(&buffer);
         assert!(memory_text.contains("60% used"));
         assert!(!memory_text.lines().any(|line| line.trim() == "60%"));
+        assert!(memory_text.contains('━'));
+        assert!(
+            !memory_text
+                .chars()
+                .any(|character| ('\u{2800}'..='\u{28ff}').contains(&character))
+        );
 
         let gpu = WidgetRenderer::render_gpu(gpu_model(), context(DashboardPreset::Standard))
             .unwrap()
@@ -519,6 +544,24 @@ mod tests {
         assert!(gpu_text.contains("0.7 / 8 GB"));
         assert!(gpu_text.contains("53°C"));
         assert!(!gpu_text.contains("678.0 MB"));
+
+        let storage =
+            WidgetRenderer::render_storage(storage_model(), context(DashboardPreset::Standard))
+                .unwrap()
+                .unwrap();
+        let mut storage_buffer = Buffer::empty(Rect::new(0, 0, 48, 8));
+        TerminalRenderer::new()
+            .render(
+                storage,
+                DashboardPreset::Standard,
+                super::super::super::DashboardBounds::new(0, 0, 48, 8).unwrap(),
+                &crate::theme::Theme::pulse(),
+                &mut storage_buffer,
+            )
+            .unwrap();
+        let storage_text = buffer_text(&storage_buffer);
+        assert!(storage_text.contains("500 B / 1000 B"));
+        assert!(storage_text.contains('━'));
 
         let mut comparison = Buffer::empty(Rect::new(0, 0, 72, 24));
         TerminalRenderer::new()

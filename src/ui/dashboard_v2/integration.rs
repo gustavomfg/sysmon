@@ -25,7 +25,7 @@ use super::{
 const PRIMARY_COUNT: usize = 5;
 const PRIMARY_CARD_GAP: u16 = 1;
 const PRIMARY_CPU_MINIMUM: u16 = 9;
-const PRIMARY_SECONDARY_MINIMUM: u16 = 4;
+const PRIMARY_CARD_MINIMUMS: [u16; PRIMARY_COUNT] = [PRIMARY_CPU_MINIMUM, 5, 5, 5, 6];
 const PULSE_TITLE: &str = "PULSE V2";
 const HEADER_TITLE: &str = "SYSMON V2";
 const HEADER_CENTER: &str = "SYSTEM MONITOR";
@@ -361,8 +361,7 @@ impl DashboardV2Renderer {
 
 fn visible_primary(preset: DashboardPreset, area: Rect) -> [usize; PRIMARY_COUNT] {
     let order = match preset {
-        // CPU, memory and network are the most useful compact live signals.
-        DashboardPreset::Compact => [0, 1, 3, 2, 4],
+        DashboardPreset::Compact => [0, 1, 2, 3, 4],
         DashboardPreset::Standard
         | DashboardPreset::Widescreen
         | DashboardPreset::LargeWidescreen => [0, 1, 2, 3, 4],
@@ -455,20 +454,26 @@ fn primary_stack_heights(total_height: u16, count: usize) -> [u16; PRIMARY_COUNT
         return [total_height, 0, 0, 0, 0];
     }
 
-    let secondary_count = (count - 1) as u16;
+    let card_count = count.min(PRIMARY_COUNT);
+    let secondary_count = (card_count - 1) as u16;
     let gaps = PRIMARY_CARD_GAP.saturating_mul(secondary_count);
     let usable_height = total_height.saturating_sub(gaps);
-    let reserved_for_secondary = PRIMARY_SECONDARY_MINIMUM.saturating_mul(secondary_count);
-    let maximum_cpu = usable_height.saturating_sub(reserved_for_secondary);
-    let cpu_height = PRIMARY_CPU_MINIMUM.min(maximum_cpu).max(1);
-    let remaining = usable_height.saturating_sub(cpu_height);
-    let secondary_base = remaining / secondary_count.max(1);
-    let secondary_remainder = remaining % secondary_count.max(1);
+    let minimum_height = PRIMARY_CARD_MINIMUMS
+        .iter()
+        .take(card_count)
+        .copied()
+        .sum::<u16>();
+    let extra = usable_height.saturating_sub(minimum_height);
+    let extra_base = extra / secondary_count.max(1);
+    let extra_remainder = extra % secondary_count.max(1);
     let mut heights = [0; PRIMARY_COUNT];
-    heights[0] = cpu_height;
-    for (index, height) in heights.iter_mut().enumerate().skip(1).take(count - 1) {
-        *height =
-            secondary_base.saturating_add(u16::from(((index - 1) as u16) < secondary_remainder));
+    for (index, height) in heights.iter_mut().enumerate().take(card_count) {
+        let additional = if index == 0 {
+            0
+        } else {
+            extra_base.saturating_add(u16::from(((index - 1) as u16) < extra_remainder))
+        };
+        *height = PRIMARY_CARD_MINIMUMS[index].saturating_add(additional);
     }
     heights
 }
@@ -477,9 +482,13 @@ fn primary_stack_fits(total_height: u16, count: usize) -> bool {
     if count == 0 {
         return true;
     }
-    let secondary_count = count.saturating_sub(1) as u16;
-    let required = PRIMARY_CPU_MINIMUM
-        .saturating_add(PRIMARY_SECONDARY_MINIMUM.saturating_mul(secondary_count))
+    let card_count = count.min(PRIMARY_COUNT);
+    let secondary_count = card_count.saturating_sub(1) as u16;
+    let required = PRIMARY_CARD_MINIMUMS
+        .iter()
+        .take(card_count)
+        .copied()
+        .sum::<u16>()
         .saturating_add(PRIMARY_CARD_GAP.saturating_mul(secondary_count));
     total_height >= required
 }
@@ -1095,7 +1104,7 @@ mod tests {
         let heights: Vec<u16> = slots.iter().map(|slot| slot.height).collect();
         assert!((9..=10).contains(&heights[0]));
         assert!(heights[0] > heights[1]);
-        assert!(heights[1..].iter().all(|height| *height >= 4));
+        assert!(heights[1..].iter().all(|height| *height >= 5));
         assert_eq!(heights.iter().sum::<u16>() + PRIMARY_CARD_GAP * 4, 37);
         for pair in slots.windows(2) {
             assert_eq!(pair[0].bottom() + PRIMARY_CARD_GAP, pair[1].y);
@@ -1113,7 +1122,7 @@ mod tests {
         assert!(
             slots[..3]
                 .iter()
-                .all(|slot| slot.width > 0 && slot.height >= PRIMARY_SECONDARY_MINIMUM)
+                .all(|slot| slot.width > 0 && slot.height >= 5)
         );
         assert_eq!(slots[0].bottom() + PRIMARY_CARD_GAP, slots[1].y);
         assert_eq!(slots[1].bottom() + PRIMARY_CARD_GAP, slots[2].y);
@@ -1147,6 +1156,13 @@ mod tests {
                 ),
             );
             let count = visible.iter().filter(|index| **index != usize::MAX).count();
+            let expected_count = match height {
+                24 => 3,
+                32 => 4,
+                40 => 5,
+                _ => unreachable!(),
+            };
+            assert_eq!(count, expected_count);
             let slots = split_primary_area(
                 Rect::new(
                     body.x() as u16,
@@ -1156,6 +1172,11 @@ mod tests {
                 ),
                 count,
             );
+            let minimums = PRIMARY_CARD_MINIMUMS;
+            for (index, slot) in slots[..count].iter().enumerate() {
+                assert!(slot.width > 0);
+                assert!(slot.height >= minimums[index]);
+            }
             for pair in slots[..count].windows(2) {
                 assert!(pair[0].bottom() < pair[1].y);
             }
