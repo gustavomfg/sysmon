@@ -390,10 +390,9 @@ fn split_primary_area(area: Rect, count: usize) -> [Rect; PRIMARY_COUNT] {
     let row_height = area.height / rows as u16;
     let mut result = [Rect::default(); PRIMARY_COUNT];
 
-    // The CPU is the first signal users read. When the primary column has
-    // enough height for all five metrics, give it a real card-sized region
-    // instead of making every card an identical, shallow strip. The other
-    // metrics remain visible below it and keep their own minimum footprint.
+    // Keep CPU visually prioritized without consuming the column: reserve a
+    // compact card-sized region and return the released height to the other
+    // metrics, which remain visible below it with their own footprint.
     if columns == 1 && count == PRIMARY_COUNT {
         let heights = primary_stack_heights(area.height);
         let mut y = area.y;
@@ -429,11 +428,14 @@ fn split_primary_area(area: Rect, count: usize) -> [Rect; PRIMARY_COUNT] {
 
 fn primary_stack_heights(total_height: u16) -> [u16; PRIMARY_COUNT] {
     const SECONDARY_MINIMUM: u16 = 3;
+    const CPU_SHARE_PERCENT: u16 = 27;
+    const CPU_MINIMUM: u16 = 9;
+    const CPU_MAXIMUM: u16 = 10;
     let secondary_count = (PRIMARY_COUNT - 1) as u16;
     let reserved_for_secondary = SECONDARY_MINIMUM.saturating_mul(secondary_count);
     let maximum_cpu = total_height.saturating_sub(reserved_for_secondary);
     let desired_cpu = if total_height >= 28 {
-        (total_height.saturating_mul(34) / 100).clamp(10, 14)
+        (total_height.saturating_mul(CPU_SHARE_PERCENT) / 100).clamp(CPU_MINIMUM, CPU_MAXIMUM)
     } else {
         maximum_cpu
     };
@@ -1059,7 +1061,7 @@ mod tests {
     fn primary_column_gives_cpu_a_reference_sized_region() {
         let slots = split_primary_area(Rect::new(0, 0, 48, 37), PRIMARY_COUNT);
         let heights: Vec<u16> = slots.iter().map(|slot| slot.height).collect();
-        assert!((10..=14).contains(&heights[0]));
+        assert!((9..=10).contains(&heights[0]));
         assert!(heights[0] > heights[1]);
         assert!(heights[1..].iter().all(|height| *height >= 3));
         assert_eq!(heights.iter().sum::<u16>(), 37);

@@ -6,7 +6,8 @@ use std::{
 use crate::system::gpu::{GpuCollector, GpuInfo};
 use crate::system::network::NetworkInfo;
 use sysinfo::{
-    CpuRefreshKind, Disks, MemoryRefreshKind, Networks, ProcessRefreshKind, RefreshKind, System,
+    Components, CpuRefreshKind, Disks, MemoryRefreshKind, Networks, ProcessRefreshKind,
+    RefreshKind, System,
 };
 
 const DISK_LIST_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
@@ -17,6 +18,7 @@ pub struct SystemInfoCollector {
     networks: Networks,
     disks: Disks,
     gpus: GpuCollector,
+    components: Components,
     last_disk_list_refresh: Instant,
     last_network_refresh: Option<Instant>,
 }
@@ -40,6 +42,10 @@ pub struct SystemInfo {
     pub cpu_name: String,
     pub cpu_cores: usize,
     pub cpu_usage: f32,
+    #[allow(dead_code)]
+    pub cpu_frequency_hz: Option<f64>,
+    #[allow(dead_code)]
+    pub cpu_temperature_celsius: Option<f64>,
     pub total_ram: f64,
     pub used_ram: f64,
     pub total_swap: f64,
@@ -60,6 +66,7 @@ impl SystemInfoCollector {
             networks: Networks::new_with_refreshed_list(),
             disks: Disks::new_with_refreshed_list(),
             gpus: GpuCollector::new(GPU_REFRESH_INTERVAL),
+            components: Components::new_with_refreshed_list(),
             last_disk_list_refresh: Instant::now(),
             last_network_refresh: None,
         }
@@ -75,6 +82,7 @@ impl SystemInfoCollector {
         self.last_network_refresh = Some(collected_at);
 
         self.system.refresh_specifics(system_refresh_kind());
+        self.components.refresh(false);
 
         if self.last_disk_list_refresh.elapsed() >= DISK_LIST_REFRESH_INTERVAL {
             self.disks.refresh(true);
@@ -111,6 +119,9 @@ impl SystemInfoCollector {
 
         let load_average = System::load_average();
 
+        let cpu_frequency_hz = average_cpu_frequency_hz(&self.system);
+        let cpu_temperature_celsius = cpu_temperature_celsius(&self.components);
+
         SystemInfo {
             os_name: System::name().unwrap_or("Desconhecido".to_string()),
             kernel: System::kernel_version().unwrap_or("Desconhecido".to_string()),
@@ -122,6 +133,8 @@ impl SystemInfoCollector {
                 .unwrap_or("Desconhecido".to_string()),
             cpu_cores: self.system.cpus().len(),
             cpu_usage: self.system.global_cpu_usage(),
+            cpu_frequency_hz,
+            cpu_temperature_celsius,
             total_ram: self.system.total_memory() as f64 / 1024.0 / 1024.0 / 1024.0,
             used_ram: self.system.used_memory() as f64 / 1024.0 / 1024.0 / 1024.0,
             total_swap: self.system.total_swap() as f64 / 1024.0 / 1024.0 / 1024.0,
@@ -139,7 +152,32 @@ impl SystemInfoCollector {
 
 fn system_refresh_kind() -> RefreshKind {
     RefreshKind::nothing()
-        .with_cpu(CpuRefreshKind::nothing().with_cpu_usage())
+        .with_cpu(CpuRefreshKind::nothing().with_cpu_usage().with_frequency())
         .with_memory(MemoryRefreshKind::everything())
         .with_processes(ProcessRefreshKind::nothing().with_cpu().with_memory())
+}
+
+fn average_cpu_frequency_hz(system: &System) -> Option<f64> {
+    let mut total_mhz = 0.0;
+    let mut count = 0usize;
+    for cpu in system.cpus() {
+        let frequency = cpu.frequency();
+        if frequency > 0 {
+            total_mhz += frequency as f64;
+            count += 1;
+        }
+    }
+    (count > 0).then_some(total_mhz / count as f64 * 1.0e6)
+}
+
+fn cpu_temperature_celsius(components: &Components) -> Option<f64> {
+    components
+        .iter()
+        .filter(|component| {
+            let label = component.label().to_ascii_lowercase();
+            label.contains("cpu") || label.contains("package") || label.contains("core")
+        })
+        .filter_map(|component| component.temperature().map(f64::from))
+        .filter(|temperature| temperature.is_finite())
+        .max_by(f64::total_cmp)
 }

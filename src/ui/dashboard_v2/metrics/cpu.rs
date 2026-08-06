@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use super::super::chart::{PeakSet, SegmentedBars, SparklineModel, TimeSeries, TimeWindow};
 use super::super::{
     DashboardWidgetId, MetricIndicators, MetricUnit, MetricValue, PeriodComparison, Trend,
@@ -5,8 +7,8 @@ use super::super::{
 };
 use super::types::{
     CHART_POINTS, CPU_THRESHOLDS, MAX_PEAKS, MetricModelError, MetricModelSummary, MetricReading,
-    classify_with_signal, contextual_metric_value, highlight_for, intensity_for, latest_comparison,
-    peak_floor, rising, sustained_above, trend_of, usable_metric_value, validate_history,
+    classify_with_signal, contextual_metric_value, highlight_for, intensity_for, peak_floor,
+    rising, sustained_above, trend_of, usable_metric_value, validate_history,
     validate_non_negative_reading, validate_normalized_reading,
 };
 
@@ -85,7 +87,7 @@ impl<const HISTORY: usize> CpuMetricModel<HISTORY> {
     pub fn from_input(input: CpuMetricInput<HISTORY>) -> Result<Self, MetricModelError> {
         let sparkline = input.history.sparkline::<CHART_POINTS>(TimeWindow::Medium);
         let trend = trend_of(input.history);
-        let comparison = latest_comparison(input.history, MetricUnit::Percent);
+        let comparison = comparison_over_recent_window(input.history, Duration::from_secs(5));
         let sustained_load = sustained_above(input.history, CPU_THRESHOLDS.warning(), 3);
         let mut state = classify_with_signal(
             CPU_THRESHOLDS,
@@ -229,6 +231,41 @@ impl<const HISTORY: usize> CpuMetricModel<HISTORY> {
     }
 }
 
+fn comparison_over_recent_window<const CAPACITY: usize>(
+    history: TimeSeries<CAPACITY>,
+    minimum_lag: Duration,
+) -> PeriodComparison {
+    let Some(current) = history.last().and_then(|sample| sample.usable_value()) else {
+        return PeriodComparison::unknown();
+    };
+    let Some(current_sample) = history.last() else {
+        return PeriodComparison::unknown();
+    };
+    let target = current_sample.offset().saturating_sub(minimum_lag);
+    let mut previous = None;
+    let mut fallback = None;
+    for sample in history.iter() {
+        if sample.offset() < current_sample.offset() {
+            fallback = sample.usable_value();
+        }
+        if sample.offset() < current_sample.offset() && sample.offset() <= target {
+            previous = sample.usable_value();
+        }
+    }
+    let previous = if current_sample.offset() >= minimum_lag {
+        previous.or(fallback)
+    } else {
+        fallback
+    };
+    let Some(current) = MetricValue::new(current, MetricUnit::Percent, 1, VisualPriority::Primary)
+    else {
+        return PeriodComparison::unknown();
+    };
+    let previous = previous
+        .and_then(|value| MetricValue::new(value, MetricUnit::Percent, 1, VisualPriority::Primary));
+    PeriodComparison::from_values(current, previous)
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::super::MetricAvailability;
@@ -316,6 +353,14 @@ mod tests {
             MetricUnit::TemperatureCelsius
         );
         assert!(model.visual().primary().is_some());
+    }
+
+    #[test]
+    fn cpu_comparison_uses_a_stable_recent_window() {
+        let model =
+            CpuMetricModel::from_input(input(0.80, &[0.20, 0.30, 0.40, 0.50, 0.60, 0.80])).unwrap();
+        let delta = model.comparison().delta().unwrap();
+        assert!((delta - 0.60).abs() < 1.0e-9);
     }
 
     #[test]
