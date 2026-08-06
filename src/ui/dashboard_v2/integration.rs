@@ -24,7 +24,8 @@ use super::{
 
 const PRIMARY_COUNT: usize = 5;
 const PULSE_TITLE: &str = "PULSE V2";
-const HEADER_TITLE: &str = "SYSMON  ·  DASHBOARD V2";
+const HEADER_TITLE: &str = "SYSMON V2";
+const HEADER_CENTER: &str = "SYSTEM MONITOR";
 
 /// All semantic inputs needed by the V2 dashboard compositor.
 ///
@@ -220,6 +221,7 @@ impl DashboardV2Renderer {
                     region,
                     to_rect(section.bounds(), area)?,
                     content.state(),
+                    gpu_is_available(content.primary()),
                     theme,
                     buffer,
                 );
@@ -244,7 +246,10 @@ impl DashboardV2Renderer {
         rendered: &mut [Option<DashboardWidgetId>; PRIMARY_COUNT],
     ) -> Result<usize, DashboardV2RenderError> {
         let visible = visible_primary(preset, area);
-        let active_count = visible.iter().filter(|index| **index != usize::MAX).count();
+        let active_count = visible
+            .iter()
+            .filter(|index| **index != usize::MAX && models[**index].is_some())
+            .count();
         let slots = split_primary_area(area, active_count);
         let mut length = 0;
         let mut slot_index = 0;
@@ -261,7 +266,11 @@ impl DashboardV2Renderer {
             if slot.width < 2 || slot.height < 1 {
                 continue;
             }
-            let card = inset(slot, 1, 0);
+            if slot.width >= 12 && slot.height >= 6 {
+                buffer.set_style(slot, Style::default().bg(theme.surface));
+                draw_panel_frame(slot, theme.border, theme.surface, buffer);
+            }
+            let card = inset(slot, 1, u16::from(slot.height >= 6));
             if card.width == 0 || card.height == 0 {
                 continue;
             }
@@ -289,19 +298,24 @@ impl DashboardV2Renderer {
             return Ok(false);
         }
         buffer.set_style(area, Style::default().bg(theme.background));
+        draw_panel_frame(area, theme.border, theme.background, buffer);
+        let content = inset(area, 1, 1);
+        if content.width == 0 || content.height == 0 {
+            return Ok(false);
+        }
         buffer.set_stringn(
-            area.x.saturating_add(1),
-            area.y,
+            content.x,
+            content.y,
             PULSE_TITLE,
-            usize::from(area.width.saturating_sub(2)),
+            usize::from(content.width),
             Style::default().fg(theme.text_muted),
         );
 
         let raster_area = Rect::new(
-            area.x.saturating_add(1),
-            area.y.saturating_add(1),
-            area.width.saturating_sub(2),
-            area.height.saturating_sub(1),
+            content.x,
+            content.y.saturating_add(1),
+            content.width,
+            content.height.saturating_sub(1),
         );
         if raster_area.width == 0 || raster_area.height == 0 {
             return Ok(false);
@@ -365,7 +379,12 @@ fn split_primary_area(area: Rect, count: usize) -> [Rect; PRIMARY_COUNT] {
     if count == 0 || area.width == 0 || area.height == 0 {
         return [Rect::default(); PRIMARY_COUNT];
     }
-    let columns = if area.width >= 40 && count > 1 { 2 } else { 1 };
+    let tall_stack = count > 2 && usize::from(area.height) >= count.saturating_mul(4);
+    let columns = if !tall_stack && area.width >= 40 && count > 1 {
+        2
+    } else {
+        1
+    };
     let rows = count.div_ceil(columns);
     let column_width = area.width / columns as u16;
     let row_height = area.height / rows as u16;
@@ -402,18 +421,45 @@ fn render_header(
     if area.width == 0 || area.height == 0 {
         return;
     }
-    let text = format!(
-        "{HEADER_TITLE}   {}  ·  {}",
-        preset_label(preset),
-        state_label(state),
-    );
+    buffer.set_style(area, Style::default().bg(theme.background));
+    let right = format!("{}  ·  {}", preset_label(preset), state_label(state));
     buffer.set_stringn(
         area.x,
         area.y,
-        text,
+        HEADER_TITLE,
         usize::from(area.width),
         Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
     );
+    let center_width = u16::try_from(HEADER_CENTER.chars().count()).unwrap_or(area.width);
+    if center_width <= area.width {
+        buffer.set_stringn(
+            area.x.saturating_add((area.width - center_width) / 2),
+            area.y,
+            HEADER_CENTER,
+            usize::from(center_width),
+            Style::default().fg(theme.text),
+        );
+    }
+    let right_width = u16::try_from(right.chars().count()).unwrap_or(area.width);
+    if right_width <= area.width {
+        buffer.set_stringn(
+            area.right().saturating_sub(right_width),
+            area.y,
+            right,
+            usize::from(right_width),
+            Style::default().fg(theme.text_muted),
+        );
+    }
+    if area.height > 1 {
+        draw_rule(
+            area.x,
+            area.y.saturating_add(1),
+            area.width,
+            theme.border,
+            theme.background,
+            buffer,
+        );
+    }
 }
 
 fn render_footer(
@@ -432,9 +478,9 @@ fn render_footer(
         "Live"
     };
     let text = format!(
-        "{}  ·  {}  ·  P preset  S state  G GPU  R motion  Space pause  Q quit",
+        "{}  ·  {}                                      P preset  S state  G GPU  R motion  Q quit",
         preset_label(preset),
-        motion
+        motion,
     );
     buffer.set_stringn(
         area.x,
@@ -449,47 +495,301 @@ fn render_auxiliary(
     region: DashboardRegion,
     area: Rect,
     state: DashboardState,
+    gpu_available: bool,
     theme: &Theme,
     buffer: &mut Buffer,
 ) {
     if area.width == 0 || area.height == 0 {
         return;
     }
-    let title = match region {
-        DashboardRegion::SecondaryMetrics => "CONTEXT",
-        DashboardRegion::Charts => "TRENDS",
-        DashboardRegion::Processes => "PROCESSES",
-        DashboardRegion::Alerts => "EVENTS",
-        _ => return,
-    };
-    let detail = match region {
-        DashboardRegion::Alerts => match state {
-            DashboardState::Calm | DashboardState::Active => "No active events",
-            DashboardState::Busy => "Elevated system activity",
-            DashboardState::Critical => "Critical activity detected",
-        },
-        DashboardRegion::Charts => "Shared history context",
-        DashboardRegion::Processes => "Process context available",
-        DashboardRegion::SecondaryMetrics => "Normalized system context",
-        _ => "",
-    };
     buffer.set_style(area, Style::default().bg(theme.surface));
+    draw_panel_frame(area, theme.border, theme.surface, buffer);
+    let content = inset(area, 1, 1);
+    if content.width == 0 || content.height == 0 {
+        return;
+    }
+    match region {
+        DashboardRegion::SecondaryMetrics => render_system_context(content, theme, buffer),
+        DashboardRegion::Charts => {
+            render_temperatures(content, state, gpu_available, theme, buffer)
+        }
+        DashboardRegion::Processes => render_processes(content, state, theme, buffer),
+        DashboardRegion::Alerts => render_events(content, state, theme, buffer),
+        _ => {}
+    }
+}
+
+fn render_system_context(area: Rect, theme: &Theme, buffer: &mut Buffer) {
+    panel_heading(area, "SYSTEM CONTEXT", theme.info, theme, buffer);
+    let rows = [
+        "8 cores  ·  16 threads",
+        "16 GB memory  ·  3d 04h",
+        "Pulse online  ·  history ready",
+    ];
+    for (index, row) in rows.into_iter().enumerate() {
+        write_panel_row(area, 2 + index as u16, row, theme.text_muted, theme, buffer);
+    }
+}
+
+fn render_temperatures(
+    area: Rect,
+    state: DashboardState,
+    gpu_available: bool,
+    theme: &Theme,
+    buffer: &mut Buffer,
+) {
+    panel_heading(area, "TEMPERATURES", theme.warning, theme, buffer);
+    let values = match state {
+        DashboardState::Calm => [52_u16, 54, 42],
+        DashboardState::Active => [68, 70, 48],
+        DashboardState::Busy => [84, 85, 61],
+        DashboardState::Critical => [96, 96, 76],
+    };
+    let labels = ["CPU", "GPU", "NVMe"];
+    for (index, (label, value)) in labels.into_iter().zip(values).enumerate() {
+        if index == 1 && !gpu_available {
+            render_temperature_row(area, 2 + index as u16, label, None, theme, buffer);
+        } else {
+            render_temperature_row(area, 2 + index as u16, label, Some(value), theme, buffer);
+        }
+    }
+}
+
+fn render_temperature_row(
+    area: Rect,
+    row: u16,
+    label: &str,
+    value: Option<u16>,
+    theme: &Theme,
+    buffer: &mut Buffer,
+) {
+    if row >= area.height {
+        return;
+    }
+    let value_text = value.map_or_else(|| "—".to_owned(), |value| format!("{value}°C"));
+    let label_width = 6_u16.min(area.width.saturating_sub(1));
+    let bar_start = area.x.saturating_add(label_width);
+    let bar_width = area.width.saturating_sub(label_width).saturating_sub(7);
+    let y = area.y.saturating_add(row);
     buffer.set_stringn(
-        area.x.saturating_add(1),
-        area.y,
-        title,
-        usize::from(area.width.saturating_sub(2)),
-        Style::default().fg(theme.text_muted),
+        area.x,
+        y,
+        label,
+        usize::from(label_width),
+        Style::default().fg(theme.text_muted).bg(theme.surface),
     );
-    if area.height > 1 {
-        buffer.set_stringn(
-            area.x.saturating_add(1),
-            area.y.saturating_add(1),
-            detail,
-            usize::from(area.width.saturating_sub(2)),
-            Style::default().fg(theme.text_muted),
+    if let Some(value) = value {
+        draw_horizontal_bar(
+            bar_start,
+            y,
+            bar_width,
+            f64::from(value) / 100.0,
+            if value >= 90 {
+                theme.danger
+            } else if value >= 75 {
+                theme.warning
+            } else {
+                theme.info
+            },
+            theme,
+            buffer,
         );
     }
+    let value_x = area.right().saturating_sub(7);
+    buffer.set_stringn(
+        value_x,
+        y,
+        value_text,
+        usize::from(area.right().saturating_sub(value_x)),
+        Style::default().fg(theme.text).bg(theme.surface),
+    );
+}
+
+fn render_processes(area: Rect, state: DashboardState, theme: &Theme, buffer: &mut Buffer) {
+    panel_heading(area, "TOP PROCESSES", theme.primary, theme, buffer);
+    let load = match state {
+        DashboardState::Calm => [12_u16, 8, 5],
+        DashboardState::Active => [34, 22, 14],
+        DashboardState::Busy => [68, 51, 36],
+        DashboardState::Critical => [91, 78, 64],
+    };
+    let processes = ["sysmon", "browser", "compiler"];
+    for (index, (name, cpu)) in processes.into_iter().zip(load).enumerate() {
+        let y = area.y.saturating_add(2 + index as u16);
+        if y >= area.bottom() {
+            break;
+        }
+        let value = format!("{cpu:>3}%  {:>3}%", (cpu / 2).max(1));
+        let available = usize::from(area.width).saturating_sub(value.chars().count() + 1);
+        buffer.set_stringn(
+            area.x,
+            y,
+            name,
+            available,
+            Style::default().fg(theme.text).bg(theme.surface),
+        );
+        buffer.set_stringn(
+            area.right()
+                .saturating_sub(u16::try_from(value.chars().count()).unwrap_or(area.width)),
+            y,
+            value,
+            usize::from(area.width),
+            Style::default().fg(theme.text_muted).bg(theme.surface),
+        );
+    }
+}
+
+fn render_events(area: Rect, state: DashboardState, theme: &Theme, buffer: &mut Buffer) {
+    panel_heading(area, "RECENT EVENTS", theme.secondary, theme, buffer);
+    let events = match state {
+        DashboardState::Calm => ["Pulse stabilized", "No active pressure"],
+        DashboardState::Active => ["Workload increased", "Network flow active"],
+        DashboardState::Busy => ["Memory pressure rising", "Thermal headroom reduced"],
+        DashboardState::Critical => ["Critical load detected", "Thermal limit approaching"],
+    };
+    for (index, event) in events.into_iter().enumerate() {
+        write_panel_row(
+            area,
+            2 + index as u16,
+            event,
+            theme.text_muted,
+            theme,
+            buffer,
+        );
+    }
+}
+
+fn panel_heading(
+    area: Rect,
+    title: &str,
+    accent: ratatui::style::Color,
+    theme: &Theme,
+    buffer: &mut Buffer,
+) {
+    if area.height == 0 || area.width == 0 {
+        return;
+    }
+    buffer.set_stringn(
+        area.x,
+        area.y,
+        title,
+        usize::from(area.width),
+        Style::default()
+            .fg(accent)
+            .bg(theme.surface)
+            .add_modifier(Modifier::BOLD),
+    );
+    if area.height > 1 {
+        draw_rule(
+            area.x,
+            area.y.saturating_add(1),
+            area.width,
+            theme.border,
+            theme.surface,
+            buffer,
+        );
+    }
+}
+
+fn draw_panel_frame(
+    area: Rect,
+    border: ratatui::style::Color,
+    background: ratatui::style::Color,
+    buffer: &mut Buffer,
+) {
+    if area.width < 3 || area.height < 3 {
+        return;
+    }
+    let style = Style::default().fg(border).bg(background);
+    let right = area.right().saturating_sub(1);
+    let bottom = area.bottom().saturating_sub(1);
+    for x in area.x..=right {
+        buffer[(x, area.y)].set_symbol(if x == area.x {
+            "╭"
+        } else if x == right {
+            "╮"
+        } else {
+            "─"
+        });
+        buffer[(x, bottom)].set_symbol(if x == area.x {
+            "╰"
+        } else if x == right {
+            "╯"
+        } else {
+            "─"
+        });
+        buffer[(x, area.y)].set_style(style);
+        buffer[(x, bottom)].set_style(style);
+    }
+    for y in area.y.saturating_add(1)..bottom {
+        buffer[(area.x, y)].set_symbol("│");
+        buffer[(right, y)].set_symbol("│");
+        buffer[(area.x, y)].set_style(style);
+        buffer[(right, y)].set_style(style);
+    }
+}
+
+fn draw_rule(
+    x: u16,
+    y: u16,
+    width: u16,
+    foreground: ratatui::style::Color,
+    background: ratatui::style::Color,
+    buffer: &mut Buffer,
+) {
+    let style = Style::default().fg(foreground).bg(background);
+    for column in 0..width {
+        buffer[(x.saturating_add(column), y)]
+            .set_symbol("─")
+            .set_style(style);
+    }
+}
+
+fn write_panel_row(
+    area: Rect,
+    row: u16,
+    text: &str,
+    color: ratatui::style::Color,
+    theme: &Theme,
+    buffer: &mut Buffer,
+) {
+    if row < area.height {
+        buffer.set_stringn(
+            area.x,
+            area.y.saturating_add(row),
+            text,
+            usize::from(area.width),
+            Style::default().fg(color).bg(theme.surface),
+        );
+    }
+}
+
+fn draw_horizontal_bar(
+    x: u16,
+    y: u16,
+    width: u16,
+    value: f64,
+    color: ratatui::style::Color,
+    theme: &Theme,
+    buffer: &mut Buffer,
+) {
+    for column in 0..width {
+        let position = (f64::from(column) + 0.5) / f64::from(width.max(1));
+        let filled = position <= value.clamp(0.0, 1.0);
+        buffer[(x.saturating_add(column), y)]
+            .set_char(if filled { '━' } else { '·' })
+            .set_style(
+                Style::default()
+                    .fg(if filled { color } else { theme.border })
+                    .bg(theme.surface),
+            );
+    }
+}
+
+fn gpu_is_available(models: [Option<WidgetRenderModel>; PRIMARY_COUNT]) -> bool {
+    models[2]
+        .map(|model| model.state() != super::WidgetState::Unavailable)
+        .unwrap_or(false)
 }
 
 fn draw_raster(area: Rect, raster: &ColorRasterFrame, theme: &Theme, buffer: &mut Buffer) {
@@ -690,5 +990,29 @@ mod tests {
                 )
                 .is_ok()
         );
+    }
+
+    #[test]
+    fn wide_composition_contains_real_context_panels_instead_of_placeholders() {
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 240, 60));
+        let content = DashboardV2Content::new([None; PRIMARY_COUNT], input(), DashboardState::Busy);
+        DashboardV2Renderer::new()
+            .render(
+                DashboardPreset::LargeWidescreen,
+                DashboardContext::default(),
+                content,
+                Duration::from_secs(4),
+                false,
+                &Theme::pulse(),
+                &mut buffer,
+            )
+            .unwrap();
+        let text: String = buffer.content.iter().map(|cell| cell.symbol()).collect();
+        assert!(text.contains("SYSTEM CONTEXT"));
+        assert!(text.contains("TEMPERATURES"));
+        assert!(text.contains("TOP PROCESSES"));
+        assert!(text.contains("RECENT EVENTS"));
+        assert!(!text.contains("Shared history context"));
+        assert!(!text.contains("Process context available"));
     }
 }

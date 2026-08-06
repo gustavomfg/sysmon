@@ -278,6 +278,35 @@ mod tests {
     }
 
     #[test]
+    fn product_layout_keeps_metrics_pulse_and_diagnostics_in_columns() {
+        let engine = DashboardEngine::new();
+        for (preset, dimensions) in [
+            (DashboardPreset::Standard, dimensions(160, 40)),
+            (DashboardPreset::Widescreen, dimensions(180, 44)),
+            (DashboardPreset::LargeWidescreen, dimensions(240, 60)),
+        ] {
+            let layout = engine
+                .compose_with_preset(dimensions, preset, DashboardContext::default())
+                .unwrap()
+                .layout();
+            let primary = layout
+                .section(DashboardRegion::PrimaryMetrics)
+                .unwrap()
+                .bounds();
+            let pulse = layout.section(DashboardRegion::Pulse).unwrap().bounds();
+            let diagnostics = layout.section(DashboardRegion::Charts).unwrap().bounds();
+
+            assert_eq!(primary.x(), 0);
+            assert_eq!(primary.y(), pulse.y());
+            assert_eq!(diagnostics.y(), pulse.y());
+            assert!(primary.right() <= pulse.x());
+            assert!(pulse.right() <= diagnostics.x());
+            assert!(primary.height() >= pulse.height());
+            assert!(layout.validate().is_ok());
+        }
+    }
+
+    #[test]
     fn hidden_sections_leave_no_reserved_space_and_expand_neighbors() {
         let engine = DashboardEngine::new();
         let wide_dimensions = dimensions(160, 40);
@@ -304,14 +333,37 @@ mod tests {
         assert!(reduced.section(DashboardRegion::SecondaryMetrics).is_none());
         assert!(reduced.section(DashboardRegion::Processes).is_none());
         assert!(reduced.validate().is_ok());
-        assert!(
+        assert_eq!(
             reduced
                 .section(DashboardRegion::PrimaryMetrics)
                 .unwrap()
                 .bounds()
+                .height(),
+            full.section(DashboardRegion::PrimaryMetrics)
+                .unwrap()
+                .bounds()
+                .height()
+        );
+        assert!(
+            reduced
+                .section(DashboardRegion::Pulse)
+                .unwrap()
+                .bounds()
                 .height()
                 > full
-                    .section(DashboardRegion::PrimaryMetrics)
+                    .section(DashboardRegion::Pulse)
+                    .unwrap()
+                    .bounds()
+                    .height()
+        );
+        assert!(
+            reduced
+                .section(DashboardRegion::Charts)
+                .unwrap()
+                .bounds()
+                .height()
+                > full
+                    .section(DashboardRegion::Charts)
                     .unwrap()
                     .bounds()
                     .height()
@@ -330,8 +382,9 @@ mod tests {
             .unwrap()
             .layout();
         let alerts = standard.section(DashboardRegion::Alerts).unwrap().bounds();
-        assert_eq!(alerts.x(), 0);
-        assert_eq!(alerts.width(), 140);
+        let pulse = standard.section(DashboardRegion::Pulse).unwrap().bounds();
+        assert_eq!(alerts.x(), pulse.right());
+        assert_eq!(alerts.right(), 140);
     }
 
     #[test]

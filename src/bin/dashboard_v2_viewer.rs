@@ -205,7 +205,7 @@ fn run_viewer(stdout: &mut io::Stdout) -> io::Result<()> {
 }
 
 fn context_for(area: ratatui::layout::Rect) -> DashboardContext {
-    if area.width >= 120 && area.height >= 32 {
+    if area.width >= 100 && area.height >= 28 {
         return DashboardContext::default();
     }
 

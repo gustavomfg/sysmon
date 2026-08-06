@@ -190,71 +190,15 @@ fn standard_layout(
     preset: DashboardPreset,
     context: DashboardContext,
 ) -> Result<(), DashboardError> {
-    let top_slots = region_slots(
-        [
-            Some((DashboardRegion::Pulse, 58)),
-            Some((DashboardRegion::PrimaryMetrics, 42)),
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-        ],
+    three_column_layout(
+        sections,
+        body,
         preset,
         context,
-    );
-    let side = group_slot(
-        1,
-        54,
-        [
-            Some(DashboardRegion::Charts),
-            Some(DashboardRegion::Processes),
-            Some(DashboardRegion::Alerts),
-        ],
-        Axis::Vertical,
-        preset,
-        context,
-    );
-    let bottom_slots = [
-        region_slot(0, DashboardRegion::SecondaryMetrics, 46, preset, context),
-        side,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-    ];
-    let rows = row_slots(body, 58, 42, top_slots, bottom_slots)?;
-    place_regions(sections, rows[0], context);
-    if let Some(secondary_bounds) = rows[1][0] {
-        place(
-            sections,
-            DashboardRegion::SecondaryMetrics,
-            secondary_bounds,
-            context,
-        );
-    }
-    if let Some(side_bounds) = rows[1][1] {
-        let side_slots = region_slots(
-            [
-                Some((DashboardRegion::Charts, 50)),
-                Some((DashboardRegion::Processes, 30)),
-                Some((DashboardRegion::Alerts, 20)),
-                None,
-                None,
-                None,
-                None,
-                None,
-            ],
-            preset,
-            context,
-        );
-        let side_areas = allocate_axis(side_bounds, Axis::Vertical, side_slots)?;
-        place_regions(sections, side_areas, context);
-    }
-    Ok(())
+        [30, 42, 28],
+        [70, 30],
+        [34, 38, 28],
+    )
 }
 
 fn widescreen_layout(
@@ -263,13 +207,57 @@ fn widescreen_layout(
     preset: DashboardPreset,
     context: DashboardContext,
 ) -> Result<(), DashboardError> {
+    three_column_layout(
+        sections,
+        body,
+        preset,
+        context,
+        [28, 44, 28],
+        [72, 28],
+        [34, 38, 28],
+    )
+}
+
+fn large_widescreen_layout(
+    sections: &mut [Option<DashboardSection>; MAX_DASHBOARD_REGIONS],
+    body: DashboardBounds,
+    preset: DashboardPreset,
+    context: DashboardContext,
+) -> Result<(), DashboardError> {
+    three_column_layout(
+        sections,
+        body,
+        preset,
+        context,
+        [32, 40, 28],
+        [74, 26],
+        [34, 38, 28],
+    )
+}
+
+fn three_column_layout(
+    sections: &mut [Option<DashboardSection>; MAX_DASHBOARD_REGIONS],
+    body: DashboardBounds,
+    preset: DashboardPreset,
+    context: DashboardContext,
+    column_weights: [usize; 3],
+    center_weights: [usize; 2],
+    right_weights: [usize; 3],
+) -> Result<(), DashboardError> {
     let left = group_slot(
         0,
-        26,
+        column_weights[0],
+        [Some(DashboardRegion::PrimaryMetrics)],
+        Axis::Horizontal,
+        preset,
+        context,
+    );
+    let center = group_slot(
+        1,
+        column_weights[1],
         [
-            Some(DashboardRegion::PrimaryMetrics),
+            Some(DashboardRegion::Pulse),
             Some(DashboardRegion::SecondaryMetrics),
-            None,
         ],
         Axis::Vertical,
         preset,
@@ -277,7 +265,7 @@ fn widescreen_layout(
     );
     let right = group_slot(
         2,
-        24,
+        column_weights[2],
         [
             Some(DashboardRegion::Charts),
             Some(DashboardRegion::Processes),
@@ -287,23 +275,17 @@ fn widescreen_layout(
         preset,
         context,
     );
-    let slots = [
-        left,
-        region_slot(1, DashboardRegion::Pulse, 50, preset, context),
-        right,
-        None,
-        None,
-        None,
-        None,
-        None,
-    ];
-    let columns = allocate_axis(body, Axis::Horizontal, slots)?;
+    let columns = allocate_axis(
+        body,
+        Axis::Horizontal,
+        [left, center, right, None, None, None, None, None],
+    )?;
 
     if let Some(left_bounds) = columns[0] {
         let left_slots = region_slots(
             [
-                Some((DashboardRegion::PrimaryMetrics, 58)),
-                Some((DashboardRegion::SecondaryMetrics, 42)),
+                Some((DashboardRegion::PrimaryMetrics, 100)),
+                None,
                 None,
                 None,
                 None,
@@ -320,15 +302,35 @@ fn widescreen_layout(
             context,
         );
     }
-    if let Some(pulse_bounds) = columns[1] {
-        place(sections, DashboardRegion::Pulse, pulse_bounds, context);
+
+    if let Some(center_bounds) = columns[1] {
+        let center_slots = region_slots(
+            [
+                Some((DashboardRegion::Pulse, center_weights[0])),
+                Some((DashboardRegion::SecondaryMetrics, center_weights[1])),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            ],
+            preset,
+            context,
+        );
+        place_regions(
+            sections,
+            allocate_axis(center_bounds, Axis::Vertical, center_slots)?,
+            context,
+        );
     }
+
     if let Some(right_bounds) = columns[2] {
         let right_slots = region_slots(
             [
-                Some((DashboardRegion::Charts, 45)),
-                Some((DashboardRegion::Processes, 35)),
-                Some((DashboardRegion::Alerts, 20)),
+                Some((DashboardRegion::Charts, right_weights[0])),
+                Some((DashboardRegion::Processes, right_weights[1])),
+                Some((DashboardRegion::Alerts, right_weights[2])),
                 None,
                 None,
                 None,
@@ -343,131 +345,6 @@ fn widescreen_layout(
             allocate_axis(right_bounds, Axis::Vertical, right_slots)?,
             context,
         );
-    }
-    Ok(())
-}
-
-fn large_widescreen_layout(
-    sections: &mut [Option<DashboardSection>; MAX_DASHBOARD_REGIONS],
-    body: DashboardBounds,
-    preset: DashboardPreset,
-    context: DashboardContext,
-) -> Result<(), DashboardError> {
-    let hero = group_slot(
-        0,
-        82,
-        [
-            Some(DashboardRegion::Pulse),
-            Some(DashboardRegion::PrimaryMetrics),
-            Some(DashboardRegion::SecondaryMetrics),
-            Some(DashboardRegion::Charts),
-            Some(DashboardRegion::Processes),
-            None,
-            None,
-            None,
-        ],
-        Axis::Horizontal,
-        preset,
-        context,
-    );
-    let slots = [
-        hero,
-        region_slot(1, DashboardRegion::Alerts, 18, preset, context),
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-    ];
-    let rows = allocate_axis(body, Axis::Vertical, slots)?;
-    if let Some(hero_bounds) = rows[0] {
-        let left = group_slot(
-            0,
-            24,
-            [
-                Some(DashboardRegion::PrimaryMetrics),
-                Some(DashboardRegion::SecondaryMetrics),
-                None,
-            ],
-            Axis::Vertical,
-            preset,
-            context,
-        );
-        let right = group_slot(
-            2,
-            20,
-            [
-                Some(DashboardRegion::Charts),
-                Some(DashboardRegion::Processes),
-                None,
-            ],
-            Axis::Vertical,
-            preset,
-            context,
-        );
-        let columns = allocate_axis(
-            hero_bounds,
-            Axis::Horizontal,
-            [
-                left,
-                region_slot(1, DashboardRegion::Pulse, 56, preset, context),
-                right,
-                None,
-                None,
-                None,
-                None,
-                None,
-            ],
-        )?;
-        if let Some(left_bounds) = columns[0] {
-            let left_slots = region_slots(
-                [
-                    Some((DashboardRegion::PrimaryMetrics, 52)),
-                    Some((DashboardRegion::SecondaryMetrics, 48)),
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                ],
-                preset,
-                context,
-            );
-            place_regions(
-                sections,
-                allocate_axis(left_bounds, Axis::Vertical, left_slots)?,
-                context,
-            );
-        }
-        if let Some(pulse_bounds) = columns[1] {
-            place(sections, DashboardRegion::Pulse, pulse_bounds, context);
-        }
-        if let Some(right_bounds) = columns[2] {
-            let right_slots = region_slots(
-                [
-                    Some((DashboardRegion::Charts, 58)),
-                    Some((DashboardRegion::Processes, 42)),
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                ],
-                preset,
-                context,
-            );
-            place_regions(
-                sections,
-                allocate_axis(right_bounds, Axis::Vertical, right_slots)?,
-                context,
-            );
-        }
-    }
-    if let Some(alert_bounds) = rows[1] {
-        place(sections, DashboardRegion::Alerts, alert_bounds, context);
     }
     Ok(())
 }
@@ -626,63 +503,6 @@ impl FromIterator<DashboardRegion> for NoAllocRegions {
         }
         result
     }
-}
-
-fn row_slots(
-    body: DashboardBounds,
-    top_weight: usize,
-    bottom_weight: usize,
-    top_slots: [Option<LayoutSlot>; MAX_DASHBOARD_REGIONS],
-    bottom_slots: [Option<LayoutSlot>; MAX_DASHBOARD_REGIONS],
-) -> Result<[[Option<DashboardBounds>; MAX_DASHBOARD_REGIONS]; 2], DashboardError> {
-    let top_group = slots_group_slot(0, top_weight, top_slots, Axis::Horizontal);
-    let bottom_group = slots_group_slot(1, bottom_weight, bottom_slots, Axis::Horizontal);
-    let rows = allocate_axis(
-        body,
-        Axis::Vertical,
-        [top_group, bottom_group, None, None, None, None, None, None],
-    )?;
-
-    let top = rows[0]
-        .map(|bounds| allocate_axis(bounds, Axis::Horizontal, top_slots))
-        .transpose()?
-        .unwrap_or([None; MAX_DASHBOARD_REGIONS]);
-    let bottom = rows[1]
-        .map(|bounds| allocate_axis(bounds, Axis::Horizontal, bottom_slots))
-        .transpose()?
-        .unwrap_or([None; MAX_DASHBOARD_REGIONS]);
-    Ok([top, bottom])
-}
-
-fn slots_group_slot(
-    key: usize,
-    weight: usize,
-    slots: [Option<LayoutSlot>; MAX_DASHBOARD_REGIONS],
-    axis: Axis,
-) -> Option<LayoutSlot> {
-    let mut minimum = DashboardMinimum::new(0, 0);
-    let mut priority = DashboardPriority::Footer;
-    let mut has_slots = false;
-    for slot in slots.into_iter().flatten() {
-        has_slots = true;
-        minimum = DashboardMinimum::new(
-            match axis {
-                Axis::Horizontal => minimum.width() + slot.minimum.width(),
-                Axis::Vertical => minimum.width().max(slot.minimum.width()),
-            },
-            match axis {
-                Axis::Horizontal => minimum.height().max(slot.minimum.height()),
-                Axis::Vertical => minimum.height() + slot.minimum.height(),
-            },
-        );
-        priority = priority.min(slot.priority);
-    }
-    has_slots.then_some(LayoutSlot {
-        key,
-        weight,
-        minimum,
-        priority,
-    })
 }
 
 fn allocate_axis(
