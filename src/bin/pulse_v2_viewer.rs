@@ -34,8 +34,8 @@ use ratatui::style::Color as RatatuiColor;
 use theme::Theme;
 
 use pulse_v2::{
-    ColorRasterFrame, FieldDimensions, NormalizedPulseInput, PulseV2Engine, PulseV2Preset,
-    PulseV2Rasterizer, SemanticColorField,
+    ColorRasterFrame, FieldDimensions, NormalizedPulseInput, PulseV2Engine, PulseV2InputTransition,
+    PulseV2Preset, PulseV2Rasterizer, SemanticColorField,
 };
 
 const FRAME_INTERVAL: Duration = Duration::from_millis(33);
@@ -49,6 +49,7 @@ const PRESETS: [PulseV2Preset; 4] = [
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Scenario {
     Calm,
+    Active,
     Busy,
     Critical,
 }
@@ -57,6 +58,7 @@ impl Scenario {
     fn label(self) -> &'static str {
         match self {
             Self::Calm => "Calm",
+            Self::Active => "Active",
             Self::Busy => "Busy",
             Self::Critical => "Critical",
         }
@@ -65,6 +67,7 @@ impl Scenario {
     fn input(self) -> NormalizedPulseInput {
         let values = match self {
             Self::Calm => (0.12, 0.16, None, 0.02, 0.10, 0.01),
+            Self::Active => (0.28, 0.32, Some(0.16), 0.16, 0.28, 0.08),
             Self::Busy => (0.40, 0.45, Some(0.30), 0.32, 0.45, 0.18),
             Self::Critical => (0.58, 0.62, Some(0.55), 0.52, 0.60, 0.35),
         };
@@ -81,7 +84,11 @@ struct ViewerState {
     reduced_motion: bool,
     paused: bool,
     elapsed: Duration,
+    transition_from: NormalizedPulseInput,
+    transition_started: Duration,
 }
+
+const TRANSITION_DURATION: Duration = Duration::from_millis(320);
 
 impl ViewerState {
     fn new() -> Self {
@@ -91,6 +98,8 @@ impl ViewerState {
             reduced_motion: false,
             paused: false,
             elapsed: Duration::ZERO,
+            transition_from: Scenario::Calm.input(),
+            transition_started: Duration::ZERO,
         }
     }
 
@@ -103,7 +112,10 @@ impl ViewerState {
     }
 
     fn set_scenario(&mut self, scenario: Scenario) {
+        let current = self.input();
         self.scenario = scenario;
+        self.transition_from = current;
+        self.transition_started = self.elapsed;
     }
 
     fn toggle_reduced_motion(&mut self) {
@@ -112,6 +124,21 @@ impl ViewerState {
 
     fn toggle_paused(&mut self) {
         self.paused = !self.paused;
+    }
+
+    fn transition_progress(self) -> f32 {
+        if self.reduced_motion {
+            return 1.0;
+        }
+        self.elapsed
+            .saturating_sub(self.transition_started)
+            .as_secs_f32()
+            / TRANSITION_DURATION.as_secs_f32()
+    }
+
+    fn input(self) -> NormalizedPulseInput {
+        self.transition_from
+            .interpolate_toward(self.scenario.input(), self.transition_progress())
     }
 }
 
@@ -179,8 +206,18 @@ fn run_viewer() -> io::Result<()> {
 fn handle_key(code: KeyCode, state: &mut ViewerState) -> bool {
     match code {
         KeyCode::Char('1') => state.set_scenario(Scenario::Calm),
-        KeyCode::Char('2') => state.set_scenario(Scenario::Busy),
-        KeyCode::Char('3') => state.set_scenario(Scenario::Critical),
+        KeyCode::Char('2') => state.set_scenario(Scenario::Active),
+        KeyCode::Char('3') => state.set_scenario(Scenario::Busy),
+        KeyCode::Char('4') => state.set_scenario(Scenario::Critical),
+        KeyCode::Char('s') | KeyCode::Char('S') => {
+            let next = match state.scenario {
+                Scenario::Calm => Scenario::Active,
+                Scenario::Active => Scenario::Busy,
+                Scenario::Busy => Scenario::Critical,
+                Scenario::Critical => Scenario::Calm,
+            };
+            state.set_scenario(next);
+        }
         KeyCode::Char('p') | KeyCode::Char('P') => state.next_preset(),
         KeyCode::Char('r') | KeyCode::Char('R') => state.toggle_reduced_motion(),
         KeyCode::Char(' ') => state.toggle_paused(),
@@ -206,9 +243,13 @@ fn draw_frame(
     )
     .map_err(|error| io::Error::other(format!("invalid viewer dimensions: {error:?}")))?;
     let frame = engine
-        .generate_with_preset(
+        .generate_with_preset_transition(
             field_dimensions,
-            state.scenario.input(),
+            PulseV2InputTransition::new(
+                state.transition_from,
+                state.scenario.input(),
+                state.transition_progress(),
+            ),
             state.preset(),
             state.elapsed,
             state.reduced_motion,
@@ -220,7 +261,7 @@ fn draw_frame(
         .map_err(|error| io::Error::other(format!("Pulse V2 rasterization failed: {error:?}")))?;
 
     let header = format!(
-        "Pulse V2 Debug Viewer\r\nPreset: {} | State: {} | Time: {:.2}s{}\r\n",
+        "Pulse V2 Organic Motion Viewer\r\nPreset: {} | State: {} | Time: {:.2}s{}\r\n",
         preset_label(state.preset()),
         state.scenario.label(),
         state.elapsed.as_secs_f32(),
@@ -335,8 +376,8 @@ mod tests {
     fn viewer_changes_scenarios_and_presets_without_rebuilding_state() {
         let mut state = ViewerState::new();
 
-        state.set_scenario(Scenario::Busy);
-        assert_eq!(state.scenario.label(), "Busy");
+        state.set_scenario(Scenario::Active);
+        assert_eq!(state.scenario.label(), "Active");
         assert_ne!(state.scenario.input(), Scenario::Calm.input());
 
         let initial = state.preset();
@@ -363,16 +404,38 @@ mod tests {
     }
 
     #[test]
+    fn scenario_changes_are_eased_from_the_current_visual_input() {
+        let mut state = ViewerState::new();
+        state.elapsed = Duration::from_millis(160);
+        state.set_scenario(Scenario::Critical);
+
+        let start = state.input();
+        state.elapsed = state.transition_started + TRANSITION_DURATION / 2;
+        let middle = state.input();
+        state.elapsed = state.transition_started + TRANSITION_DURATION;
+        let end = state.input();
+
+        assert!(middle.cpu() > start.cpu());
+        assert!(middle.cpu() < end.cpu());
+        assert_eq!(end, Scenario::Critical.input());
+    }
+
+    #[test]
     fn viewer_scenarios_and_presets_generate_without_panicking() {
         let engine = PulseV2Engine::new();
         let dimensions = FieldDimensions::new(160, 80).unwrap();
 
-        for scenario in [Scenario::Calm, Scenario::Busy, Scenario::Critical] {
+        for scenario in [
+            Scenario::Calm,
+            Scenario::Active,
+            Scenario::Busy,
+            Scenario::Critical,
+        ] {
             for preset in PRESETS {
                 let frame = engine
-                    .generate_with_preset(
+                    .generate_with_preset_transition(
                         dimensions,
-                        scenario.input(),
+                        PulseV2InputTransition::new(Scenario::Calm.input(), scenario.input(), 1.0),
                         preset,
                         Duration::from_millis(500),
                         false,

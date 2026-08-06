@@ -84,6 +84,94 @@ impl ScalarField {
         Ok(())
     }
 
+    /// Deposits bounded energy at a normalized position. This is an internal
+    /// construction primitive for the V2 organic-motion stage; it does not
+    /// expose geometry or terminal concepts.
+    pub(crate) fn deposit_normalized(
+        &mut self,
+        position: (f32, f32),
+        energy: f32,
+        radius: f32,
+    ) -> Result<(), FieldError> {
+        validate_value(energy)?;
+        if !position.0.is_finite() || !position.1.is_finite() || !radius.is_finite() {
+            return Err(FieldError::NonFiniteValue);
+        }
+        if radius < 0.0 {
+            return Err(FieldError::ValueOutOfRange);
+        }
+        if self.is_empty() {
+            return Ok(());
+        }
+
+        if !(0.0..=1.0).contains(&position.0) {
+            return Ok(());
+        }
+        let center_x = position.0 * self.width().saturating_sub(1) as f32;
+        let center_y = position.1.clamp(0.0, 1.0) * self.height().saturating_sub(1) as f32;
+        let radius = radius.max(0.25);
+        let left = (center_x - radius).floor().max(0.0) as usize;
+        let right = (center_x + radius)
+            .ceil()
+            .min(self.width().saturating_sub(1) as f32) as usize;
+        let top = (center_y - radius).floor().max(0.0) as usize;
+        let bottom = (center_y + radius)
+            .ceil()
+            .min(self.height().saturating_sub(1) as f32) as usize;
+
+        for y in top..=bottom {
+            for x in left..=right {
+                let distance = (x as f32 - center_x).hypot(y as f32 - center_y);
+                let falloff = smoothstep(1.0 - distance / radius);
+                if falloff <= 0.0 {
+                    continue;
+                }
+                let index = y * self.width() + x;
+                self.values[index] = (self.values[index] + energy * falloff * 0.46).clamp(0.0, 1.0);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Performs a small bounded diffusion pass for deposited energy. The
+    /// temporary buffer is allocated once per pass, never per sample.
+    pub(crate) fn diffuse(&mut self, amount: f32) {
+        if self.is_empty() {
+            return;
+        }
+
+        let amount = amount.clamp(0.0, 1.0);
+        let mut next = vec![0.0; self.values.len()];
+        for y in 0..self.height() {
+            for x in 0..self.width() {
+                let index = y * self.width() + x;
+                let current = self.values[index];
+                let mut weighted = current * 0.42;
+                let mut total_weight = 0.42;
+
+                for neighbor_y in y.saturating_sub(1)..=(y + 1).min(self.height() - 1) {
+                    for neighbor_x in x.saturating_sub(1)..=(x + 1).min(self.width() - 1) {
+                        if neighbor_x == x && neighbor_y == y {
+                            continue;
+                        }
+                        let weight = if neighbor_x == x || neighbor_y == y {
+                            0.10
+                        } else {
+                            0.045
+                        };
+                        weighted += self.values[neighbor_y * self.width() + neighbor_x] * weight;
+                        total_weight += weight;
+                    }
+                }
+
+                next[index] =
+                    (current * (1.0 - amount) + weighted / total_weight * amount).clamp(0.0, 1.0);
+            }
+        }
+        self.values.copy_from_slice(&next);
+    }
+
     pub fn gradient(&self, x: usize, y: usize) -> Option<FieldGradient> {
         let center = self.read(x, y)?;
         let x_gradient = axis_gradient(
@@ -123,6 +211,11 @@ fn validate_value(value: f32) -> Result<(), FieldError> {
         return Err(FieldError::ValueOutOfRange);
     }
     Ok(())
+}
+
+fn smoothstep(value: f32) -> f32 {
+    let value = value.clamp(0.0, 1.0);
+    value * value * (3.0 - 2.0 * value)
 }
 
 fn axis_gradient(

@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use super::types::{DimensionsError, MAX_FIELD_SAMPLES};
 use super::{FieldError, FlowField, NoiseField, PulseV2Preset, ScalarField};
 
@@ -34,6 +36,21 @@ impl TransportedField {
         preset: PulseV2Preset,
         reduced_motion: bool,
     ) -> Result<Self, FieldError> {
+        Self::from_fields_at_time(scalar, noise, flow, preset, Duration::ZERO, reduced_motion)
+    }
+
+    /// Applies the same local convolution as [`Self::from_fields`], then
+    /// continuously advects its sampling origin along the existing flow.
+    /// This is the field-level equivalent of V1's moving particles: no
+    /// trajectory is stored and no new structure is drawn.
+    pub fn from_fields_at_time(
+        scalar: &ScalarField,
+        noise: &NoiseField,
+        flow: &FlowField,
+        preset: PulseV2Preset,
+        elapsed: Duration,
+        reduced_motion: bool,
+    ) -> Result<Self, FieldError> {
         let dimensions = scalar.dimensions();
         if noise.dimensions() != dimensions || flow.dimensions() != dimensions {
             return Err(FieldError::DimensionsMismatch);
@@ -45,6 +62,11 @@ impl TransportedField {
             parameters.transport_steps().min(1)
         } else {
             parameters.transport_steps()
+        };
+        let elapsed_seconds = if reduced_motion {
+            0.0
+        } else {
+            elapsed.as_secs_f32().min(1_000_000.0)
         };
 
         for y in 0..dimensions.height() {
@@ -62,18 +84,32 @@ impl TransportedField {
 
                 let (normalized_x, normalized_y) = normalized_position(x, y, dimensions);
                 let radius = parameters.transport_radius() * (0.72 + local_flow.intensity() * 0.28);
-                let mut weighted_sum = source * 0.34;
-                let mut total_weight = 0.34;
+                let travel_speed = 0.012 + energy * 0.020 + local_flow.intensity() * 0.012;
+                let travel = elapsed_seconds * travel_speed;
+                let transported_origin = (
+                    normalized_x - local_flow.direction_x() * travel,
+                    normalized_y - local_flow.direction_y() * travel,
+                );
+                let advected_source =
+                    sample_normalized(noise, transported_origin.0, transported_origin.1);
+                let mut weighted_sum = source * 0.20 + advected_source * 0.28;
+                let mut total_weight = 0.48;
                 for step in 1..=steps {
                     let fraction = step as f32 / steps as f32;
                     let distance = radius * fraction;
                     let weight = 1.0 - fraction * 0.46;
                     let offset_x = local_flow.direction_x() * distance;
                     let offset_y = local_flow.direction_y() * distance;
-                    let forward =
-                        sample_normalized(noise, normalized_x + offset_x, normalized_y + offset_y);
-                    let backward =
-                        sample_normalized(noise, normalized_x - offset_x, normalized_y - offset_y);
+                    let forward = sample_normalized(
+                        noise,
+                        transported_origin.0 + offset_x,
+                        transported_origin.1 + offset_y,
+                    );
+                    let backward = sample_normalized(
+                        noise,
+                        transported_origin.0 - offset_x,
+                        transported_origin.1 - offset_y,
+                    );
                     weighted_sum += (forward + backward) * weight;
                     total_weight += weight * 2.0;
                 }
@@ -86,6 +122,64 @@ impl TransportedField {
             }
         }
 
+        Ok(transported)
+    }
+
+    /// Lightweight transport used by the organic-motion path. The motion
+    /// source has already performed the expensive V1-style advection, so the
+    /// texture only needs one local flow-guided sample here. The full bounded
+    /// convolution above remains available as the standalone transport API.
+    pub(crate) fn from_organic_motion(
+        scalar: &ScalarField,
+        noise: &NoiseField,
+        flow: &FlowField,
+        elapsed: Duration,
+        reduced_motion: bool,
+    ) -> Result<Self, FieldError> {
+        let dimensions = scalar.dimensions();
+        if noise.dimensions() != dimensions || flow.dimensions() != dimensions {
+            return Err(FieldError::DimensionsMismatch);
+        }
+
+        let mut transported = Self::try_new(dimensions)?;
+        let time = if reduced_motion {
+            0.0
+        } else {
+            elapsed.as_secs_f32().min(1_000_000.0)
+        };
+        for y in 0..dimensions.height() {
+            for x in 0..dimensions.width() {
+                let index = y * dimensions.width() + x;
+                let source = noise.read(x, y).ok_or(FieldError::OutOfBounds)?;
+                let energy = scalar.read(x, y).ok_or(FieldError::OutOfBounds)?;
+                let local_flow = flow.read(x, y).ok_or(FieldError::OutOfBounds)?;
+                if local_flow.direction_magnitude() <= f32::EPSILON {
+                    transported.values[index] = source;
+                    continue;
+                }
+
+                let position = normalized_position(x, y, dimensions);
+                let travel = time * (0.004 + energy * 0.008);
+                let origin = (
+                    position.0 - local_flow.direction_x() * travel,
+                    position.1 - local_flow.direction_y() * travel,
+                );
+                let forward = sample_normalized(
+                    noise,
+                    origin.0 + local_flow.direction_x() * 0.012,
+                    origin.1 + local_flow.direction_y() * 0.012,
+                );
+                let backward = sample_normalized(
+                    noise,
+                    origin.0 - local_flow.direction_x() * 0.012,
+                    origin.1 - local_flow.direction_y() * 0.012,
+                );
+                let guided = sample_normalized(noise, origin.0, origin.1) * 0.46
+                    + (forward + backward) * 0.27;
+                let strength = (0.28 + energy * 0.38) * if reduced_motion { 0.35 } else { 1.0 };
+                transported.values[index] = lerp(source, guided, strength).clamp(0.0, 1.0);
+            }
+        }
         Ok(transported)
     }
 

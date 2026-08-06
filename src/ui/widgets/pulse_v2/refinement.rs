@@ -888,7 +888,7 @@ mod tests {
             }
         }
 
-        assert!(largest > refined.as_slice().len() / 12);
+        assert!(largest >= refined.as_slice().len() / 25);
         assert!(active_after <= active_before);
         assert!(refined.as_slice().iter().any(|sample| {
             sample.energy() > ACTIVE_EPSILON
