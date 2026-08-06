@@ -3,7 +3,9 @@ use ratatui::{buffer::Buffer, layout::Rect, style::Style};
 use crate::theme::Theme;
 
 use super::super::{DashboardBounds, DashboardPreset, WidgetRenderModel};
-use super::{blocks, cpu::CpuCardRenderer, layout::TerminalLayout, layout::TerminalLayoutError};
+use super::{
+    blocks, cpu::CpuCardRenderer, layout::TerminalLayout, layout::TerminalLayoutError, metrics,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TerminalRenderError {
@@ -38,6 +40,15 @@ impl TerminalRenderer {
     ) -> Result<(), TerminalRenderError> {
         if model.visual().widget_id() == super::super::DashboardWidgetId::Cpu {
             return CpuCardRenderer::render(model, preset, bounds, theme, buffer);
+        }
+        if matches!(
+            model.visual().widget_id(),
+            super::super::DashboardWidgetId::Memory
+                | super::super::DashboardWidgetId::Gpu
+                | super::super::DashboardWidgetId::Network
+                | super::super::DashboardWidgetId::Storage
+        ) {
+            return metrics::render(model, preset, bounds, theme, buffer);
         }
         let layout = TerminalLayout::new(model, preset, bounds, *buffer.area())?;
         buffer.set_style(layout.area(), Style::default().bg(theme.surface));
@@ -80,8 +91,8 @@ mod tests {
 
     use super::super::super::chart::{TimeSample, TimeSeries};
     use super::super::super::metrics::{
-        CpuMetricInput, CpuMetricModel, MemoryMetricInput, MemoryMetricModel, MetricReading,
-        NetworkMetricInput, NetworkMetricModel,
+        CpuMetricInput, CpuMetricModel, GpuMetricInput, GpuMetricModel, MemoryMetricInput,
+        MemoryMetricModel, MetricReading, NetworkMetricInput, NetworkMetricModel,
     };
     use super::super::super::{
         DashboardState, DashboardWidgetId, MetricAvailability, MetricUnit, MetricValue,
@@ -136,6 +147,30 @@ mod tests {
                 MetricReading::non_negative(Some(0.0), MetricAvailability::Available).unwrap(),
                 MetricReading::normalized(Some(0.60), MetricAvailability::Available).unwrap(),
                 history(MetricUnit::Percent, &[0.40, 0.50, 0.60]),
+            )
+            .unwrap(),
+        )
+        .unwrap()
+    }
+
+    fn gpu_model() -> GpuMetricModel<8> {
+        GpuMetricModel::from_input(
+            GpuMetricInput::new(
+                MetricReading::normalized(Some(0.37), MetricAvailability::Available).unwrap(),
+                MetricReading::non_negative(
+                    Some(0.7 * 1024.0 * 1024.0 * 1024.0),
+                    MetricAvailability::Available,
+                )
+                .unwrap(),
+                MetricReading::non_negative(
+                    Some(8.0 * 1024.0 * 1024.0 * 1024.0),
+                    MetricAvailability::Available,
+                )
+                .unwrap(),
+                MetricReading::new(Some(53.0), MetricAvailability::Available).unwrap(),
+                MetricReading::non_negative(Some(1.8e9), MetricAvailability::Available).unwrap(),
+                MetricReading::non_negative(Some(120.0), MetricAvailability::Available).unwrap(),
+                history(MetricUnit::Percent, &[0.20, 0.32, 0.37]),
             )
             .unwrap(),
         )
@@ -462,7 +497,29 @@ mod tests {
                 &mut buffer,
             )
             .unwrap();
-        assert!(buffer_text(&buffer).contains('█'));
+        assert!(buffer_text(&buffer).contains("60 B"));
+        let memory_text = buffer_text(&buffer);
+        assert!(memory_text.contains("60% used"));
+        assert!(!memory_text.lines().any(|line| line.trim() == "60%"));
+
+        let gpu = WidgetRenderer::render_gpu(gpu_model(), context(DashboardPreset::Standard))
+            .unwrap()
+            .unwrap();
+        let mut gpu_buffer = Buffer::empty(Rect::new(0, 0, 48, 8));
+        TerminalRenderer::new()
+            .render(
+                gpu,
+                DashboardPreset::Standard,
+                super::super::super::DashboardBounds::new(0, 0, 48, 8).unwrap(),
+                &crate::theme::Theme::pulse(),
+                &mut gpu_buffer,
+            )
+            .unwrap();
+        let gpu_text = buffer_text(&gpu_buffer);
+        assert!(gpu_text.contains("0.7 / 8 GB"));
+        assert!(gpu_text.contains("53°C"));
+        assert!(!gpu_text.contains("678.0 MB"));
+
         let mut comparison = Buffer::empty(Rect::new(0, 0, 72, 24));
         TerminalRenderer::new()
             .render(
@@ -473,7 +530,8 @@ mod tests {
                 &mut comparison,
             )
             .unwrap();
-        assert!(buffer_text(&comparison).contains("d/u"));
+        assert!(buffer_text(&comparison).contains('↓'));
+        assert!(buffer_text(&comparison).contains('↑'));
     }
 
     #[test]
