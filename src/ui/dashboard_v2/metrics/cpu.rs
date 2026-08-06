@@ -259,7 +259,8 @@ mod tests {
             MetricReading::normalized(Some(0.45), MetricAvailability::Available).unwrap(),
             MetricReading::normalized(Some(0.15), MetricAvailability::Available).unwrap(),
             MetricReading::normalized(Some(0.40), MetricAvailability::Available).unwrap(),
-            MetricReading::non_negative(Some(3.2), MetricAvailability::Available).unwrap(),
+            MetricReading::non_negative(Some(3_200_000_000.0), MetricAvailability::Available)
+                .unwrap(),
             MetricReading::new(Some(55.0), MetricAvailability::Available).unwrap(),
             8,
             history(history_values),

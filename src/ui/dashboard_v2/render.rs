@@ -21,6 +21,7 @@ pub enum BlockId {
     Title,
     Value,
     Trend,
+    CpuContext,
     PrimarySparkline,
     SecondarySparkline,
     TertiarySparkline,
@@ -166,6 +167,27 @@ pub struct TrendBlock {
     intensity: Intensity,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CpuContextBlock {
+    metadata: BlockMetadata,
+    cores: usize,
+    frequency: Option<MetricValue>,
+}
+
+impl CpuContextBlock {
+    pub const fn metadata(self) -> BlockMetadata {
+        self.metadata
+    }
+
+    pub const fn cores(self) -> usize {
+        self.cores
+    }
+
+    pub const fn frequency(self) -> Option<MetricValue> {
+        self.frequency
+    }
+}
+
 impl TrendBlock {
     pub const fn metadata(self) -> BlockMetadata {
         self.metadata
@@ -264,6 +286,7 @@ pub enum RenderBlock {
     Title(TitleBlock),
     Value(ValueBlock),
     Trend(TrendBlock),
+    CpuContext(CpuContextBlock),
     Chart(ChartBlock),
     Indicators(IndicatorBlock),
     Status(StatusBlock),
@@ -276,6 +299,7 @@ impl RenderBlock {
             Self::Title(block) => block.metadata(),
             Self::Value(block) => block.metadata(),
             Self::Trend(block) => block.metadata(),
+            Self::CpuContext(block) => block.metadata(),
             Self::Chart(block) => block.metadata(),
             Self::Indicators(block) => block.metadata(),
             Self::Status(block) => block.metadata(),
@@ -392,11 +416,15 @@ impl WidgetRenderModel {
 
     fn allows(&self, id: BlockId) -> bool {
         match self.preset {
-            DashboardPreset::Compact => matches!(id, BlockId::Status),
-            DashboardPreset::Standard => matches!(id, BlockId::PrimarySparkline | BlockId::Status),
+            DashboardPreset::Compact => matches!(id, BlockId::CpuContext | BlockId::Status),
+            DashboardPreset::Standard => matches!(
+                id,
+                BlockId::CpuContext | BlockId::PrimarySparkline | BlockId::Status
+            ),
             DashboardPreset::Widescreen => matches!(
                 id,
-                BlockId::PrimarySparkline
+                BlockId::CpuContext
+                    | BlockId::PrimarySparkline
                     | BlockId::SecondarySparkline
                     | BlockId::Area
                     | BlockId::Segments
@@ -461,6 +489,25 @@ impl WidgetRenderModel {
                 false,
             ),
             content: ChartContent::Sparkline(sparkline),
+        }))
+    }
+
+    pub fn add_cpu_context<const HISTORY: usize>(
+        &mut self,
+        model: CpuMetricModel<HISTORY>,
+    ) -> Result<(), RenderError> {
+        self.push_optional(RenderBlock::CpuContext(CpuContextBlock {
+            metadata: self.metadata(
+                BlockId::CpuContext,
+                VisualPriority::Secondary,
+                BlockRequirement::Hideable,
+                false,
+            ),
+            cores: model.cores(),
+            // `MetricVisual::secondary` already carries the most relevant
+            // CPU context (temperature before frequency). Keep the extra
+            // context row complementary instead of repeating it.
+            frequency: model.frequency(),
         }))
     }
 
@@ -579,12 +626,15 @@ impl WidgetRenderer {
             return Ok(None);
         };
         if model.is_available() {
+            render.add_cpu_context(model)?;
             render.add_sparkline(BlockId::PrimarySparkline, model.sparkline())?;
             render.add_segments3(model.composition())?;
             render.add_peaks(model.peaks())?;
         }
         render.add_indicators()?;
-        render.add_status()?;
+        if !matches!(model.state(), WidgetState::Idle | WidgetState::Normal) {
+            render.add_status()?;
+        }
         Ok(Some(render))
     }
 
@@ -758,7 +808,8 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(compact.block_count(), 4);
-        assert!(compact.block(BlockId::Status).is_some());
+        assert!(compact.block(BlockId::CpuContext).is_some());
+        assert!(compact.block(BlockId::Status).is_none());
         assert!(standard.block(BlockId::PrimarySparkline).is_some());
         assert!(wide.block(BlockId::Segments).is_some());
         assert!(wide.block(BlockId::Indicators).is_some());

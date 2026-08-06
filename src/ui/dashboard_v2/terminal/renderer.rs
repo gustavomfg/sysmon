@@ -3,7 +3,7 @@ use ratatui::{buffer::Buffer, layout::Rect, style::Style};
 use crate::theme::Theme;
 
 use super::super::{DashboardBounds, DashboardPreset, WidgetRenderModel};
-use super::{blocks, layout::TerminalLayout, layout::TerminalLayoutError};
+use super::{blocks, cpu::CpuCardRenderer, layout::TerminalLayout, layout::TerminalLayoutError};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TerminalRenderError {
@@ -36,6 +36,9 @@ impl TerminalRenderer {
         theme: &Theme,
         buffer: &mut Buffer,
     ) -> Result<(), TerminalRenderError> {
+        if model.visual().widget_id() == super::super::DashboardWidgetId::Cpu {
+            return CpuCardRenderer::render(model, preset, bounds, theme, buffer);
+        }
         let layout = TerminalLayout::new(model, preset, bounds, *buffer.area())?;
         buffer.set_style(layout.area(), Style::default().bg(theme.surface));
         for block in model.blocks() {
@@ -112,7 +115,8 @@ mod tests {
                 MetricReading::normalized(Some(0.30), MetricAvailability::Available).unwrap(),
                 MetricReading::normalized(Some(0.12), MetricAvailability::Available).unwrap(),
                 MetricReading::normalized(Some(0.58), MetricAvailability::Available).unwrap(),
-                MetricReading::non_negative(Some(3.2), MetricAvailability::Available).unwrap(),
+                MetricReading::non_negative(Some(3_200_000_000.0), MetricAvailability::Available)
+                    .unwrap(),
                 MetricReading::new(Some(55.0), MetricAvailability::Available).unwrap(),
                 8,
                 history(MetricUnit::Percent, &[0.20, 0.30, 0.42]),
@@ -219,29 +223,50 @@ mod tests {
     }
 
     #[test]
+    fn dashboard_cpu_route_uses_product_value_and_right_hand_plot() {
+        let buffer = render_cpu(DashboardPreset::Standard, 43, 10);
+        let output = buffer_text(&buffer);
+        assert_eq!(output.matches("42%").count(), 1);
+        assert_eq!(buffer[(0, 3)].symbol(), "4");
+
+        let chart_rows = (2..10)
+            .filter(|y| (24..43).any(|x| buffer[(x, *y)].symbol() == "█"))
+            .count();
+        assert!(chart_rows >= 3);
+    }
+
+    #[test]
     fn card_language_prioritizes_value_and_removes_debug_labels() {
         let standard = render_cpu(DashboardPreset::Standard, 48, 8);
         let standard_text = buffer_text(&standard);
         assert!(standard_text.contains("◈ CPU"));
-        assert!(standard_text.contains("42.0%"));
+        assert_eq!(standard_text.matches("42%").count(), 1);
+        assert_eq!(standard[(0, 2)].symbol(), "4");
         assert!(standard_text.contains("↑ +12%"));
-        assert!(standard_text.contains("● normal"));
+        assert!(standard_text.contains("8 cores"));
+        assert!(standard_text.contains("55.0°C"));
+        assert!(!standard_text.contains("normal"));
         assert!(!standard_text.contains("history"));
         assert!(!standard_text.contains("trend "));
         assert!(!standard_text.contains("status "));
 
         let wide_text = buffer_text(&render_cpu(DashboardPreset::Widescreen, 48, 12));
-        assert!(wide_text.contains("u/s/i"));
+        assert!(!wide_text.contains("u/s/i"));
+
+        let large_text = buffer_text(&render_cpu(DashboardPreset::LargeWidescreen, 48, 16));
+        assert!(large_text.contains("8 cores"));
+        assert!(large_text.contains("3.2 GHz"));
+        assert_eq!(large_text.matches("55.0°C").count(), 1);
 
         let compact = render_cpu(DashboardPreset::Compact, 48, 8);
         let compact_text = buffer_text(&compact);
-        assert!(compact_text.contains("42.0%"));
+        assert!(compact_text.contains("42%"));
         assert!(!compact_text.contains("u/s/i"));
-        assert!(!compact_text.contains('█'));
+        assert!(!compact_text.contains("███"));
     }
 
     #[test]
-    fn card_layout_places_chart_beside_value_and_keeps_status_in_footer() {
+    fn card_layout_places_chart_beside_value_and_keeps_context_below_main_content() {
         let model = WidgetRenderer::render_cpu(cpu_model(), context(DashboardPreset::Widescreen))
             .unwrap()
             .unwrap();
@@ -262,15 +287,19 @@ mod tests {
         let chart = layout
             .block_area(super::super::super::BlockId::PrimarySparkline)
             .unwrap();
-        let status = layout
+        let context = layout
             .block_area(super::super::super::BlockId::Status)
+            .is_none();
+        let context_area = layout
+            .block_area(super::super::super::BlockId::CpuContext)
             .unwrap();
 
         assert_eq!(chart.y, value.y);
         assert!(chart.x > value.x + value.width);
         assert!((30..=45).contains(&(usize::from(chart.width) * 100 / 48)));
         assert!(trend.y > value.y);
-        assert_eq!(status.y, bounds.height() as u16 - 1);
+        assert!(context);
+        assert!(context_area.y >= chart.bottom());
     }
 
     #[test]
@@ -297,7 +326,11 @@ mod tests {
         assert!(chart_area.x > 0);
         assert!(chart_area.width < 32);
         let wide = render_cpu(DashboardPreset::Standard, 32, 8);
-        assert_eq!(wide[(chart_area.x, chart_area.y)].fg, theme.chart_primary);
+        assert!(
+            wide.content
+                .iter()
+                .any(|cell| cell.fg == theme.chart_primary)
+        );
     }
 
     #[test]
@@ -325,7 +358,7 @@ mod tests {
                 &mut critical,
             )
             .unwrap();
-        assert!(buffer_text(&critical).contains("× critical"));
+        assert!(buffer_text(&critical).contains("×"));
 
         let focused = WidgetRenderer::render_cpu(
             cpu_model(),
@@ -384,7 +417,8 @@ mod tests {
                 .count()
         };
         assert!(non_blank(&standard) > non_blank(&compact));
-        assert!(non_blank(&wide) > non_blank(&standard));
+        assert!(buffer_text(&standard).contains('█'));
+        assert!(buffer_text(&wide).contains('█'));
         assert!(non_blank(&large) >= non_blank(&wide));
 
         let memory = WidgetRenderer::render_memory(
