@@ -47,10 +47,11 @@ use crossterm::{
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use dashboard_v2::{
-    CpuLiveHistory, CpuLiveSample, CpuMetricInput, DashboardContext, DashboardPreset,
-    DashboardState, DashboardV2Content, DashboardV2Renderer, GpuMetricInput, MemoryMetricInput,
-    MetricAvailability, MetricReading, MetricUnit, NetworkMetricInput, StorageMetricInput,
-    TerminalRenderer, TimeSample, TimeSeries, WidgetContext, WidgetRenderer,
+    CpuLiveSample, CpuMetricInput, DashboardContext, DashboardPreset, DashboardState,
+    DashboardV2Content, DashboardV2Renderer, GpuMetricInput, LiveGpuSnapshot, LiveMetricsHistory,
+    LiveSnapshot, LiveStorageSnapshot, MemoryMetricInput, MetricAvailability, MetricReading,
+    MetricUnit, NetworkMetricInput, StorageMetricInput, TerminalRenderer, TimeSample, TimeSeries,
+    WidgetContext, WidgetRenderer,
 };
 use pulse_v2::NormalizedPulseInput;
 use ratatui::{
@@ -158,7 +159,7 @@ struct ViewerState {
     gpu_available: bool,
     reduced_motion: bool,
     paused: bool,
-    live_cpu: bool,
+    live_metrics: bool,
     focused_cpu: bool,
     cpu_only: bool,
     cpu_preview_size: CpuPreviewSize,
@@ -173,7 +174,7 @@ impl ViewerState {
             gpu_available: true,
             reduced_motion: false,
             paused: false,
-            live_cpu: false,
+            live_metrics: false,
             focused_cpu: false,
             cpu_only: false,
             cpu_preview_size: CpuPreviewSize::Reference,
@@ -256,7 +257,7 @@ fn run_viewer(stdout: &mut io::Stdout) -> io::Result<()> {
     let mut terminal = Terminal::new(backend)?;
     let mut state = ViewerState::new();
     let (live_snapshots, _live_collector) = spawn_live_collector();
-    let mut live_cpu = CpuLiveHistory::new();
+    let mut live_metrics = LiveMetricsHistory::new();
     let theme = Theme::pulse();
     let renderer = DashboardV2Renderer::new();
     let mut last_tick = Instant::now();
@@ -274,7 +275,7 @@ fn run_viewer(stdout: &mut io::Stdout) -> io::Result<()> {
         }
 
         for (collected_at, snapshot) in live_snapshots.try_iter() {
-            let _ = live_cpu.push(collected_at, cpu_live_sample_from_snapshot(&snapshot));
+            let _ = live_metrics.push_snapshot(collected_at, &live_snapshot_from_system(&snapshot));
         }
 
         let now = Instant::now();
@@ -286,9 +287,9 @@ fn run_viewer(stdout: &mut io::Stdout) -> io::Result<()> {
 
         terminal.draw(|frame| {
             if state.cpu_only {
-                render_cpu_preview(frame, state, &live_cpu, &theme);
+                render_cpu_preview(frame, state, &live_metrics, &theme);
             } else {
-                let content = content(state, &live_cpu);
+                let content = content(state, &live_metrics);
                 let context = context_for(frame.area());
                 if renderer
                     .render(
@@ -309,7 +310,7 @@ fn run_viewer(stdout: &mut io::Stdout) -> io::Result<()> {
                         Style::default().fg(theme.text),
                     );
                 }
-                if state.live_cpu {
+                if state.live_metrics {
                     render_live_mode_label(frame.area(), &theme, frame.buffer_mut());
                 }
             }
@@ -340,7 +341,7 @@ fn handle_key(code: KeyCode, state: &mut ViewerState) -> bool {
         KeyCode::Char('s') | KeyCode::Char('S') => state.scenario = state.scenario.next(),
         KeyCode::Char('g') | KeyCode::Char('G') => state.gpu_available = !state.gpu_available,
         KeyCode::Char('r') | KeyCode::Char('R') => state.reduced_motion = !state.reduced_motion,
-        KeyCode::Char('l') | KeyCode::Char('L') => state.live_cpu = !state.live_cpu,
+        KeyCode::Char('l') | KeyCode::Char('L') => state.live_metrics = !state.live_metrics,
         KeyCode::Char('f') | KeyCode::Char('F') => state.focused_cpu = !state.focused_cpu,
         KeyCode::Char('c') | KeyCode::Char('C') => state.cpu_only = !state.cpu_only,
         KeyCode::Char('v') | KeyCode::Char('V') => {
@@ -356,7 +357,7 @@ fn handle_key(code: KeyCode, state: &mut ViewerState) -> bool {
 fn render_cpu_preview(
     frame: &mut ratatui::Frame<'_>,
     state: ViewerState,
-    live_cpu: &CpuLiveHistory,
+    live_metrics: &LiveMetricsHistory,
     theme: &Theme,
 ) {
     let area = frame.area();
@@ -401,8 +402,8 @@ fn render_cpu_preview(
             .focused_cpu
             .then_some(dashboard_v2::DashboardWidgetId::Cpu),
     );
-    let model = if state.live_cpu {
-        compose_live_cpu(live_cpu, context)
+    let model = if state.live_metrics {
+        compose_live_cpu(live_metrics, context)
     } else {
         compose_cpu(state, context)
     };
@@ -417,12 +418,13 @@ fn render_cpu_preview(
     }
 }
 
-fn content(state: ViewerState, live_cpu: &CpuLiveHistory) -> DashboardV2Content {
-    let dashboard_state = if state.live_cpu {
-        live_cpu
-            .model()
-            .map(|model| dashboard_state_for_cpu(model.state()))
-            .unwrap_or_else(|_| state.scenario.dashboard_state())
+fn content(state: ViewerState, live_metrics: &LiveMetricsHistory) -> DashboardV2Content {
+    let live_models = state
+        .live_metrics
+        .then(|| live_metrics.models().ok())
+        .flatten();
+    let dashboard_state = if let Some(models) = live_models {
+        dashboard_state_for_models(models)
     } else {
         state.scenario.dashboard_state()
     };
@@ -432,15 +434,31 @@ fn content(state: ViewerState, live_cpu: &CpuLiveHistory) -> DashboardV2Content 
             .then_some(dashboard_v2::DashboardWidgetId::Cpu),
     );
     let primary = [
-        if state.live_cpu {
-            compose_live_cpu(live_cpu, context)
+        if let Some(models) = live_models {
+            compose_live_cpu_model(models.cpu(), context)
         } else {
             compose_cpu(state, context)
         },
-        compose_memory(state, context),
-        compose_gpu(state, context),
-        compose_network(state, context),
-        compose_storage(state, context),
+        if let Some(models) = live_models {
+            compose_live_memory(models.memory(), context)
+        } else {
+            compose_memory(state, context)
+        },
+        if let Some(models) = live_models {
+            compose_live_gpu(models.gpu(), context)
+        } else {
+            compose_gpu(state, context)
+        },
+        if let Some(models) = live_models {
+            compose_live_network(models.network(), context)
+        } else {
+            compose_network(state, context)
+        },
+        if let Some(models) = live_models {
+            compose_live_storage(models.storage(), context)
+        } else {
+            compose_storage(state, context)
+        },
     ];
     DashboardV2Content::new(
         primary,
@@ -450,20 +468,67 @@ fn content(state: ViewerState, live_cpu: &CpuLiveHistory) -> DashboardV2Content 
 }
 
 fn compose_live_cpu(
-    live_cpu: &CpuLiveHistory,
+    live_metrics: &LiveMetricsHistory,
     context: WidgetContext,
 ) -> Option<dashboard_v2::WidgetRenderModel> {
-    WidgetRenderer::render_cpu(live_cpu.model().ok()?, context)
+    compose_live_cpu_model(live_metrics.models().ok()?.cpu(), context)
+}
+
+fn compose_live_cpu_model(
+    model: dashboard_v2::CpuMetricModel<{ dashboard_v2::LIVE_METRICS_HISTORY_CAPACITY }>,
+    context: WidgetContext,
+) -> Option<dashboard_v2::WidgetRenderModel> {
+    WidgetRenderer::render_cpu(model, context).ok().flatten()
+}
+
+fn compose_live_memory(
+    model: dashboard_v2::MemoryMetricModel<{ dashboard_v2::LIVE_METRICS_HISTORY_CAPACITY }>,
+    context: WidgetContext,
+) -> Option<dashboard_v2::WidgetRenderModel> {
+    WidgetRenderer::render_memory(model, context).ok().flatten()
+}
+
+fn compose_live_gpu(
+    model: dashboard_v2::GpuMetricModel<{ dashboard_v2::LIVE_METRICS_HISTORY_CAPACITY }>,
+    context: WidgetContext,
+) -> Option<dashboard_v2::WidgetRenderModel> {
+    WidgetRenderer::render_gpu(model, context).ok().flatten()
+}
+
+fn compose_live_network(
+    model: dashboard_v2::NetworkMetricModel<{ dashboard_v2::LIVE_METRICS_HISTORY_CAPACITY }>,
+    context: WidgetContext,
+) -> Option<dashboard_v2::WidgetRenderModel> {
+    WidgetRenderer::render_network(model, context)
         .ok()
         .flatten()
 }
 
-fn dashboard_state_for_cpu(state: dashboard_v2::WidgetState) -> DashboardState {
-    match state {
-        dashboard_v2::WidgetState::Critical => DashboardState::Critical,
-        dashboard_v2::WidgetState::Warning => DashboardState::Busy,
-        dashboard_v2::WidgetState::Active => DashboardState::Active,
-        _ => DashboardState::Calm,
+fn compose_live_storage(
+    model: dashboard_v2::StorageMetricModel<{ dashboard_v2::LIVE_METRICS_HISTORY_CAPACITY }>,
+    context: WidgetContext,
+) -> Option<dashboard_v2::WidgetRenderModel> {
+    WidgetRenderer::render_storage(model, context)
+        .ok()
+        .flatten()
+}
+
+fn dashboard_state_for_models(models: dashboard_v2::LiveMetricModels) -> DashboardState {
+    let states = [
+        models.cpu().state(),
+        models.memory().state(),
+        models.gpu().state(),
+        models.network().state(),
+        models.storage().state(),
+    ];
+    if states.contains(&dashboard_v2::WidgetState::Critical) {
+        DashboardState::Critical
+    } else if states.contains(&dashboard_v2::WidgetState::Warning) {
+        DashboardState::Busy
+    } else if states.contains(&dashboard_v2::WidgetState::Active) {
+        DashboardState::Active
+    } else {
+        DashboardState::Calm
     }
 }
 
@@ -474,6 +539,56 @@ fn cpu_live_sample_from_snapshot(snapshot: &SystemInfo) -> CpuLiveSample {
         temperature_celsius: valid_non_negative(snapshot.cpu_temperature_celsius),
         cores: snapshot.cpu_cores,
     }
+}
+
+fn live_snapshot_from_system(snapshot: &SystemInfo) -> LiveSnapshot {
+    let gpu = snapshot.gpus.first().map(|gpu| LiveGpuSnapshot {
+        utilization_percent: gpu
+            .usage_percent
+            .or_else(|| parse_percent(&gpu.usage))
+            .and_then(valid_percent),
+        vram_used_bytes: valid_non_negative(gpu.vram_used_bytes),
+        vram_total_bytes: valid_non_negative(gpu.vram_total_bytes),
+        temperature_celsius: valid_non_negative(gpu.temperature_celsius),
+        frequency_hz: valid_non_negative(gpu.frequency_hz),
+        power_watts: valid_non_negative(gpu.power_watts),
+    });
+    let storage = snapshot.disks.first().map(|disk| LiveStorageSnapshot {
+        used_bytes: valid_non_negative(Some(
+            (disk.total_space - disk.available_space).max(0.0) * GIBIBYTE,
+        )),
+        total_bytes: valid_non_negative(Some(disk.total_space.max(0.0) * GIBIBYTE)),
+        read_bytes_per_sec: valid_non_negative(disk.read_bytes_per_sec),
+        write_bytes_per_sec: valid_non_negative(disk.written_bytes_per_sec),
+    });
+    let (download, upload) = snapshot
+        .networks
+        .iter()
+        .fold((0.0, 0.0), |(down, up), network| {
+            (
+                down + network.received_per_sec * 1_000_000.0,
+                up + network.transmitted_per_sec * 1_000_000.0,
+            )
+        });
+    LiveSnapshot {
+        cpu: cpu_live_sample_from_snapshot(snapshot),
+        memory_used_bytes: valid_non_negative(Some(snapshot.used_ram * GIBIBYTE)),
+        memory_available_bytes: valid_non_negative(Some(
+            (snapshot.total_ram - snapshot.used_ram).max(0.0) * GIBIBYTE,
+        )),
+        memory_total_bytes: valid_non_negative(Some(snapshot.total_ram * GIBIBYTE)),
+        memory_swap_bytes: valid_non_negative(Some(snapshot.used_swap * GIBIBYTE)),
+        gpu,
+        download_bytes_per_sec: Some(download),
+        upload_bytes_per_sec: Some(upload),
+        storage,
+    }
+}
+
+const GIBIBYTE: f64 = 1024.0 * 1024.0 * 1024.0;
+
+fn parse_percent(value: &str) -> Option<f64> {
+    value.trim_end_matches('%').trim().parse::<f64>().ok()
 }
 
 fn valid_percent(value: f64) -> Option<f64> {
@@ -488,7 +603,7 @@ fn valid_non_negative(value: Option<f64>) -> Option<f64> {
 }
 
 fn render_live_mode_label(area: Rect, theme: &Theme, buffer: &mut ratatui::buffer::Buffer) {
-    const LABEL: &str = "· LIVE CPU";
+    const LABEL: &str = "· LIVE METRICS";
     if area.width >= 24 {
         buffer.set_string(
             area.x.saturating_add(12),
@@ -737,15 +852,15 @@ mod tests {
     #[test]
     fn viewer_fixture_covers_all_states_and_preserves_gpu_absence() {
         let mut state = ViewerState::new();
-        let live_cpu = CpuLiveHistory::new();
+        let live_metrics = LiveMetricsHistory::new();
         for scenario in Scenario::ALL {
             state.scenario = scenario;
-            let content = content(state, &live_cpu);
+            let content = content(state, &live_metrics);
             assert_eq!(content.state(), scenario.dashboard_state());
             assert!(content.primary().iter().all(Option::is_some));
         }
         state.gpu_available = false;
-        let unavailable = content(state, &live_cpu).primary()[2].unwrap();
+        let unavailable = content(state, &live_metrics).primary()[2].unwrap();
         assert_eq!(unavailable.state(), dashboard_v2::WidgetState::Unavailable);
     }
 
@@ -757,9 +872,9 @@ mod tests {
         state.scenario = state.scenario.next();
         state.reduced_motion = true;
         state.paused = true;
-        let live_cpu = CpuLiveHistory::new();
-        let first = content(state, &live_cpu);
-        let second = content(state, &live_cpu);
+        let live_metrics = LiveMetricsHistory::new();
+        let first = content(state, &live_metrics);
+        let second = content(state, &live_metrics);
         assert_eq!(first, second);
         assert!(state.reduced_motion);
         assert!(state.paused);
@@ -773,9 +888,9 @@ mod tests {
         handle_key(KeyCode::Char('v'), &mut state);
         assert!(state.cpu_only);
         assert_eq!(state.cpu_preview_size.dimensions(), (50, 14));
-        let live_cpu = CpuLiveHistory::new();
-        let first = content(state, &live_cpu);
-        let second = content(state, &live_cpu);
+        let live_metrics = LiveMetricsHistory::new();
+        let first = content(state, &live_metrics);
+        let second = content(state, &live_metrics);
         assert_eq!(first, second);
     }
 
@@ -801,18 +916,22 @@ mod tests {
             gpus: Vec::new(),
             networks: Vec::new(),
         };
-        let mut live_cpu = CpuLiveHistory::new();
+        let mut live_metrics = LiveMetricsHistory::new();
         let collected_at = Instant::now();
-        live_cpu
-            .push(collected_at, cpu_live_sample_from_snapshot(&snapshot))
+        live_metrics
+            .push_snapshot(collected_at, &live_snapshot_from_system(&snapshot))
             .unwrap();
 
         let mut state = ViewerState::new();
-        state.live_cpu = true;
-        let content = content(state, &live_cpu);
+        state.live_metrics = true;
+        let content = content(state, &live_metrics);
         let cpu = content.primary()[0].unwrap();
         assert_eq!(cpu.visual().primary().unwrap().value(), 0.635);
-        assert_eq!(live_cpu.latest().cores, 12);
+        assert_eq!(live_metrics.models().unwrap().cpu().cores(), 12);
         assert!(content.primary()[1].is_some());
+        assert_eq!(
+            content.primary()[2].unwrap().state(),
+            dashboard_v2::WidgetState::Unavailable
+        );
     }
 }
