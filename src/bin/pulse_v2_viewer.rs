@@ -261,7 +261,7 @@ fn draw_frame(
         .map_err(|error| io::Error::other(format!("Pulse V2 rasterization failed: {error:?}")))?;
 
     let header = format!(
-        "Pulse V2 Debug Viewer\r\nPreset: {} | State: {} | Time: {:.2}s{}\r\n",
+        "Pulse V2 Organic Motion Viewer\r\nPreset: {} | State: {} | Time: {:.2}s{}\r\n",
         preset_label(state.preset()),
         state.scenario.label(),
         state.elapsed.as_secs_f32(),

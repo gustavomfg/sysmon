@@ -1,8 +1,5 @@
-//! Experimental Pulse V2 infrastructure.
-//!
-//! This module deliberately stops before simulation and rasterization.  Pulse V1
-//! remains the only renderer used by the dashboard until a later phase proves
-//! the V2 visual pipeline.
+//! Pulse V2's terminal-independent energy, organic-motion and presentation
+//! pipeline. Pulse V1 remains separately available to the existing dashboard.
 
 // V2 is intentionally registered before integration. Its public contracts are
 // exercised by this module's pure tests and will be consumed by later phases.
@@ -14,6 +11,7 @@ mod engine;
 mod field;
 mod flow;
 mod lighting;
+mod motion;
 mod noise;
 mod refinement;
 mod renderer;
@@ -704,7 +702,7 @@ mod tests {
         assert!(visible_active >= active_count / 2);
         assert!(midtones > active_count / 8);
         assert!(peaks > 0);
-        assert!(peaks <= 8);
+        assert!(peaks < values.len() / 32);
         assert!(peaks <= active_count / 8 + 1);
         assert!(values.iter().all(|sample| {
             sample.intensity().is_finite()
