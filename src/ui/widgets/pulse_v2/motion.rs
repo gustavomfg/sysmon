@@ -5,6 +5,9 @@ use super::{FieldDimensions, FieldError, NormalizedPulseInput, PulseV2Preset, Sc
 const TAU: f32 = std::f32::consts::TAU;
 const FLOW_LOBES: usize = 6;
 const ELASTIC_NODES: usize = 4;
+const PHYSIOLOGY_WIDTH: usize = 10;
+const PHYSIOLOGY_HEIGHT: usize = 6;
+const PHYSIOLOGY_CELLS: usize = PHYSIOLOGY_WIDTH * PHYSIOLOGY_HEIGHT;
 
 #[derive(Debug, Clone, Copy)]
 struct MotionParameters {
@@ -112,6 +115,172 @@ struct ElasticInfluence {
     recovery: f32,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+struct PhysiologyCell {
+    tension: f32,
+    contraction: f32,
+    recovery: f32,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct PhysiologyInfluence {
+    tension: f32,
+    contraction: f32,
+    recovery: f32,
+    release: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct PhysiologyGrid {
+    cells: [PhysiologyCell; PHYSIOLOGY_CELLS],
+}
+
+impl PhysiologyGrid {
+    fn new(
+        core: MotionCore,
+        input: NormalizedPulseInput,
+        density: f32,
+        pressure: f32,
+        elapsed_seconds: f32,
+        reduced_motion: bool,
+        aspect: f32,
+    ) -> Self {
+        let cells = std::array::from_fn(|index| {
+            let x = index % PHYSIOLOGY_WIDTH;
+            let y = index / PHYSIOLOGY_WIDTH;
+            let position = (
+                x as f32 / (PHYSIOLOGY_WIDTH - 1) as f32,
+                y as f32 / (PHYSIOLOGY_HEIGHT - 1) as f32,
+            );
+            let distance =
+                (position.0 - core.position.0).hypot((position.1 - core.position.1) * aspect);
+            let proximity =
+                smoothstep(1.0 - distance / (core.radius * (6.0 + core.breath * 0.5)).max(0.001));
+            let activity = (0.20
+                + density * 0.22
+                + pressure * 0.24
+                + input.load() * 0.13
+                + input.cpu() * 0.06
+                + input.memory() * 0.06
+                + input.gpu().unwrap_or(0.0) * 0.05
+                + proximity * 0.18)
+                .clamp(0.0, 1.0);
+            let phase = hash01(index * 197 + 43) * TAU;
+            let current = if reduced_motion {
+                0.5
+            } else {
+                temporal_noise(elapsed_seconds, phase, 0.105, index as u32 + 101)
+            };
+            let previous = if reduced_motion {
+                0.5
+            } else {
+                temporal_noise(elapsed_seconds - 0.58, phase, 0.105, index as u32 + 101)
+            };
+            let tension = (activity * 0.54 + current * 0.30 + previous * 0.16).clamp(0.0, 1.0);
+            let contraction = smoothstep((tension - 0.38) / 0.50).clamp(0.0, 1.0);
+            let recovery = ((1.0 - current) * 0.44
+                + smoothstep((previous - current + 0.02) / 0.30) * 0.20)
+                .clamp(0.0, 1.0);
+            PhysiologyCell {
+                tension,
+                contraction,
+                recovery,
+            }
+        });
+        Self { cells }
+    }
+
+    fn relax(&mut self) {
+        for cell in &mut self.cells {
+            let release = smoothstep((cell.tension - 0.56) / 0.28) * (1.0 - cell.recovery * 0.55);
+            let tension_loss = 0.004 + cell.recovery * 0.006 + release * 0.004;
+            cell.tension = (cell.tension * (1.0 - tension_loss)).clamp(0.0, 1.0);
+            cell.recovery = (cell.recovery + 0.003 + release * 0.012).clamp(0.0, 1.0);
+            cell.contraction = (cell.contraction * 0.988 + cell.tension * 0.012
+                - cell.recovery * 0.010)
+                .clamp(0.0, 1.0);
+        }
+    }
+
+    fn stimulate(&mut self, position: (f32, f32), drive: f32) -> PhysiologyInfluence {
+        let center_x =
+            (position.0.clamp(0.0, 1.0) * (PHYSIOLOGY_WIDTH - 1) as f32).round() as isize;
+        let center_y =
+            (position.1.clamp(0.0, 1.0) * (PHYSIOLOGY_HEIGHT - 1) as f32).round() as isize;
+        let drive = drive.clamp(0.0, 1.0);
+        let neighbors = [
+            (0_isize, 0_isize, 1.0_f32),
+            (-1, 0, 0.24),
+            (1, 0, 0.24),
+            (0, -1, 0.18),
+            (0, 1, 0.18),
+        ];
+
+        for (offset_x, offset_y, weight) in neighbors {
+            let x = center_x + offset_x;
+            let y = center_y + offset_y;
+            if x < 0 || y < 0 || x >= PHYSIOLOGY_WIDTH as isize || y >= PHYSIOLOGY_HEIGHT as isize {
+                continue;
+            }
+            let index = y as usize * PHYSIOLOGY_WIDTH + x as usize;
+            let cell = &mut self.cells[index];
+            let recovery_gate = 1.0 - cell.recovery * 0.48;
+            let local_drive = drive * weight;
+            cell.tension = (cell.tension + local_drive * 0.024 * recovery_gate
+                - cell.recovery * 0.004)
+                .clamp(0.0, 1.0);
+            cell.contraction =
+                (cell.contraction + local_drive * 0.018 * recovery_gate + cell.tension * 0.004
+                    - cell.recovery * 0.012)
+                    .clamp(0.0, 1.0);
+            let release = smoothstep((cell.tension - 0.56) / 0.28) * (1.0 - cell.recovery * 0.55);
+            cell.recovery =
+                (cell.recovery + (1.0 - drive) * 0.002 + release * 0.010).clamp(0.0, 1.0);
+        }
+
+        self.influence(center_x, center_y)
+    }
+
+    fn influence(&self, center_x: isize, center_y: isize) -> PhysiologyInfluence {
+        let neighbors = [
+            (0_isize, 0_isize, 1.0_f32),
+            (-1, 0, 0.24),
+            (1, 0, 0.24),
+            (0, -1, 0.18),
+            (0, 1, 0.18),
+        ];
+        let mut total = 0.0;
+        let mut tension = 0.0;
+        let mut contraction = 0.0;
+        let mut recovery = 0.0;
+        for (offset_x, offset_y, weight) in neighbors {
+            let x = center_x + offset_x;
+            let y = center_y + offset_y;
+            if x < 0 || y < 0 || x >= PHYSIOLOGY_WIDTH as isize || y >= PHYSIOLOGY_HEIGHT as isize {
+                continue;
+            }
+            let cell = self.cells[y as usize * PHYSIOLOGY_WIDTH + x as usize];
+            total += weight;
+            tension += cell.tension * weight;
+            contraction += cell.contraction * weight;
+            recovery += cell.recovery * weight;
+        }
+        if total <= f32::EPSILON {
+            return PhysiologyInfluence::default();
+        }
+        let inverse = 1.0 / total;
+        let tension = (tension * inverse).clamp(0.0, 1.0);
+        let recovery = (recovery * inverse).clamp(0.0, 1.0);
+        PhysiologyInfluence {
+            tension,
+            contraction: (contraction * inverse * (1.0 - recovery * 0.38)).clamp(0.0, 1.0),
+            recovery,
+            release: (smoothstep((tension - 0.56) / 0.28) * (1.0 - recovery * 0.55))
+                .clamp(0.0, 1.0),
+        }
+    }
+}
+
 /// V1's organic motion model expressed as a V2 density source.
 ///
 /// The model deliberately stops at normalized positions, velocities and
@@ -130,6 +299,7 @@ pub(crate) struct OrganicMotion {
     core: MotionCore,
     lobes: [MotionLobe; FLOW_LOBES],
     elasticity: [ElasticNode; ELASTIC_NODES],
+    physiology: PhysiologyGrid,
     network_bias: f32,
     reduced_motion: bool,
 }
@@ -248,6 +418,15 @@ impl OrganicMotion {
                 recovery,
             }
         });
+        let physiology = PhysiologyGrid::new(
+            core,
+            input,
+            density,
+            pressure,
+            elapsed_seconds,
+            reduced_motion,
+            aspect,
+        );
 
         Self {
             input,
@@ -261,6 +440,7 @@ impl OrganicMotion {
             core,
             lobes,
             elasticity,
+            physiology,
             network_bias: (input.network() - 0.25).clamp(-0.25, 0.75),
             reduced_motion,
         }
@@ -274,6 +454,8 @@ impl OrganicMotion {
         if field.is_empty() {
             return Ok(());
         }
+        let mut physiology = self.physiology;
+        physiology.relax();
         let parameters = parameters(preset);
         let particle_count = ((parameters.particles as f32
             * (0.72 + self.density * 0.28)
@@ -314,8 +496,20 @@ impl OrganicMotion {
                         self.convergence(position, particle.direction);
                     let existing_energy = sample_scalar(field, position);
                     let elastic = self.elastic_influence(position, existing_energy);
-                    compression = (compression + elastic.contraction * 0.14).clamp(0.0, 1.0);
-                    reconnection = (reconnection + elastic.release * 0.16).clamp(0.0, 1.0);
+                    let physiological_drive = (0.18
+                        + existing_energy * 2.40
+                        + compression * 0.52
+                        + self.density * 0.16
+                        + reconnection * 0.12)
+                        .clamp(0.0, 1.0);
+                    let physiological = physiology.stimulate(position, physiological_drive);
+                    compression = (compression
+                        + elastic.contraction * 0.14
+                        + physiological.contraction * 0.08)
+                        .clamp(0.0, 1.0);
+                    reconnection =
+                        (reconnection + elastic.release * 0.16 + physiological.release * 0.10)
+                            .clamp(0.0, 1.0);
                     let support = self.support_weight(position);
                     let local_rhythm = if self.reduced_motion {
                         0.79
@@ -342,13 +536,17 @@ impl OrganicMotion {
                             * (1.0
                                 + elastic.tension * 0.045
                                 + elastic.release * 0.10
-                                + elastic.stored_energy * elastic.tension * 0.035);
+                                + elastic.stored_energy * elastic.tension * 0.035
+                                + physiological.tension * 0.025
+                                + physiological.release * 0.06);
                     let radius = (parameters.splat_radius
                         + particle.depth * 0.16
                         + compression * 0.52
                         + support * 0.12
                         + elastic.contraction * 0.11
                         - elastic.release * 0.035
+                        + physiological.contraction * 0.075
+                        - physiological.recovery * 0.018
                         + if particle.edge { 0.42 } else { 0.0 })
                         * self.radius_variation(particle, progress)
                         * (0.98 + elastic.recovery * 0.025);
@@ -358,6 +556,7 @@ impl OrganicMotion {
                         particle.layer,
                         particle.depth,
                         elastic,
+                        physiological,
                     );
                     let projected_end = self.project_compression(
                         next_position,
@@ -365,6 +564,7 @@ impl OrganicMotion {
                         particle.layer,
                         particle.depth,
                         elastic,
+                        physiological,
                     );
                     self.deposit_segment(field, projected_start, projected_end, energy, radius)?;
                     segment_start = next_position;
@@ -655,6 +855,7 @@ impl OrganicMotion {
         layer: usize,
         depth: f32,
         elastic: ElasticInfluence,
+        physiology: PhysiologyInfluence,
     ) -> (f32, f32) {
         let center = (
             (self.core.position.0 + 0.026 + self.network_bias * 0.014).clamp(0.34, 0.68),
@@ -690,10 +891,11 @@ impl OrganicMotion {
         let fusion = 1.0 - smoothstep(((position.0 - center.0).abs() / fusion_half_width).max(0.0));
         let fused_center = center.1 + strand * 0.008;
         y += (fused_center - y) * fusion * 0.46;
-        let local_contraction = elastic.contraction;
+        let local_contraction = (elastic.contraction * 0.82 + physiology.contraction * 0.18)
+            * (1.0 - physiology.recovery * 0.24);
         let local_center = center.1 + (elastic.center.1 - center.1) * 0.24;
         y = local_center + (y - local_center) * (1.0 - local_contraction * 0.16);
-        let release = elastic.release;
+        let release = elastic.release * 0.72 + physiology.release * 0.28;
         let x = position.0
             + if position.0 > center.0 {
                 release * (0.006 + outgoing * 0.008)
@@ -912,6 +1114,51 @@ mod tests {
             assert!((before.contraction - after.contraction).abs() < 0.25);
             assert!((before.release - after.release).abs() < 0.30);
         }
+    }
+
+    #[test]
+    fn physiology_memory_propagates_locally_and_recovers() {
+        let mut grid = PhysiologyGrid {
+            cells: [PhysiologyCell::default(); PHYSIOLOGY_CELLS],
+        };
+        let influence = grid.stimulate((0.5, 0.5), 0.95);
+        let changed = grid
+            .cells
+            .iter()
+            .filter(|cell| cell.tension > 0.0 || cell.contraction > 0.0)
+            .count();
+
+        assert!(changed >= 3);
+        assert!(changed <= 5);
+        assert!(influence.tension > 0.0);
+        assert!(influence.contraction > 0.0);
+
+        let mut recovering = PhysiologyGrid {
+            cells: [PhysiologyCell {
+                tension: 0.90,
+                contraction: 0.80,
+                recovery: 0.70,
+            }; PHYSIOLOGY_CELLS],
+        };
+        recovering.relax();
+        assert!(recovering.cells[0].tension < 0.90);
+        assert!(recovering.cells[0].recovery > 0.70);
+        assert_eq!(
+            OrganicMotion::new(
+                FieldDimensions::new(96, 48).unwrap(),
+                input(),
+                Duration::ZERO,
+                true,
+            )
+            .physiology,
+            OrganicMotion::new(
+                FieldDimensions::new(96, 48).unwrap(),
+                input(),
+                Duration::from_secs(30),
+                true,
+            )
+            .physiology
+        );
     }
 
     #[test]
