@@ -227,12 +227,22 @@ mod tests {
         let buffer = render_cpu(DashboardPreset::Standard, 43, 10);
         let output = buffer_text(&buffer);
         assert_eq!(output.matches("42%").count(), 1);
-        assert_eq!(buffer[(0, 3)].symbol(), "4");
+        assert_eq!(buffer[(0, 4)].symbol(), "4");
 
-        let chart_rows = (2..10)
-            .filter(|y| (24..43).any(|x| buffer[(x, *y)].symbol() == "█"))
-            .count();
-        assert!(chart_rows >= 3);
+        let mut chart_cells = 0;
+        for y in 2..10 {
+            for x in 28..43 {
+                if buffer[(x, y)]
+                    .symbol()
+                    .chars()
+                    .next()
+                    .is_some_and(|character| ('\u{2800}'..='\u{28ff}').contains(&character))
+                {
+                    chart_cells += 1;
+                }
+            }
+        }
+        assert!(chart_cells >= 5);
     }
 
     #[test]
@@ -241,7 +251,7 @@ mod tests {
         let standard_text = buffer_text(&standard);
         assert!(standard_text.contains("◈ CPU"));
         assert_eq!(standard_text.matches("42%").count(), 1);
-        assert_eq!(standard[(0, 2)].symbol(), "4");
+        assert_eq!(standard[(0, 3)].symbol(), "4");
         assert!(standard_text.contains("↑ +12%"));
         assert!(standard_text.contains("8 cores"));
         assert!(standard_text.contains("55.0°C"));
@@ -417,8 +427,16 @@ mod tests {
                 .count()
         };
         assert!(non_blank(&standard) > non_blank(&compact));
-        assert!(buffer_text(&standard).contains('█'));
-        assert!(buffer_text(&wide).contains('█'));
+        let contains_braille = |buffer: &Buffer| {
+            buffer.content.iter().any(|cell| {
+                cell.symbol()
+                    .chars()
+                    .next()
+                    .is_some_and(|character| ('\u{2800}'..='\u{28ff}').contains(&character))
+            })
+        };
+        assert!(contains_braille(&standard));
+        assert!(contains_braille(&wide));
         assert!(non_blank(&large) >= non_blank(&wide));
 
         let memory = WidgetRenderer::render_memory(
