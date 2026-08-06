@@ -4,6 +4,7 @@ use super::{FieldDimensions, FieldError, NormalizedPulseInput, PulseV2Preset, Sc
 
 const TAU: f32 = std::f32::consts::TAU;
 const FLOW_LOBES: usize = 6;
+const ELASTIC_NODES: usize = 4;
 
 #[derive(Debug, Clone, Copy)]
 struct MotionParameters {
@@ -89,6 +90,28 @@ struct MotionParticle {
     edge: bool,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct ElasticNode {
+    center: (f32, f32),
+    radius: f32,
+    phase: f32,
+    stored_energy: f32,
+    tension: f32,
+    contraction: f32,
+    release: f32,
+    recovery: f32,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct ElasticInfluence {
+    center: (f32, f32),
+    stored_energy: f32,
+    tension: f32,
+    contraction: f32,
+    release: f32,
+    recovery: f32,
+}
+
 /// V1's organic motion model expressed as a V2 density source.
 ///
 /// The model deliberately stops at normalized positions, velocities and
@@ -106,6 +129,7 @@ pub(crate) struct OrganicMotion {
     speed: f32,
     core: MotionCore,
     lobes: [MotionLobe; FLOW_LOBES],
+    elasticity: [ElasticNode; ELASTIC_NODES],
     network_bias: f32,
     reduced_motion: bool,
 }
@@ -176,6 +200,55 @@ impl OrganicMotion {
             }
         });
 
+        let elastic_offsets = [
+            (-0.17, -0.10, 0.115, 0.0),
+            (-0.06, 0.115, 0.105, 1.7),
+            (0.08, -0.075, 0.100, 3.25),
+            (0.18, 0.095, 0.115, 4.8),
+        ];
+        let base_activity = (0.34
+            + pressure * 0.34
+            + density * 0.20
+            + input.load() * 0.12
+            + input.volatility() * 0.10)
+            .clamp(0.0, 1.0);
+        let elasticity = std::array::from_fn(|index| {
+            let (offset_x, offset_y, radius, phase) = elastic_offsets[index];
+            let variation = 0.86 + hash01(index * 233 + 71) * 0.24;
+            let center = (
+                (core.position.0 + offset_x * (0.90 + input.memory() * 0.18)).clamp(0.20, 0.80),
+                (core.position.1 + offset_y * (0.88 + pressure * 0.16)).clamp(0.18, 0.82),
+            );
+            let current = if reduced_motion {
+                0.52
+            } else {
+                temporal_noise(elapsed_seconds, phase, 0.18, index as u32 + 17)
+            };
+            let previous = if reduced_motion {
+                0.52
+            } else {
+                temporal_noise(elapsed_seconds - 0.72, phase, 0.18, index as u32 + 17)
+            };
+            let drive = (0.40 + current * 0.60) * variation;
+            let stored = (0.40 + previous * 0.60) * variation;
+            let tension = (base_activity * 0.46 + drive * 0.54).clamp(0.0, 1.0);
+            let contraction = smoothstep((tension - 0.40) / 0.48).clamp(0.0, 1.0);
+            let release = (smoothstep((stored - drive + 0.035) / 0.22)
+                * smoothstep((stored - 0.42) / 0.42))
+            .clamp(0.0, 1.0);
+            let recovery = ((1.0 - current) * 0.62 + release * 0.38).clamp(0.0, 1.0);
+            ElasticNode {
+                center,
+                radius,
+                phase,
+                stored_energy: stored.clamp(0.0, 1.0),
+                tension,
+                contraction,
+                release,
+                recovery,
+            }
+        });
+
         Self {
             input,
             aspect,
@@ -187,6 +260,7 @@ impl OrganicMotion {
             speed,
             core,
             lobes,
+            elasticity,
             network_bias: (input.network() - 0.25).clamp(-0.25, 0.75),
             reduced_motion,
         }
@@ -236,8 +310,12 @@ impl OrganicMotion {
                 if step % parameters.splat_stride == 0 || step + 1 == parameters.advection_steps {
                     let progress =
                         step as f32 / parameters.advection_steps.saturating_sub(1).max(1) as f32;
-                    let (_, compression, reconnection) =
+                    let (_, mut compression, mut reconnection) =
                         self.convergence(position, particle.direction);
+                    let existing_energy = sample_scalar(field, position);
+                    let elastic = self.elastic_influence(position, existing_energy);
+                    compression = (compression + elastic.contraction * 0.14).clamp(0.0, 1.0);
+                    reconnection = (reconnection + elastic.release * 0.16).clamp(0.0, 1.0);
                     let support = self.support_weight(position);
                     let local_rhythm = if self.reduced_motion {
                         0.79
@@ -260,24 +338,33 @@ impl OrganicMotion {
                             * presence
                             * depth_presence
                             * (0.72 + support * 0.38)
-                            * edge_boost;
+                            * edge_boost
+                            * (1.0
+                                + elastic.tension * 0.045
+                                + elastic.release * 0.10
+                                + elastic.stored_energy * elastic.tension * 0.035);
                     let radius = (parameters.splat_radius
                         + particle.depth * 0.16
                         + compression * 0.52
                         + support * 0.12
+                        + elastic.contraction * 0.11
+                        - elastic.release * 0.035
                         + if particle.edge { 0.42 } else { 0.0 })
-                        * self.radius_variation(particle, progress);
+                        * self.radius_variation(particle, progress)
+                        * (0.98 + elastic.recovery * 0.025);
                     let projected_start = self.project_compression(
                         segment_start,
                         particle.phase,
                         particle.layer,
                         particle.depth,
+                        elastic,
                     );
                     let projected_end = self.project_compression(
                         next_position,
                         particle.phase,
                         particle.layer,
                         particle.depth,
+                        elastic,
                     );
                     self.deposit_segment(field, projected_start, projected_end, energy, radius)?;
                     segment_start = next_position;
@@ -482,6 +569,7 @@ impl OrganicMotion {
             0.0
         };
         vx += edge_force * 0.42;
+
         let length = vx.hypot(vy).max(0.001);
         (vx / length, vy / length)
     }
@@ -517,12 +605,56 @@ impl OrganicMotion {
         (proximity, compression, reconnection)
     }
 
+    fn elastic_influence(self, position: (f32, f32), loading: f32) -> ElasticInfluence {
+        let mut total_weight = 0.0;
+        let mut center = (0.0, 0.0);
+        let mut stored_energy = 0.0;
+        let mut tension = 0.0;
+        let mut contraction = 0.0;
+        let mut release = 0.0;
+        let mut recovery = 0.0;
+
+        for node in self.elasticity {
+            let distance =
+                (position.0 - node.center.0).hypot((position.1 - node.center.1) * self.aspect);
+            let radius = node.radius * (1.0 + self.core.breath * 0.12);
+            let weight = smoothstep(1.0 - distance / (radius * 1.85).max(0.001));
+            if weight <= 0.0 {
+                continue;
+            }
+            total_weight += weight;
+            center.0 += node.center.0 * weight;
+            center.1 += node.center.1 * weight;
+            stored_energy += node.stored_energy * weight;
+            tension += node.tension * weight;
+            contraction += node.contraction * weight;
+            release += node.release * weight;
+            recovery += node.recovery * weight;
+        }
+
+        if total_weight <= f32::EPSILON {
+            return ElasticInfluence::default();
+        }
+
+        let inverse = 1.0 / total_weight;
+        let activation = 0.58 + loading.clamp(0.0, 1.0) * 0.42;
+        ElasticInfluence {
+            center: (center.0 * inverse, center.1 * inverse),
+            stored_energy: (stored_energy * inverse * activation).clamp(0.0, 1.0),
+            tension: (tension * inverse * activation).clamp(0.0, 1.0),
+            contraction: (contraction * inverse * activation).clamp(0.0, 1.0),
+            release: (release * inverse * (0.72 + loading.clamp(0.0, 1.0) * 0.28)).clamp(0.0, 1.0),
+            recovery: (recovery * inverse).clamp(0.0, 1.0),
+        }
+    }
+
     fn project_compression(
         self,
         position: (f32, f32),
         phase: f32,
         layer: usize,
         depth: f32,
+        elastic: ElasticInfluence,
     ) -> (f32, f32) {
         let center = (
             (self.core.position.0 + 0.026 + self.network_bias * 0.014).clamp(0.34, 0.68),
@@ -558,7 +690,17 @@ impl OrganicMotion {
         let fusion = 1.0 - smoothstep(((position.0 - center.0).abs() / fusion_half_width).max(0.0));
         let fused_center = center.1 + strand * 0.008;
         y += (fused_center - y) * fusion * 0.46;
-        (position.0, y.clamp(-0.06, 1.06))
+        let local_contraction = elastic.contraction;
+        let local_center = center.1 + (elastic.center.1 - center.1) * 0.24;
+        y = local_center + (y - local_center) * (1.0 - local_contraction * 0.16);
+        let release = elastic.release;
+        let x = position.0
+            + if position.0 > center.0 {
+                release * (0.006 + outgoing * 0.008)
+            } else {
+                0.0
+            };
+        (x, y.clamp(-0.06, 1.06))
     }
 
     fn support_weight(self, position: (f32, f32)) -> f32 {
@@ -601,6 +743,15 @@ impl OrganicMotion {
         };
         (class_radius * variation).clamp(0.68, 1.18)
     }
+}
+
+fn sample_scalar(field: &ScalarField, position: (f32, f32)) -> f32 {
+    if field.is_empty() || !(0.0..=1.0).contains(&position.0) {
+        return 0.0;
+    }
+    let x = (position.0 * field.width().saturating_sub(1) as f32).round() as usize;
+    let y = (position.1.clamp(0.0, 1.0) * field.height().saturating_sub(1) as f32).round() as usize;
+    field.read(x, y).unwrap_or(0.0)
 }
 
 fn particle_spec(index: usize, count: usize, margin: f32) -> MotionParticle {
@@ -647,6 +798,23 @@ fn pressure(input: NormalizedPulseInput) -> f32 {
 fn hash01(value: usize) -> f32 {
     let mut hash = value as u32;
     hash = hash.wrapping_mul(0x045d_9f3b);
+    hash ^= hash >> 16;
+    hash = hash.wrapping_mul(0x045d_9f3b);
+    hash ^= hash >> 16;
+    hash as f32 / u32::MAX as f32
+}
+
+fn temporal_noise(time: f32, phase: f32, rate: f32, seed: u32) -> f32 {
+    let coordinate = time * rate + phase;
+    let cell = coordinate.floor() as i32;
+    let fraction = smoothstep(coordinate - cell as f32);
+    let start = hash_temporal(cell, seed);
+    let end = hash_temporal(cell.wrapping_add(1), seed);
+    start + (end - start) * fraction
+}
+
+fn hash_temporal(cell: i32, seed: u32) -> f32 {
+    let mut hash = (cell as u32).wrapping_mul(0x045d_9f3b).wrapping_add(seed);
     hash ^= hash >> 16;
     hash = hash.wrapping_mul(0x045d_9f3b);
     hash ^= hash >> 16;
@@ -713,6 +881,37 @@ mod tests {
             .count();
         assert!(occupancy_changes > dimensions.sample_count() / 100);
         assert_ne!(first, later);
+    }
+
+    #[test]
+    fn elastic_state_is_local_bounded_and_temporally_continuous() {
+        let dimensions = FieldDimensions::new(96, 48).unwrap();
+        let first = OrganicMotion::new(dimensions, input(), Duration::from_secs_f32(2.0), false);
+        let same = OrganicMotion::new(dimensions, input(), Duration::from_secs_f32(2.0), false);
+        let nearby = OrganicMotion::new(dimensions, input(), Duration::from_secs_f32(2.08), false);
+
+        let mut tension_min: f32 = 1.0;
+        let mut tension_max: f32 = 0.0;
+        let mut release_seen = false;
+        for (node, identical) in first.elasticity.iter().zip(same.elasticity) {
+            assert_eq!(node.center, identical.center);
+            assert!((0.0..=1.0).contains(&node.stored_energy));
+            assert!((0.0..=1.0).contains(&node.tension));
+            assert!((0.0..=1.0).contains(&node.contraction));
+            assert!((0.0..=1.0).contains(&node.release));
+            assert!((0.0..=1.0).contains(&node.recovery));
+            tension_min = tension_min.min(node.tension);
+            tension_max = tension_max.max(node.tension);
+            release_seen |= node.release > 0.01;
+        }
+
+        assert!(tension_max - tension_min > 0.01);
+        assert!(release_seen);
+        for (before, after) in first.elasticity.iter().zip(nearby.elasticity) {
+            assert!((before.tension - after.tension).abs() < 0.20);
+            assert!((before.contraction - after.contraction).abs() < 0.25);
+            assert!((before.release - after.release).abs() < 0.30);
+        }
     }
 
     #[test]
