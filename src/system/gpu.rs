@@ -9,6 +9,18 @@ pub struct GpuInfo {
     pub temperature: String,
     pub usage: String,
     pub memory: String,
+    #[allow(dead_code)]
+    pub usage_percent: Option<f64>,
+    #[allow(dead_code)]
+    pub vram_used_bytes: Option<f64>,
+    #[allow(dead_code)]
+    pub vram_total_bytes: Option<f64>,
+    #[allow(dead_code)]
+    pub temperature_celsius: Option<f64>,
+    #[allow(dead_code)]
+    pub frequency_hz: Option<f64>,
+    #[allow(dead_code)]
+    pub power_watts: Option<f64>,
 }
 
 pub struct GpuCollector {
@@ -44,7 +56,7 @@ impl GpuInfo {
     pub fn get_all() -> Vec<Self> {
         let Ok(output) = Command::new("nvidia-smi")
             .args([
-                "--query-gpu=name,temperature.gpu,utilization.gpu,memory.used",
+                "--query-gpu=name,temperature.gpu,utilization.gpu,memory.used,memory.total,clocks.current.graphics,power.draw",
                 "--format=csv,noheader,nounits",
             ])
             .output()
@@ -64,11 +76,43 @@ impl GpuInfo {
     }
 
     fn parse_line(line: &str) -> Option<Self> {
-        // Split from the right so a comma in the GPU name does not shift metrics.
+        // Split from the right so commas in GPU names do not shift metrics.
+        let fields = line.rsplitn(7, ',').map(str::trim).collect::<Vec<_>>();
+        if fields.len() >= 7 {
+            let power_watts = parse_optional(fields[0]);
+            let frequency_hz = parse_optional(fields[1]).map(|value| value * 1.0e6);
+            let vram_total_bytes = parse_optional(fields[2]).map(mebibytes_to_bytes);
+            let vram_used_bytes = parse_optional(fields[3]).map(mebibytes_to_bytes);
+            let usage_percent = fields[4].parse::<f64>().ok()?;
+            let temperature_celsius = parse_optional(fields[5]);
+            let name = fields[6];
+
+            if name.is_empty() || !(0.0..=100.0).contains(&usage_percent) {
+                return None;
+            }
+
+            return Some(Self {
+                name: name.to_string(),
+                temperature: temperature_celsius
+                    .map_or_else(|| "—".to_owned(), |value| format!("{value:.0}°C")),
+                usage: format!("{usage_percent:.0}%"),
+                memory: vram_used_bytes.map_or_else(
+                    || "—".to_owned(),
+                    |value| format!("{:.0} MiB", value / 1024.0 / 1024.0),
+                ),
+                usage_percent: Some(usage_percent),
+                vram_used_bytes,
+                vram_total_bytes,
+                temperature_celsius,
+                frequency_hz,
+                power_watts,
+            });
+        }
+
         let mut parts = line.rsplitn(4, ',').map(str::trim);
         let memory = parts.next()?.parse::<u64>().ok()?;
-        let usage = parts.next()?.parse::<f32>().ok()?;
-        let temperature = parts.next()?.parse::<f32>().ok()?;
+        let usage = parts.next()?.parse::<f64>().ok()?;
+        let temperature = parts.next()?.parse::<f64>().ok()?;
         let name = parts.next()?;
 
         if name.is_empty() || !(0.0..=100.0).contains(&usage) {
@@ -80,8 +124,25 @@ impl GpuInfo {
             temperature: format!("{temperature:.0}°C"),
             usage: format!("{usage:.0}%"),
             memory: format!("{memory} MiB"),
+            usage_percent: Some(usage),
+            vram_used_bytes: Some(memory as f64 * 1024.0 * 1024.0),
+            vram_total_bytes: None,
+            temperature_celsius: Some(temperature),
+            frequency_hz: None,
+            power_watts: None,
         })
     }
+}
+
+fn parse_optional(value: &str) -> Option<f64> {
+    value
+        .parse::<f64>()
+        .ok()
+        .filter(|value| value.is_finite() && *value >= 0.0)
+}
+
+fn mebibytes_to_bytes(value: f64) -> f64 {
+    value * 1024.0 * 1024.0
 }
 
 #[cfg(test)]

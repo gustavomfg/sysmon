@@ -23,6 +23,9 @@ use super::{
 };
 
 const PRIMARY_COUNT: usize = 5;
+const PRIMARY_CARD_GAP: u16 = 1;
+const PRIMARY_CPU_MINIMUM: u16 = 9;
+const PRIMARY_SECONDARY_MINIMUM: u16 = 4;
 const PULSE_TITLE: &str = "PULSE V2";
 const HEADER_TITLE: &str = "SYSMON V2";
 const HEADER_CENTER: &str = "SYSTEM MONITOR";
@@ -266,11 +269,11 @@ impl DashboardV2Renderer {
             if slot.width < 2 || slot.height < 1 {
                 continue;
             }
-            if slot.width >= 12 && slot.height >= 6 {
+            if slot.width >= 12 && slot.height >= 4 {
                 buffer.set_style(slot, Style::default().bg(theme.surface));
                 draw_panel_frame(slot, theme.border, theme.surface, buffer);
             }
-            let card = inset(slot, 1, u16::from(slot.height >= 6));
+            let card = inset(slot, 1, u16::from(slot.height >= 4));
             if card.width == 0 || card.height == 0 {
                 continue;
             }
@@ -366,7 +369,13 @@ fn visible_primary(preset: DashboardPreset, area: Rect) -> [usize; PRIMARY_COUNT
     };
     let columns = if area.width >= 40 { 2 } else { 1 };
     let rows = usize::from(area.height) / 3;
-    let capacity = rows.saturating_mul(columns).min(PRIMARY_COUNT);
+    let mut capacity = rows.saturating_mul(columns).min(PRIMARY_COUNT);
+    while capacity > 0
+        && !primary_stack_fits(area.height, capacity)
+        && (capacity > 2 || columns == 1)
+    {
+        capacity -= 1;
+    }
     let mut visible = [usize::MAX; PRIMARY_COUNT];
     for (slot, index) in visible.iter_mut().zip(order).take(capacity) {
         *slot = index;
@@ -386,31 +395,43 @@ fn split_primary_area(area: Rect, count: usize) -> [Rect; PRIMARY_COUNT] {
         1
     };
     let rows = count.div_ceil(columns);
-    let column_width = area.width / columns as u16;
-    let row_height = area.height / rows as u16;
     let mut result = [Rect::default(); PRIMARY_COUNT];
 
     // Keep CPU visually prioritized without consuming the column: reserve a
     // compact card-sized region and return the released height to the other
     // metrics, which remain visible below it with their own footprint.
-    if columns == 1 && count == PRIMARY_COUNT {
-        let heights = primary_stack_heights(area.height);
+    if columns == 1 {
+        let heights = primary_stack_heights(area.height, count);
         let mut y = area.y;
         for (index, slot) in result.iter_mut().enumerate().take(count) {
             let height = heights[index];
             *slot = Rect::new(area.x, y, area.width, height);
-            y = y.saturating_add(height);
+            y = y.saturating_add(height).saturating_add(PRIMARY_CARD_GAP);
         }
         return result;
     }
 
+    let horizontal_gap = PRIMARY_CARD_GAP.min(area.width.saturating_sub(1));
+    let vertical_gap = PRIMARY_CARD_GAP.min(area.height.saturating_sub(1));
+    let column_width = area
+        .width
+        .saturating_sub(horizontal_gap.saturating_mul(columns.saturating_sub(1) as u16))
+        / columns as u16;
+    let row_height = area
+        .height
+        .saturating_sub(vertical_gap.saturating_mul(rows.saturating_sub(1) as u16))
+        / rows as u16;
     for (index, slot) in result.iter_mut().enumerate().take(count) {
         let column = index % columns;
         let row = index / columns;
         let x = area
             .x
-            .saturating_add(column_width.saturating_mul(column as u16));
-        let y = area.y.saturating_add(row_height.saturating_mul(row as u16));
+            .saturating_add(column_width.saturating_mul(column as u16))
+            .saturating_add(horizontal_gap.saturating_mul(column as u16));
+        let y = area
+            .y
+            .saturating_add(row_height.saturating_mul(row as u16))
+            .saturating_add(vertical_gap.saturating_mul(row as u16));
         let width = if column + 1 == columns {
             area.right().saturating_sub(x)
         } else {
@@ -426,30 +447,41 @@ fn split_primary_area(area: Rect, count: usize) -> [Rect; PRIMARY_COUNT] {
     result
 }
 
-fn primary_stack_heights(total_height: u16) -> [u16; PRIMARY_COUNT] {
-    const SECONDARY_MINIMUM: u16 = 3;
-    const CPU_SHARE_PERCENT: u16 = 27;
-    const CPU_MINIMUM: u16 = 9;
-    const CPU_MAXIMUM: u16 = 10;
-    let secondary_count = (PRIMARY_COUNT - 1) as u16;
-    let reserved_for_secondary = SECONDARY_MINIMUM.saturating_mul(secondary_count);
-    let maximum_cpu = total_height.saturating_sub(reserved_for_secondary);
-    let desired_cpu = if total_height >= 28 {
-        (total_height.saturating_mul(CPU_SHARE_PERCENT) / 100).clamp(CPU_MINIMUM, CPU_MAXIMUM)
-    } else {
-        maximum_cpu
-    };
-    let cpu_height = desired_cpu.min(maximum_cpu).max(1).min(total_height.max(1));
-    let remaining = total_height.saturating_sub(cpu_height);
+fn primary_stack_heights(total_height: u16, count: usize) -> [u16; PRIMARY_COUNT] {
+    if count == 0 {
+        return [0; PRIMARY_COUNT];
+    }
+    if count == 1 {
+        return [total_height, 0, 0, 0, 0];
+    }
+
+    let secondary_count = (count - 1) as u16;
+    let gaps = PRIMARY_CARD_GAP.saturating_mul(secondary_count);
+    let usable_height = total_height.saturating_sub(gaps);
+    let reserved_for_secondary = PRIMARY_SECONDARY_MINIMUM.saturating_mul(secondary_count);
+    let maximum_cpu = usable_height.saturating_sub(reserved_for_secondary);
+    let cpu_height = PRIMARY_CPU_MINIMUM.min(maximum_cpu).max(1);
+    let remaining = usable_height.saturating_sub(cpu_height);
     let secondary_base = remaining / secondary_count.max(1);
     let secondary_remainder = remaining % secondary_count.max(1);
     let mut heights = [0; PRIMARY_COUNT];
     heights[0] = cpu_height;
-    for (index, height) in heights.iter_mut().enumerate().skip(1) {
+    for (index, height) in heights.iter_mut().enumerate().skip(1).take(count - 1) {
         *height =
             secondary_base.saturating_add(u16::from(((index - 1) as u16) < secondary_remainder));
     }
     heights
+}
+
+fn primary_stack_fits(total_height: u16, count: usize) -> bool {
+    if count == 0 {
+        return true;
+    }
+    let secondary_count = count.saturating_sub(1) as u16;
+    let required = PRIMARY_CPU_MINIMUM
+        .saturating_add(PRIMARY_SECONDARY_MINIMUM.saturating_mul(secondary_count))
+        .saturating_add(PRIMARY_CARD_GAP.saturating_mul(secondary_count));
+    total_height >= required
 }
 
 fn render_header(
@@ -1063,18 +1095,75 @@ mod tests {
         let heights: Vec<u16> = slots.iter().map(|slot| slot.height).collect();
         assert!((9..=10).contains(&heights[0]));
         assert!(heights[0] > heights[1]);
-        assert!(heights[1..].iter().all(|height| *height >= 3));
-        assert_eq!(heights.iter().sum::<u16>(), 37);
+        assert!(heights[1..].iter().all(|height| *height >= 4));
+        assert_eq!(heights.iter().sum::<u16>() + PRIMARY_CARD_GAP * 4, 37);
         for pair in slots.windows(2) {
-            assert_eq!(pair[0].bottom(), pair[1].y);
+            assert_eq!(pair[0].bottom() + PRIMARY_CARD_GAP, pair[1].y);
         }
     }
 
     #[test]
-    fn primary_column_degrades_cpu_first_without_invalid_slots() {
-        let slots = split_primary_area(Rect::new(0, 0, 48, 21), PRIMARY_COUNT);
+    fn primary_column_degrades_lower_priority_cards_without_invalid_slots() {
+        let area = Rect::new(0, 0, 48, 21);
+        let visible = visible_primary(DashboardPreset::Widescreen, area);
+        assert_eq!(visible, [0, 1, 2, usize::MAX, usize::MAX]);
+
+        let slots = split_primary_area(area, 3);
         assert!(slots[0].height > slots[1].height);
-        assert!(slots.iter().all(|slot| slot.width > 0 && slot.height > 0));
-        assert_eq!(slots.last().unwrap().bottom(), 21);
+        assert!(
+            slots[..3]
+                .iter()
+                .all(|slot| slot.width > 0 && slot.height >= PRIMARY_SECONDARY_MINIMUM)
+        );
+        assert_eq!(slots[0].bottom() + PRIMARY_CARD_GAP, slots[1].y);
+        assert_eq!(slots[1].bottom() + PRIMARY_CARD_GAP, slots[2].y);
+        assert_eq!(slots[2].bottom(), area.bottom());
+    }
+
+    #[test]
+    fn primary_slots_leave_a_gap_and_never_reach_the_footer() {
+        for (width, height) in [(80, 24), (120, 32), (160, 40)] {
+            let dimensions = DashboardDimensions::new(width, height).unwrap();
+            let layout = DashboardEngine::new()
+                .compose_with_preset(
+                    dimensions,
+                    DashboardPreset::Widescreen,
+                    DashboardContext::default(),
+                )
+                .unwrap()
+                .layout();
+            let body = layout
+                .section(DashboardRegion::PrimaryMetrics)
+                .unwrap()
+                .bounds();
+            let footer = layout.section(DashboardRegion::Footer).unwrap().bounds();
+            let visible = visible_primary(
+                DashboardPreset::Widescreen,
+                Rect::new(
+                    body.x() as u16,
+                    body.y() as u16,
+                    body.width() as u16,
+                    body.height() as u16,
+                ),
+            );
+            let count = visible.iter().filter(|index| **index != usize::MAX).count();
+            let slots = split_primary_area(
+                Rect::new(
+                    body.x() as u16,
+                    body.y() as u16,
+                    body.width() as u16,
+                    body.height() as u16,
+                ),
+                count,
+            );
+            for pair in slots[..count].windows(2) {
+                assert!(pair[0].bottom() < pair[1].y);
+            }
+            assert!(
+                slots[..count]
+                    .iter()
+                    .all(|slot| slot.bottom() <= footer.y() as u16)
+            );
+        }
     }
 }

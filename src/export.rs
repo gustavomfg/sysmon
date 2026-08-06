@@ -172,6 +172,8 @@ mod tests {
                 mount_point: "/".to_string(),
                 total_space: 100.0,
                 available_space: 50.0,
+                read_bytes_per_sec: None,
+                written_bytes_per_sec: None,
             }],
             processes_list: vec![ProcessInfo {
                 name: "test".to_string(),

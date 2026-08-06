@@ -20,6 +20,7 @@ pub struct SystemInfoCollector {
     gpus: GpuCollector,
     components: Components,
     last_disk_list_refresh: Instant,
+    last_disk_io_sample: Option<Instant>,
     last_network_refresh: Option<Instant>,
 }
 
@@ -28,6 +29,10 @@ pub struct DiskInfo {
     pub mount_point: String,
     pub total_space: f64,
     pub available_space: f64,
+    #[allow(dead_code)]
+    pub read_bytes_per_sec: Option<f64>,
+    #[allow(dead_code)]
+    pub written_bytes_per_sec: Option<f64>,
 }
 
 pub struct ProcessInfo {
@@ -68,6 +73,7 @@ impl SystemInfoCollector {
             gpus: GpuCollector::new(GPU_REFRESH_INTERVAL),
             components: Components::new_with_refreshed_list(),
             last_disk_list_refresh: Instant::now(),
+            last_disk_io_sample: None,
             last_network_refresh: None,
         }
     }
@@ -93,16 +99,25 @@ impl SystemInfoCollector {
             }
         }
 
+        let disk_interval = self
+            .last_disk_io_sample
+            .map(|previous| collected_at.saturating_duration_since(previous));
         let disk_infos = self
             .disks
             .iter()
-            .map(|disk| DiskInfo {
-                name: disk.name().to_string_lossy().to_string(),
-                mount_point: disk.mount_point().to_string_lossy().to_string(),
-                total_space: disk.total_space() as f64 / 1024.0 / 1024.0 / 1024.0,
-                available_space: disk.available_space() as f64 / 1024.0 / 1024.0 / 1024.0,
+            .map(|disk| {
+                let usage = disk.usage();
+                DiskInfo {
+                    name: disk.name().to_string_lossy().to_string(),
+                    mount_point: disk.mount_point().to_string_lossy().to_string(),
+                    total_space: disk.total_space() as f64 / 1024.0 / 1024.0 / 1024.0,
+                    available_space: disk.available_space() as f64 / 1024.0 / 1024.0 / 1024.0,
+                    read_bytes_per_sec: bytes_per_second(usage.read_bytes, disk_interval),
+                    written_bytes_per_sec: bytes_per_second(usage.written_bytes, disk_interval),
+                }
             })
             .collect();
+        self.last_disk_io_sample = Some(collected_at);
 
         let mut processes_list = self
             .system
@@ -180,4 +195,9 @@ fn cpu_temperature_celsius(components: &Components) -> Option<f64> {
         .filter_map(|component| component.temperature().map(f64::from))
         .filter(|temperature| temperature.is_finite())
         .max_by(f64::total_cmp)
+}
+
+fn bytes_per_second(bytes: u64, interval: Option<Duration>) -> Option<f64> {
+    let seconds = interval?.as_secs_f64();
+    (seconds > 0.0).then_some(bytes as f64 / seconds)
 }
