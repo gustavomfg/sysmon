@@ -8,6 +8,7 @@
 // exercised by this module's pure tests and will be consumed by later phases.
 #![allow(dead_code, unused_imports)]
 
+mod behavior;
 mod color;
 mod engine;
 mod field;
@@ -34,7 +35,7 @@ pub use structure::StructuredField;
 pub use transport::TransportedField;
 pub use types::{
     CoordinateError, DimensionsError, FieldDimensions, InputError, NormalizedPoint,
-    NormalizedPulseInput, PresetParameters, PulseV2Preset,
+    NormalizedPulseInput, PresetParameters, PulseV2InputTransition, PulseV2Preset,
 };
 
 #[cfg(test)]
@@ -279,6 +280,51 @@ mod tests {
         assert_eq!(first, same);
         assert_ne!(first.field(), distant.field());
         assert!(mean_difference(first.field(), near.field()) < 0.04);
+    }
+
+    #[test]
+    fn input_transitions_ease_without_rebuilding_the_v2_composition() {
+        let engine = PulseV2Engine::new();
+        let dimensions = FieldDimensions::new(96, 48).unwrap();
+        let calm = NormalizedPulseInput::try_new(0.12, 0.16, None, 0.02, 0.10, 0.01).unwrap();
+        let critical =
+            NormalizedPulseInput::try_new(0.58, 0.62, Some(0.55), 0.52, 0.60, 0.35).unwrap();
+
+        let start = engine
+            .generate_with_preset_transition(
+                dimensions,
+                super::PulseV2InputTransition::new(calm, critical, 0.0),
+                PulseV2Preset::Widescreen,
+                Duration::from_secs(4),
+                false,
+            )
+            .unwrap();
+        let middle = engine
+            .generate_with_preset_transition(
+                dimensions,
+                super::PulseV2InputTransition::new(calm, critical, 0.5),
+                PulseV2Preset::Widescreen,
+                Duration::from_secs(4),
+                false,
+            )
+            .unwrap();
+        let end = engine
+            .generate_with_preset_transition(
+                dimensions,
+                super::PulseV2InputTransition::new(calm, critical, 1.0),
+                PulseV2Preset::Widescreen,
+                Duration::from_secs(4),
+                false,
+            )
+            .unwrap();
+
+        assert_eq!(start.input(), calm);
+        assert_eq!(end.input(), critical);
+        assert!(middle.input().cpu() > calm.cpu());
+        assert!(middle.input().cpu() < critical.cpu());
+        assert!(mean_energy(start.field()) < mean_energy(end.field()));
+        assert!(mean_difference(start.field(), middle.field()) > 0.0);
+        assert!(mean_difference(middle.field(), end.field()) > 0.0);
     }
 
     #[test]

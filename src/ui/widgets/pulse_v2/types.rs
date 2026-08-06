@@ -147,6 +147,29 @@ impl NormalizedPulseInput {
     pub fn volatility(self) -> f32 {
         self.volatility
     }
+
+    /// Returns a bounded presentation value between two normalized inputs.
+    /// This is intentionally a pure helper: callers own the transition
+    /// lifetime, while the input contract remains factual and stateless.
+    pub fn interpolate_toward(self, target: Self, progress: f32) -> Self {
+        let amount = progress.clamp(0.0, 1.0);
+        let amount = amount * amount * (3.0 - 2.0 * amount);
+        let gpu = match (self.gpu, target.gpu) {
+            (Some(from), Some(target)) => Some(lerp(from, target, amount)),
+            (Some(from), None) => (amount < 1.0).then_some(lerp(from, 0.0, amount)),
+            (None, Some(target)) => (amount > 0.0).then_some(lerp(0.0, target, amount)),
+            (None, None) => None,
+        };
+
+        Self {
+            cpu: lerp(self.cpu, target.cpu, amount),
+            memory: lerp(self.memory, target.memory, amount),
+            gpu,
+            network: lerp(self.network, target.network, amount),
+            load: lerp(self.load, target.load, amount),
+            volatility: lerp(self.volatility, target.volatility, amount),
+        }
+    }
 }
 
 impl Default for NormalizedPulseInput {
@@ -159,6 +182,39 @@ impl Default for NormalizedPulseInput {
             load: 0.0,
             volatility: 0.0,
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PulseV2InputTransition {
+    previous: NormalizedPulseInput,
+    target: NormalizedPulseInput,
+    progress: f32,
+}
+
+impl PulseV2InputTransition {
+    pub fn new(
+        previous: NormalizedPulseInput,
+        target: NormalizedPulseInput,
+        progress: f32,
+    ) -> Self {
+        Self {
+            previous,
+            target,
+            progress: progress.clamp(0.0, 1.0),
+        }
+    }
+
+    pub fn previous(self) -> NormalizedPulseInput {
+        self.previous
+    }
+
+    pub fn target(self) -> NormalizedPulseInput {
+        self.target
+    }
+
+    pub fn progress(self) -> f32 {
+        self.progress
     }
 }
 
@@ -191,6 +247,10 @@ fn sanitize_normalized(value: f32) -> f32 {
     } else {
         0.0
     }
+}
+
+fn lerp(from: f32, target: f32, amount: f32) -> f32 {
+    from + (target - from) * amount
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
