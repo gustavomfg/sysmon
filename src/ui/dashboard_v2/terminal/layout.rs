@@ -1,14 +1,14 @@
 use ratatui::layout::Rect;
 
 use super::super::{
-    BlockId, BlockRequirement, DashboardBounds, DashboardPreset, MAX_RENDER_BLOCKS,
-    WidgetRenderModel,
+    BlockId, BlockRequirement, DashboardBounds, DashboardPreset, DashboardWidgetId,
+    MAX_RENDER_BLOCKS, WidgetRenderModel,
 };
 
 const COLUMN_GAP: u16 = 2;
 const MIN_SIDE_BY_SIDE_WIDTH: u16 = 24;
 const MIN_CHART_WIDTH: u16 = 8;
-const CHART_WIDTH_PERCENT: u16 = 38;
+const CHART_WIDTH_PERCENT: u16 = 42;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TerminalLayoutError {
@@ -95,15 +95,31 @@ impl TerminalLayout {
             .find(|id| matches!(id, BlockId::Status | BlockId::Footer))
             .copied();
         let footer_height = u16::from(area.height > 1 && footer_id.is_some());
-        let body_top = area.y.saturating_add(u16::from(area.height > 0));
+        let title_spacer =
+            u16::from(model.visual().widget_id() == DashboardWidgetId::Cpu && area.height >= 8);
+        let body_top = area
+            .y
+            .saturating_add(u16::from(area.height > 0))
+            .saturating_add(title_spacer);
         let body_height = area
             .height
             .saturating_sub(u16::from(area.height > 0))
+            .saturating_sub(title_spacer)
             .saturating_sub(footer_height);
         let body = Rect::new(area.x, body_top, area.width, body_height);
 
         if side_by_side && body.height > 0 {
-            let main_height = body.height.min(6);
+            // CPU cards keep a short lower context row visible beside the
+            // compact chart. Other widgets retain the broader chart area.
+            let main_height = if model.visual().widget_id() == DashboardWidgetId::Cpu {
+                if body.height < 3 {
+                    body.height
+                } else {
+                    body.height.saturating_sub(2).clamp(3, 7)
+                }
+            } else {
+                body.height.min(6)
+            };
             let main = Rect::new(body.x, body.y, body.width, main_height);
             let (value_area, chart_area) = split_columns(main);
             let value_height = value_area
@@ -349,13 +365,18 @@ fn allowed(preset: DashboardPreset, id: BlockId) -> bool {
     match preset {
         DashboardPreset::Compact => matches!(
             id,
-            BlockId::Title | BlockId::Value | BlockId::Trend | BlockId::Status
+            BlockId::Title
+                | BlockId::Value
+                | BlockId::Trend
+                | BlockId::CpuContext
+                | BlockId::Status
         ),
         DashboardPreset::Standard => matches!(
             id,
             BlockId::Title
                 | BlockId::Value
                 | BlockId::Trend
+                | BlockId::CpuContext
                 | BlockId::PrimarySparkline
                 | BlockId::Status
         ),
@@ -364,6 +385,7 @@ fn allowed(preset: DashboardPreset, id: BlockId) -> bool {
             BlockId::Title
                 | BlockId::Value
                 | BlockId::Trend
+                | BlockId::CpuContext
                 | BlockId::PrimarySparkline
                 | BlockId::SecondarySparkline
                 | BlockId::Area

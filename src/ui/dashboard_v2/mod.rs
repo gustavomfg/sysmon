@@ -42,8 +42,8 @@ pub use regions::{DashboardComposition, DashboardPriority, DashboardRegion};
 #[allow(unused_imports)]
 pub use render::{
     BlockId, BlockMetadata, BlockRequirement, BlockVisibility, ChartBlock, ChartContent,
-    FooterBlock, IndicatorBlock, MAX_RENDER_BLOCKS, RenderBlock, RenderError, StatusBlock,
-    TitleBlock, TrendBlock, ValueBlock, WidgetRenderModel, WidgetRenderer,
+    CpuContextBlock, FooterBlock, IndicatorBlock, MAX_RENDER_BLOCKS, RenderBlock, RenderError,
+    StatusBlock, TitleBlock, TrendBlock, ValueBlock, WidgetRenderModel, WidgetRenderer,
 };
 #[allow(unused_imports)]
 pub use terminal::{TerminalRenderError, TerminalRenderer};

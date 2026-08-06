@@ -389,6 +389,22 @@ fn split_primary_area(area: Rect, count: usize) -> [Rect; PRIMARY_COUNT] {
     let column_width = area.width / columns as u16;
     let row_height = area.height / rows as u16;
     let mut result = [Rect::default(); PRIMARY_COUNT];
+
+    // The CPU is the first signal users read. When the primary column has
+    // enough height for all five metrics, give it a real card-sized region
+    // instead of making every card an identical, shallow strip. The other
+    // metrics remain visible below it and keep their own minimum footprint.
+    if columns == 1 && count == PRIMARY_COUNT {
+        let heights = primary_stack_heights(area.height);
+        let mut y = area.y;
+        for (index, slot) in result.iter_mut().enumerate().take(count) {
+            let height = heights[index];
+            *slot = Rect::new(area.x, y, area.width, height);
+            y = y.saturating_add(height);
+        }
+        return result;
+    }
+
     for (index, slot) in result.iter_mut().enumerate().take(count) {
         let column = index % columns;
         let row = index / columns;
@@ -409,6 +425,29 @@ fn split_primary_area(area: Rect, count: usize) -> [Rect; PRIMARY_COUNT] {
         *slot = Rect::new(x, y, width, height);
     }
     result
+}
+
+fn primary_stack_heights(total_height: u16) -> [u16; PRIMARY_COUNT] {
+    const SECONDARY_MINIMUM: u16 = 3;
+    let secondary_count = (PRIMARY_COUNT - 1) as u16;
+    let reserved_for_secondary = SECONDARY_MINIMUM.saturating_mul(secondary_count);
+    let maximum_cpu = total_height.saturating_sub(reserved_for_secondary);
+    let desired_cpu = if total_height >= 28 {
+        (total_height.saturating_mul(34) / 100).clamp(10, 14)
+    } else {
+        maximum_cpu
+    };
+    let cpu_height = desired_cpu.min(maximum_cpu).max(1).min(total_height.max(1));
+    let remaining = total_height.saturating_sub(cpu_height);
+    let secondary_base = remaining / secondary_count.max(1);
+    let secondary_remainder = remaining % secondary_count.max(1);
+    let mut heights = [0; PRIMARY_COUNT];
+    heights[0] = cpu_height;
+    for (index, height) in heights.iter_mut().enumerate().skip(1) {
+        *height =
+            secondary_base.saturating_add(u16::from(((index - 1) as u16) < secondary_remainder));
+    }
+    heights
 }
 
 fn render_header(
@@ -1014,5 +1053,26 @@ mod tests {
         assert!(text.contains("RECENT EVENTS"));
         assert!(!text.contains("Shared history context"));
         assert!(!text.contains("Process context available"));
+    }
+
+    #[test]
+    fn primary_column_gives_cpu_a_reference_sized_region() {
+        let slots = split_primary_area(Rect::new(0, 0, 48, 37), PRIMARY_COUNT);
+        let heights: Vec<u16> = slots.iter().map(|slot| slot.height).collect();
+        assert!((10..=14).contains(&heights[0]));
+        assert!(heights[0] > heights[1]);
+        assert!(heights[1..].iter().all(|height| *height >= 3));
+        assert_eq!(heights.iter().sum::<u16>(), 37);
+        for pair in slots.windows(2) {
+            assert_eq!(pair[0].bottom(), pair[1].y);
+        }
+    }
+
+    #[test]
+    fn primary_column_degrades_cpu_first_without_invalid_slots() {
+        let slots = split_primary_area(Rect::new(0, 0, 48, 21), PRIMARY_COUNT);
+        assert!(slots[0].height > slots[1].height);
+        assert!(slots.iter().all(|slot| slot.width > 0 && slot.height > 0));
+        assert_eq!(slots.last().unwrap().bottom(), 21);
     }
 }

@@ -7,9 +7,9 @@ use ratatui::{
 use crate::theme::Theme;
 
 use super::super::{
-    BlockMetadata, BlockVisibility, FooterBlock, Highlight, IndicatorBlock, MetricIndicators,
-    MetricUnit, MetricValue, MetricVisual, RenderBlock, StatusBlock, TitleBlock, TrendBlock,
-    TrendDirection, ValueBlock, VisualPriority, WidgetState,
+    BlockMetadata, BlockVisibility, CpuContextBlock, FooterBlock, Highlight, IndicatorBlock,
+    MetricIndicators, MetricUnit, MetricValue, MetricVisual, RenderBlock, StatusBlock, TitleBlock,
+    TrendBlock, TrendDirection, ValueBlock, VisualPriority, WidgetState,
 };
 use super::charts;
 
@@ -24,6 +24,7 @@ pub(crate) fn render_block(
         RenderBlock::Title(block) => render_title(block, area, theme, buffer),
         RenderBlock::Value(block) => render_value(block, visual, area, theme, buffer),
         RenderBlock::Trend(block) => render_trend(block, visual, area, theme, buffer),
+        RenderBlock::CpuContext(block) => render_cpu_context(block, area, theme, buffer),
         RenderBlock::Chart(block) => charts::render(block, visual, area, theme, buffer),
         RenderBlock::Indicators(block) => render_indicators(block, area, theme, buffer),
         RenderBlock::Status(block) => render_status(block, area, theme, buffer),
@@ -176,6 +177,21 @@ fn render_trend(
         format!("{direction} {change}")
     };
     write(buffer, area, &text, trend_style(block, theme));
+}
+
+fn render_cpu_context(block: CpuContextBlock, area: Rect, theme: &Theme, buffer: &mut Buffer) {
+    let mut text = format!("{} cores", block.cores());
+    if let Some(frequency) = block.frequency().filter(|value| value.is_usable()) {
+        text.push_str(" · ");
+        text.push_str(&format_metric_value(frequency));
+    }
+    let style = semantic_style(block.metadata(), theme);
+    let style = if block.metadata().is_focused() {
+        style
+    } else {
+        style.fg(theme.text_muted)
+    };
+    write(buffer, area, &text, style);
 }
 
 fn render_indicators(block: IndicatorBlock, area: Rect, theme: &Theme, buffer: &mut Buffer) {
