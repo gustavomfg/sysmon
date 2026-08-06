@@ -15,9 +15,14 @@ use super::super::{
 use super::renderer::TerminalRenderError;
 
 const COLUMN_GAP: u16 = 2;
-const RIGHT_WIDTH_PERCENT: u16 = 36;
+const RIGHT_WIDTH_PERCENT: u16 = 34;
 const MIN_PLOT_RANGE: f64 = 0.08;
 const PLOT_MARGIN_RATIO: f64 = 0.18;
+const RENDER_EMA_ALPHA: f64 = 0.32;
+const PEAK_PRESERVE_THRESHOLD: f64 = 0.06;
+const PEAK_PRESERVE_WEIGHT: f64 = 0.58;
+const CURRENT_POINT_WEIGHT: f64 = 0.65;
+const MAX_BRAILLE_CELLS: usize = 4096;
 
 pub(super) struct CpuCardRenderer;
 
@@ -149,7 +154,7 @@ fn render_body(model: WidgetRenderModel, area: Rect, theme: &Theme, buffer: &mut
 
     render_primary_value(model, regions.value, theme, buffer);
 
-    let hardware = hardware_line(model);
+    let hardware = hardware_line(model, left.width);
     if !hardware.is_empty() {
         write(
             buffer,
@@ -244,7 +249,7 @@ fn render_history(model: WidgetRenderModel, area: Rect, theme: &Theme, buffer: &
 
     let timestamp_height = u16::from(area.height >= 4);
     let available_height = area.height.saturating_sub(timestamp_height);
-    let plot_height = available_height.min(5);
+    let plot_height = available_height.min(4);
     let plot = Rect::new(
         area.x,
         area.y
@@ -278,19 +283,10 @@ fn render_compact_history(
     if area.width == 0 || area.height == 0 {
         return;
     }
-    let points = sparkline.points();
-    let mut values = [None; CHART_POINTS];
-    let mut count = 0;
-    for point in points.iter() {
-        if count == CHART_POINTS {
-            break;
-        }
-        values[count] = point.sample().usable_value();
-        count += 1;
-    }
-    let scale = plot_scale(&values, count);
+    let (raw_values, count) = chart_values(sparkline);
+    let values = smooth_values(raw_values, count);
+    let scale = stable_plot_scale(sparkline, &raw_values, count);
     let mut previous = None;
-    let mut text = String::new();
     for column in 0..area.width {
         let position = if area.width == 1 || count <= 1 {
             0.0
@@ -307,17 +303,16 @@ fn render_compact_history(
             (Some(_), Some(_)) => '─',
             _ => '·',
         };
-        text.push(glyph);
+        put(
+            buffer,
+            area,
+            area.x + column,
+            area.y,
+            glyph,
+            chart_style(model, theme),
+        );
         previous = current;
     }
-    write(
-        buffer,
-        area,
-        area.x,
-        area.y,
-        &text,
-        chart_style(model, theme),
-    );
 }
 
 fn render_line_plot(
@@ -330,32 +325,30 @@ fn render_line_plot(
     if area.width == 0 || area.height == 0 {
         return;
     }
-    let points = sparkline.points();
-    let mut values = [None; CHART_POINTS];
-    let mut count = 0;
-    for point in points.iter() {
-        if count == CHART_POINTS {
-            break;
-        }
-        values[count] = point.sample().usable_value();
-        count += 1;
-    }
+    let (raw_values, count) = chart_values(sparkline);
     if count == 0 {
         write(buffer, area, area.x, area.y, "—", chart_style(model, theme));
         return;
     }
 
-    let scale = plot_scale(&values, count);
+    let values = smooth_values(raw_values, count);
+    let scale = stable_plot_scale(sparkline, &raw_values, count);
     let pixel_width = usize::from(area.width).saturating_mul(2);
     let pixel_height = usize::from(area.height).saturating_mul(4);
     if pixel_width == 0 || pixel_height == 0 {
         return;
     }
 
-    // One mask per Braille cell keeps the line thin while allowing a full
-    // horizontal sample from the source history. This is one small buffer per
-    // graph, never an allocation per cell or per sample.
-    let mut cells = vec![0u8; usize::from(area.width) * usize::from(area.height)];
+    let cell_count = usize::from(area.width) * usize::from(area.height);
+    if cell_count > MAX_BRAILLE_CELLS {
+        render_compact_history(sparkline, area, model, theme, buffer);
+        return;
+    }
+
+    // One fixed mask per Braille cell keeps the line thin without allocating
+    // while rendering. The raw history remains in the model; only this local
+    // presentation series is smoothed.
+    let mut cells = [0u8; MAX_BRAILLE_CELLS];
     let mut previous = None;
     for (index, value) in values.iter().take(count).enumerate() {
         let Some(value) = *value else {
@@ -393,6 +386,52 @@ fn render_line_plot(
             }
         }
     }
+}
+
+fn chart_values(sparkline: SparklineModel<CHART_POINTS>) -> ([Option<f64>; CHART_POINTS], usize) {
+    let mut values = [None; CHART_POINTS];
+    let mut count = 0;
+    for point in sparkline.points().iter() {
+        if count == CHART_POINTS {
+            break;
+        }
+        values[count] = point.sample().usable_value();
+        count += 1;
+    }
+    (values, count)
+}
+
+fn smooth_values(
+    raw_values: [Option<f64>; CHART_POINTS],
+    count: usize,
+) -> [Option<f64>; CHART_POINTS] {
+    let mut smoothed = [None; CHART_POINTS];
+    let mut previous = None;
+    let last = count.saturating_sub(1);
+
+    for index in 0..count.min(CHART_POINTS) {
+        let Some(raw) = raw_values[index] else {
+            previous = None;
+            continue;
+        };
+
+        let mut value = match previous {
+            Some(previous) => previous + RENDER_EMA_ALPHA * (raw - previous),
+            None => raw,
+        };
+        let deviation = raw - value;
+        if deviation.abs() >= PEAK_PRESERVE_THRESHOLD {
+            value += deviation * PEAK_PRESERVE_WEIGHT;
+        }
+        if index == last {
+            value += (raw - value) * CURRENT_POINT_WEIGHT;
+        }
+
+        value = value.clamp(0.0, 1.0);
+        smoothed[index] = Some(value);
+        previous = Some(value);
+    }
+    smoothed
 }
 
 fn draw_braille_segment(cells: &mut [u8], area: Rect, start: (usize, usize), end: (usize, usize)) {
@@ -474,6 +513,28 @@ fn plot_scale(values: &[Option<f64>], count: usize) -> PlotScale {
         return PlotScale::default();
     }
 
+    plot_scale_bounds(low, high)
+}
+
+fn stable_plot_scale(
+    sparkline: SparklineModel<CHART_POINTS>,
+    values: &[Option<f64>],
+    count: usize,
+) -> PlotScale {
+    let stats = sparkline.stats();
+    match (stats.minimum(), stats.maximum()) {
+        (Some(low), Some(high)) if low.is_finite() && high.is_finite() => {
+            // The statistics cover the complete rolling window, rather than
+            // only the reduced render points. Old extrema therefore remain in
+            // the scale until they naturally leave the window: expansion is
+            // immediate for a real peak, while contraction is gradual.
+            plot_scale_bounds(low, high)
+        }
+        _ => plot_scale(values, count),
+    }
+}
+
+fn plot_scale_bounds(low: f64, high: f64) -> PlotScale {
     let range = (high - low).max(0.0);
     let margin = (range * PLOT_MARGIN_RATIO).max(0.015);
     let mut lower = (low - margin).max(0.0);
@@ -509,17 +570,29 @@ fn temperature(model: WidgetRenderModel) -> Option<MetricValue> {
         .filter(|value| value.unit() == MetricUnit::TemperatureCelsius)
 }
 
-fn hardware_line(model: WidgetRenderModel) -> String {
+fn hardware_line(model: WidgetRenderModel, available_width: u16) -> String {
     let context = model.block(BlockId::CpuContext);
     let Some(RenderBlock::CpuContext(context)) = context else {
         return String::new();
     };
-    let mut line = format!("{} cores", context.cores());
-    if let Some(frequency) = context.frequency() {
-        line.push_str(" · ");
-        line.push_str(&format_metric_value(frequency));
+    let frequency = context.frequency().map(format_metric_value);
+    let full = frequency.as_ref().map_or_else(
+        || format!("{} cores", context.cores()),
+        |frequency| format!("{} cores · {frequency}", context.cores()),
+    );
+    if full.chars().count() <= usize::from(available_width) {
+        return full;
     }
-    line
+
+    let compact = frequency.as_ref().map_or_else(
+        || format!("{}c", context.cores()),
+        |frequency| format!("{}c · {}", context.cores(), frequency.replace(' ', "")),
+    );
+    if compact.chars().count() <= usize::from(available_width) {
+        compact
+    } else {
+        format!("{}c", context.cores())
+    }
 }
 
 fn format_metric_value(value: MetricValue) -> String {
@@ -784,6 +857,15 @@ mod tests {
         buffer.content.iter().map(|cell| cell.symbol()).collect()
     }
 
+    fn raw_values(values: &[f64]) -> ([Option<f64>; CHART_POINTS], usize) {
+        let mut raw = [None; CHART_POINTS];
+        let count = values.len().min(CHART_POINTS);
+        for (slot, value) in raw.iter_mut().zip(values.iter().copied()).take(count) {
+            *slot = Some(value);
+        }
+        (raw, count)
+    }
+
     fn braille_cells(buffer: &Buffer, x_start: u16, x_end: u16, y_start: u16, y_end: u16) -> usize {
         (y_start..y_end)
             .flat_map(|y| (x_start..x_end).map(move |x| buffer[(x, y)].symbol()))
@@ -874,11 +956,64 @@ mod tests {
     }
 
     #[test]
+    fn render_smoothing_is_deterministic_and_reduces_small_oscillations() {
+        let (raw, count) = raw_values(&[0.30, 0.32, 0.31, 0.33, 0.32, 0.34]);
+        let first = smooth_values(raw, count);
+        let second = smooth_values(raw, count);
+
+        assert_eq!(first, second);
+        let raw_delta = (raw[5].unwrap() - raw[4].unwrap()).abs();
+        let smoothed_delta = (first[5].unwrap() - first[4].unwrap()).abs();
+        assert!(smoothed_delta < raw_delta);
+    }
+
+    #[test]
+    fn render_smoothing_preserves_peaks_and_keeps_the_current_point_close() {
+        let (raw, count) = raw_values(&[0.25, 0.27, 0.80, 0.29]);
+        let smoothed = smooth_values(raw, count);
+
+        assert!(smoothed[2].unwrap() > 0.50);
+        assert!((smoothed[3].unwrap() - raw[3].unwrap()).abs() < 0.20);
+    }
+
+    #[test]
+    fn scale_uses_the_full_window_to_expand_fast_and_contract_slowly() {
+        let mut history: TimeSeries<8> = TimeSeries::new(MetricUnit::Percent);
+        for (offset, value) in [0.20, 0.80, 0.22, 0.23, 0.24, 0.25].into_iter().enumerate() {
+            history
+                .push(
+                    TimeSample::new(
+                        Duration::from_secs(offset as u64),
+                        Some(value),
+                        MetricAvailability::Available,
+                        None,
+                    )
+                    .unwrap(),
+                )
+                .unwrap();
+        }
+        let sparkline =
+            history.sparkline::<CHART_POINTS>(super::super::super::chart::TimeWindow::Long);
+        let (values, count) = chart_values(sparkline);
+        let scale = stable_plot_scale(sparkline, &values, count);
+
+        assert!(scale.high > 0.80);
+        assert!(scale.high - scale.low >= MIN_PLOT_RANGE);
+    }
+
+    #[test]
     fn compact_card_uses_one_line_fallback_without_panicking() {
         let rendered = render(DashboardPreset::Compact, 18, 4);
         let output = text(&rendered);
         assert!(output.contains("42%"));
         assert!(!output.contains("███"));
+    }
+
+    #[test]
+    fn narrow_card_uses_compact_hardware_context_without_clipping() {
+        let output = text(&render(DashboardPreset::Standard, 29, 9));
+        assert!(output.contains("8c · 3.2GHz"));
+        assert!(!output.contains("3.2 G"));
     }
 
     #[test]

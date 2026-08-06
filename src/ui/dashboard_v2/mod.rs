@@ -2,6 +2,7 @@ mod chart;
 mod engine;
 mod integration;
 mod layout;
+mod live_cpu;
 mod metrics;
 mod regions;
 mod render;
@@ -27,6 +28,8 @@ pub(crate) use integration::{
 };
 #[allow(unused_imports)]
 pub use layout::{DashboardLayout, DashboardLayoutEngine, DashboardSection};
+#[allow(unused_imports)]
+pub use live_cpu::{CPU_LIVE_HISTORY_CAPACITY, CpuLiveHistory, CpuLiveSample};
 #[allow(unused_imports)]
 pub use metrics::{
     CPU_TEMPERATURE_CRITICAL, CPU_TEMPERATURE_WARNING, CPU_THRESHOLDS, CpuMetricInput,
