@@ -7,6 +7,7 @@ mod layout;
 mod live_cpu;
 mod live_metrics;
 mod metrics;
+mod pulse_behavior;
 mod regions;
 mod render;
 mod terminal;
@@ -59,6 +60,8 @@ pub use metrics::{
     STORAGE_LATENCY_CRITICAL_SECONDS, STORAGE_LATENCY_WARNING_SECONDS, STORAGE_THRESHOLDS,
     StorageMetricInput, StorageMetricModel,
 };
+#[allow(unused_imports)]
+pub use pulse_behavior::{PulseBehavior, PulseBehaviorEngine};
 #[allow(unused_imports)]
 pub use regions::{DashboardComposition, DashboardPriority, DashboardRegion};
 #[allow(unused_imports)]

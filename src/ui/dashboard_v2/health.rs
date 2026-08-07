@@ -10,7 +10,7 @@ use std::{fmt, time::Duration};
 use crate::ui::widgets::pulse_v2::NormalizedPulseInput;
 
 use super::{
-    HardwareInventory, LiveMetricModels, MetricValue,
+    HardwareInventory, LiveMetricModels, MetricValue, PulseBehavior,
     metrics::{CPU_THRESHOLDS, GPU_THRESHOLDS},
 };
 
@@ -414,29 +414,10 @@ impl SystemHealth {
         self.components
     }
 
-    /// Maps system interpretation to the small factual input contract the V2
-    /// Pulse already understands.  Components do not control Pulse geometry
-    /// directly; only this aggregate mapping crosses the boundary.
+    /// Compatibility shim for callers that still consume the old boundary.
+    /// New integration code should retain `PulseBehavior` explicitly.
     pub fn pulse_input(self) -> NormalizedPulseInput {
-        let cpu = self
-            .component(HealthComponent::Cpu)
-            .and_then(ComponentHealth::activity)
-            .unwrap_or(0.0);
-        let memory = self
-            .component(HealthComponent::Memory)
-            .and_then(ComponentHealth::pressure)
-            .unwrap_or(0.0);
-        let gpu = self
-            .component(HealthComponent::Gpu)
-            .and_then(ComponentHealth::activity);
-        let network = self
-            .component(HealthComponent::Network)
-            .and_then(ComponentHealth::activity)
-            .unwrap_or(0.0);
-        let load = (self.activity * 0.30 + self.pressure * 0.45 + self.thermal_pressure * 0.25)
-            .clamp(0.0, 1.0);
-        NormalizedPulseInput::try_new(cpu, memory, gpu, network, load, self.instability)
-            .unwrap_or_default()
+        PulseBehavior::from_system_health(self).input()
     }
 }
 
@@ -971,7 +952,7 @@ mod tests {
     }
 
     #[test]
-    fn pulse_mapping_keeps_health_aggregate_at_the_boundary() {
+    fn health_aggregate_keeps_pressure_at_the_boundary() {
         let health = HealthEngine::new().evaluate(component(
             HealthComponent::Memory,
             None,
@@ -979,9 +960,8 @@ mod tests {
             None,
             None,
         ));
-        let input = health.pulse_input();
-        assert_eq!(input.cpu(), 0.0);
-        assert!(input.memory() > 0.0);
-        assert!(input.load() > 0.0);
+        assert_eq!(health.activity(), 0.0);
+        assert!(health.pressure() > 0.0);
+        assert!(health.severity() >= HealthSeverity::Elevated);
     }
 }
