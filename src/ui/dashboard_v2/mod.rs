@@ -1,5 +1,6 @@
 mod chart;
 mod engine;
+mod health;
 mod integration;
 mod inventory;
 mod layout;
@@ -24,6 +25,11 @@ pub use chart::{
 };
 #[allow(unused_imports)]
 pub use engine::{DashboardEngine, DashboardFrame};
+#[allow(unused_imports)]
+pub use health::{
+    ComponentHealth, HealthComponent, HealthEngine, HealthPolicy, HealthSeverity, HealthSignals,
+    HealthSnapshot, SystemHealth,
+};
 #[allow(unused_imports)]
 pub(crate) use integration::{
     DashboardProcessSummary, DashboardV2Content, DashboardV2RenderError, DashboardV2RenderSummary,
