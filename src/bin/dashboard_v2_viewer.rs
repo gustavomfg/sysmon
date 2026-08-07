@@ -85,6 +85,34 @@ enum CpuPreviewSize {
     Large,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CpuSignalPreview {
+    Scenario,
+    Low,
+    Mid,
+    High,
+}
+
+impl CpuSignalPreview {
+    const fn next(self) -> Self {
+        match self {
+            Self::Scenario => Self::Low,
+            Self::Low => Self::Mid,
+            Self::Mid => Self::High,
+            Self::High => Self::Scenario,
+        }
+    }
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Scenario => "SCENARIO",
+            Self::Low => "LOW 8–12%",
+            Self::Mid => "MID 45–56%",
+            Self::High => "HIGH 86–95%",
+        }
+    }
+}
+
 impl CpuPreviewSize {
     const ALL: [Self; 3] = [Self::Reference, Self::Spacious, Self::Large];
 
@@ -165,6 +193,7 @@ struct ViewerState {
     focused_cpu: bool,
     cpu_only: bool,
     cpu_preview_size: CpuPreviewSize,
+    cpu_signal_preview: CpuSignalPreview,
     elapsed: Duration,
 }
 
@@ -180,6 +209,7 @@ impl ViewerState {
             focused_cpu: false,
             cpu_only: false,
             cpu_preview_size: CpuPreviewSize::Reference,
+            cpu_signal_preview: CpuSignalPreview::Scenario,
             elapsed: Duration::ZERO,
         }
     }
@@ -348,6 +378,9 @@ fn handle_key(code: KeyCode, state: &mut ViewerState) -> bool {
         KeyCode::Char('v') | KeyCode::Char('V') => {
             state.cpu_preview_size = state.cpu_preview_size.next()
         }
+        KeyCode::Char('d') | KeyCode::Char('D') => {
+            state.cpu_signal_preview = state.cpu_signal_preview.next()
+        }
         KeyCode::Char(' ') => state.paused = !state.paused,
         KeyCode::Char('q') | KeyCode::Char('Q') | KeyCode::Esc => return true,
         _ => {}
@@ -379,6 +412,15 @@ fn render_cpu_preview(
         width,
         height,
     );
+    frame.buffer_mut().set_string(
+        area.x,
+        area.y,
+        format!(
+            "CPU SIGNAL · {} · D cycles",
+            state.cpu_signal_preview.label()
+        ),
+        Style::default().fg(theme.text_muted),
+    );
     let inner = Rect::new(
         outer.x + 1,
         outer.y + 1,
@@ -406,7 +448,7 @@ fn render_cpu_preview(
     let model = if state.live_metrics {
         compose_live_cpu(live_metrics, context)
     } else {
-        compose_cpu(state, context)
+        compose_cpu_preview(state, context)
     };
     if let Some(model) = model {
         let _ = TerminalRenderer::new().render_rect(
@@ -731,6 +773,15 @@ fn compose_cpu(
         .flatten()
 }
 
+fn compose_cpu_preview(
+    state: ViewerState,
+    context: WidgetContext,
+) -> Option<dashboard_v2::WidgetRenderModel> {
+    WidgetRenderer::render_cpu(cpu_preview_model(state), context)
+        .ok()
+        .flatten()
+}
+
 fn compose_memory(
     state: ViewerState,
     context: WidgetContext,
@@ -774,6 +825,31 @@ fn cpu_model(scenario: Scenario) -> dashboard_v2::CpuMetricModel<HISTORY> {
     } else {
         scenario_cpu
     };
+    cpu_model_with_history(scenario, &cpu_history(cpu))
+}
+
+fn cpu_preview_model(state: ViewerState) -> dashboard_v2::CpuMetricModel<HISTORY> {
+    let values = match state.cpu_signal_preview {
+        CpuSignalPreview::Scenario => return cpu_model(state.scenario),
+        CpuSignalPreview::Low => [0.08, 0.09, 0.12, 0.07, 0.10, 0.11],
+        CpuSignalPreview::Mid => [0.45, 0.52, 0.48, 0.56, 0.50, 0.53],
+        CpuSignalPreview::High => [0.86, 0.92, 0.89, 0.95, 0.91, 0.93],
+    };
+    cpu_model_with_history(state.scenario, &values)
+}
+
+fn cpu_model_with_history(
+    scenario: Scenario,
+    values: &[f64],
+) -> dashboard_v2::CpuMetricModel<HISTORY> {
+    let cpu = values.last().copied().unwrap_or_else(|| {
+        let (scenario_cpu, _, _, _, _, _) = scenario.values();
+        if scenario == Scenario::Normal {
+            0.42
+        } else {
+            scenario_cpu
+        }
+    });
     dashboard_v2::CpuMetricModel::from_input(
         CpuMetricInput::new(
             normalized(cpu),
@@ -788,11 +864,7 @@ fn cpu_model(scenario: Scenario) -> dashboard_v2::CpuMetricModel<HISTORY> {
                 Scenario::Critical => 96.0,
             }),
             8,
-            history_with_step(
-                MetricUnit::Percent,
-                &cpu_history(cpu),
-                Duration::from_secs(5),
-            ),
+            history_with_step(MetricUnit::Percent, values, Duration::from_secs(5)),
         )
         .expect("deterministic CPU fixture is valid"),
     )
@@ -1000,6 +1072,22 @@ mod tests {
         let first = content(state, &live_metrics, None);
         let second = content(state, &live_metrics, None);
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn cpu_signal_preview_cycles_through_low_mid_and_high_regions() {
+        let mut state = ViewerState::new();
+        handle_key(KeyCode::Char('c'), &mut state);
+        assert_eq!(state.cpu_signal_preview, CpuSignalPreview::Scenario);
+
+        handle_key(KeyCode::Char('d'), &mut state);
+        assert_eq!(state.cpu_signal_preview, CpuSignalPreview::Low);
+        handle_key(KeyCode::Char('d'), &mut state);
+        assert_eq!(state.cpu_signal_preview, CpuSignalPreview::Mid);
+        handle_key(KeyCode::Char('d'), &mut state);
+        assert_eq!(state.cpu_signal_preview, CpuSignalPreview::High);
+        handle_key(KeyCode::Char('d'), &mut state);
+        assert_eq!(state.cpu_signal_preview, CpuSignalPreview::Scenario);
     }
 
     #[test]
