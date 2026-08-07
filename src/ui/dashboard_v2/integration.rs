@@ -19,7 +19,7 @@ use crate::{
 use super::{
     DashboardBounds, DashboardContext, DashboardDimensions, DashboardEngine, DashboardError,
     DashboardFrame, DashboardPreset, DashboardRegion, DashboardState, DashboardWidgetId,
-    TerminalRenderError, TerminalRenderer, WidgetRenderModel,
+    PulseBehavior, TerminalRenderError, TerminalRenderer, WidgetRenderModel,
 };
 
 const PRIMARY_COUNT: usize = 5;
@@ -54,6 +54,7 @@ pub(crate) struct DashboardV2SystemContext {
 pub(crate) struct DashboardV2Content {
     primary: [Option<WidgetRenderModel>; PRIMARY_COUNT],
     pulse_input: NormalizedPulseInput,
+    pulse_behavior: Option<PulseBehavior>,
     state: DashboardState,
     inventory: super::HardwareInventory,
     system_context: Option<DashboardV2SystemContext>,
@@ -69,6 +70,7 @@ impl DashboardV2Content {
         Self {
             primary,
             pulse_input,
+            pulse_behavior: None,
             state,
             inventory: super::HardwareInventory::default(),
             system_context: None,
@@ -82,6 +84,15 @@ impl DashboardV2Content {
 
     pub(crate) fn pulse_input(&self) -> NormalizedPulseInput {
         self.pulse_input
+    }
+
+    pub(crate) fn with_pulse_behavior(mut self, behavior: PulseBehavior) -> Self {
+        self.pulse_behavior = Some(behavior);
+        self
+    }
+
+    pub(crate) fn pulse_behavior(&self) -> Option<PulseBehavior> {
+        self.pulse_behavior
     }
 
     pub(crate) fn state(&self) -> DashboardState {
@@ -240,7 +251,10 @@ impl DashboardV2Renderer {
         let pulse_rendered = if let Some(section) = layout.section(DashboardRegion::Pulse) {
             self.render_pulse(
                 to_rect(section.bounds(), area)?,
-                content.pulse_input(),
+                content
+                    .pulse_behavior()
+                    .map(PulseBehavior::input)
+                    .unwrap_or_else(|| content.pulse_input()),
                 elapsed,
                 reduced_motion,
                 theme,

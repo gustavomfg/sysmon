@@ -52,8 +52,9 @@ use dashboard_v2::{
     GpuMetricInput, HardwareId, HardwareInventory, HardwareKind, HealthComponent, HealthEngine,
     HealthSignals, HealthSnapshot, LiveGpuSnapshot, LiveMetricsHistory, LiveSnapshot,
     LiveStorageSnapshot, MemoryMetricInput, MetricAvailability, MetricReading, MetricUnit,
-    NetworkInterface, NetworkMetricInput, StorageDevice, StorageMetricInput, TemperatureSensor,
-    TerminalRenderer, TimeSample, TimeSeries, WidgetContext, WidgetRenderer,
+    NetworkInterface, NetworkMetricInput, PulseBehavior, PulseBehaviorEngine, StorageDevice,
+    StorageMetricInput, TemperatureSensor, TerminalRenderer, TimeSample, TimeSeries, WidgetContext,
+    WidgetRenderer,
 };
 use pulse_v2::NormalizedPulseInput;
 use ratatui::{
@@ -74,8 +75,13 @@ const HISTORY: usize = 12;
 enum Scenario {
     Normal,
     Active,
-    Warning,
+    GpuActivity,
+    Pressure,
+    Thermal,
+    NetworkActivity,
+    StoragePressure,
     Critical,
+    Recovery,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -135,14 +141,29 @@ impl CpuPreviewSize {
 }
 
 impl Scenario {
-    const ALL: [Self; 4] = [Self::Normal, Self::Active, Self::Warning, Self::Critical];
+    const ALL: [Self; 9] = [
+        Self::Normal,
+        Self::Active,
+        Self::GpuActivity,
+        Self::Pressure,
+        Self::Thermal,
+        Self::NetworkActivity,
+        Self::StoragePressure,
+        Self::Critical,
+        Self::Recovery,
+    ];
 
     const fn index(self) -> usize {
         match self {
             Self::Normal => 0,
             Self::Active => 1,
-            Self::Warning => 2,
-            Self::Critical => 3,
+            Self::GpuActivity => 2,
+            Self::Pressure => 3,
+            Self::Thermal => 4,
+            Self::NetworkActivity => 5,
+            Self::StoragePressure => 6,
+            Self::Critical => 7,
+            Self::Recovery => 8,
         }
     }
 
@@ -153,32 +174,41 @@ impl Scenario {
     const fn values(self) -> (f64, f64, f64, f64, f64, f64) {
         match self {
             Self::Normal => (0.25, 0.35, 0.25, 0.12, 0.35, 0.20),
-            Self::Active => (0.65, 0.68, 0.65, 0.55, 0.72, 0.50),
-            Self::Warning => (0.82, 0.86, 0.82, 0.70, 0.88, 0.90),
+            // High activity with safe pressure: the Pulse should become
+            // energetic without immediately becoming stressed.
+            Self::Active => (0.95, 0.40, 0.75, 0.65, 0.40, 0.35),
+            Self::GpuActivity => (0.25, 0.40, 0.98, 0.12, 0.40, 0.20),
+            Self::Pressure => (0.35, 0.94, 0.25, 0.12, 0.40, 0.20),
+            Self::Thermal => (0.45, 0.42, 0.35, 0.12, 0.40, 0.20),
+            Self::NetworkActivity => (0.25, 0.40, 0.25, 0.95, 0.40, 0.20),
+            Self::StoragePressure => (0.25, 0.40, 0.25, 0.12, 0.95, 0.30),
             Self::Critical => (0.98, 0.97, 0.98, 0.95, 0.98, 0.98),
+            Self::Recovery => (0.20, 0.40, 0.20, 0.10, 0.40, 0.10),
         }
     }
 
     const fn dashboard_state(self) -> DashboardState {
         match self {
             Self::Normal => DashboardState::Calm,
-            Self::Active => DashboardState::Active,
-            Self::Warning => DashboardState::Busy,
+            Self::Active | Self::GpuActivity | Self::NetworkActivity => DashboardState::Active,
+            Self::Pressure | Self::Thermal | Self::StoragePressure => DashboardState::Busy,
             Self::Critical => DashboardState::Critical,
+            Self::Recovery => DashboardState::Calm,
         }
     }
 
-    fn pulse_input(self, gpu_available: bool) -> NormalizedPulseInput {
-        let (cpu, memory, gpu, network, load, volatility) = self.values();
-        NormalizedPulseInput::try_new(
-            cpu as f32,
-            memory as f32,
-            gpu_available.then_some(gpu as f32),
-            network as f32,
-            load as f32,
-            volatility as f32,
-        )
-        .unwrap_or_default()
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Normal => "IDLE",
+            Self::Active => "HIGH ACTIVITY / HEALTHY",
+            Self::GpuActivity => "GPU ACTIVITY",
+            Self::Pressure => "MEMORY PRESSURE",
+            Self::Thermal => "THERMAL PRESSURE",
+            Self::NetworkActivity => "NETWORK ACTIVITY",
+            Self::StoragePressure => "STORAGE PRESSURE",
+            Self::Critical => "CRITICAL",
+            Self::Recovery => "RECOVERY",
+        }
     }
 }
 
@@ -192,6 +222,7 @@ struct ViewerState {
     live_metrics: bool,
     focused_cpu: bool,
     cpu_only: bool,
+    health_debug: bool,
     cpu_preview_size: CpuPreviewSize,
     cpu_signal_preview: CpuSignalPreview,
     elapsed: Duration,
@@ -208,6 +239,7 @@ impl ViewerState {
             live_metrics: false,
             focused_cpu: false,
             cpu_only: false,
+            health_debug: false,
             cpu_preview_size: CpuPreviewSize::Reference,
             cpu_signal_preview: CpuSignalPreview::Scenario,
             elapsed: Duration::ZERO,
@@ -292,6 +324,7 @@ fn run_viewer(stdout: &mut io::Stdout) -> io::Result<()> {
     let mut live_metrics = LiveMetricsHistory::new();
     let mut live_system_context = None;
     let mut health_engine = HealthEngine::new();
+    let mut pulse_behavior_engine = PulseBehaviorEngine::new();
     let mut health_live_mode = false;
     let theme = Theme::pulse();
     let renderer = DashboardV2Renderer::new();
@@ -323,6 +356,7 @@ fn run_viewer(stdout: &mut io::Stdout) -> io::Result<()> {
 
         if state.live_metrics != health_live_mode {
             health_engine.reset();
+            pulse_behavior_engine.reset();
             health_live_mode = state.live_metrics;
         }
         let health_snapshot = if state.live_metrics {
@@ -336,19 +370,21 @@ fn run_viewer(stdout: &mut io::Stdout) -> io::Result<()> {
             scenario_health_snapshot(state)
         };
         let system_health = health_engine.update(health_snapshot, delta);
+        let pulse_behavior = pulse_behavior_engine.update(system_health, delta);
 
         terminal.draw(|frame| {
             if state.cpu_only {
                 render_cpu_preview(frame, state, &live_metrics, &theme);
             } else {
-                let content = content_with_health(
+                let content = content_with_health_and_behavior(
                     state,
                     &live_metrics,
                     live_system_context.as_ref(),
                     Some(system_health),
+                    Some(pulse_behavior),
                 );
                 let context = context_for(frame.area());
-                if renderer
+                let rendered = renderer
                     .render(
                         state.preset,
                         context,
@@ -358,8 +394,16 @@ fn run_viewer(stdout: &mut io::Stdout) -> io::Result<()> {
                         &theme,
                         frame.buffer_mut(),
                     )
-                    .is_err()
-                {
+                    .is_ok();
+                if rendered && state.health_debug {
+                    render_health_debug(
+                        frame,
+                        state.scenario,
+                        system_health,
+                        pulse_behavior,
+                        &theme,
+                    );
+                } else if !rendered {
                     frame.buffer_mut().set_string(
                         0,
                         0,
@@ -389,6 +433,32 @@ fn context_for(area: ratatui::layout::Rect) -> DashboardContext {
     context
 }
 
+fn render_health_debug(
+    frame: &mut ratatui::Frame<'_>,
+    scenario: Scenario,
+    health: dashboard_v2::SystemHealth,
+    behavior: PulseBehavior,
+    theme: &Theme,
+) {
+    let area = frame.area();
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let line = format!(
+        "HEALTH DEBUG · {} · {} · PULSE {}",
+        scenario.label(),
+        health,
+        behavior,
+    );
+    frame.buffer_mut().set_stringn(
+        area.x,
+        area.y,
+        line,
+        usize::from(area.width),
+        Style::default().fg(theme.text_muted),
+    );
+}
+
 fn handle_key(code: KeyCode, state: &mut ViewerState) -> bool {
     match code {
         KeyCode::Char('p') | KeyCode::Char('P') => state.next_preset(),
@@ -398,6 +468,7 @@ fn handle_key(code: KeyCode, state: &mut ViewerState) -> bool {
         KeyCode::Char('l') | KeyCode::Char('L') => state.live_metrics = !state.live_metrics,
         KeyCode::Char('f') | KeyCode::Char('F') => state.focused_cpu = !state.focused_cpu,
         KeyCode::Char('c') | KeyCode::Char('C') => state.cpu_only = !state.cpu_only,
+        KeyCode::Char('h') | KeyCode::Char('H') => state.health_debug = !state.health_debug,
         KeyCode::Char('v') | KeyCode::Char('V') => {
             state.cpu_preview_size = state.cpu_preview_size.next()
         }
@@ -499,6 +570,23 @@ fn content_with_health(
     live_system_context: Option<&DashboardV2SystemContext>,
     system_health: Option<dashboard_v2::SystemHealth>,
 ) -> DashboardV2Content {
+    let pulse_behavior = system_health.map(PulseBehavior::from_system_health);
+    content_with_health_and_behavior(
+        state,
+        live_metrics,
+        live_system_context,
+        system_health,
+        pulse_behavior,
+    )
+}
+
+fn content_with_health_and_behavior(
+    state: ViewerState,
+    live_metrics: &LiveMetricsHistory,
+    live_system_context: Option<&DashboardV2SystemContext>,
+    system_health: Option<dashboard_v2::SystemHealth>,
+    pulse_behavior: Option<PulseBehavior>,
+) -> DashboardV2Content {
     let live_models = state
         .live_metrics
         .then(|| live_metrics.models().ok())
@@ -538,28 +626,42 @@ fn content_with_health(
         .as_ref()
         .map(|models| models.inventory().clone())
         .unwrap_or_default();
-    let pulse_input = system_health
-        .map(dashboard_v2::SystemHealth::pulse_input)
+    let pulse_behavior = pulse_behavior
+        .or_else(|| system_health.map(PulseBehavior::from_system_health))
         .or_else(|| {
             live_models.as_ref().map(|models| {
-                dashboard_v2::HealthEngine::new()
-                    .evaluate(dashboard_v2::HealthSnapshot::from_models(models))
-                    .pulse_input()
+                let health = dashboard_v2::HealthEngine::new()
+                    .evaluate(dashboard_v2::HealthSnapshot::from_models(models));
+                PulseBehavior::from_system_health(health)
             })
         })
-        .unwrap_or_else(|| {
-            if state.live_metrics {
-                // A live frame without its first snapshot is intentionally
-                // quiet. It must not borrow the demo scenario while the
-                // instruments are still waiting for real data.
-                NormalizedPulseInput::default()
-            } else {
-                state.scenario.pulse_input(state.gpu_available)
-            }
+        .or_else(|| {
+            (!state.live_metrics).then(|| {
+                let health =
+                    dashboard_v2::HealthEngine::new().evaluate(scenario_health_snapshot(state));
+                PulseBehavior::from_system_health(health)
+            })
         });
+    let pulse_input = pulse_behavior.map(PulseBehavior::input).unwrap_or_else(|| {
+        if state.live_metrics {
+            // A live frame without its first snapshot is intentionally
+            // quiet. It must not borrow the demo scenario while the
+            // instruments are still waiting for real data.
+            NormalizedPulseInput::default()
+        } else {
+            // Demo scenarios also pass through HealthEngine above. This
+            // fallback is only a defensive empty boundary.
+            NormalizedPulseInput::default()
+        }
+    });
     let content = DashboardV2Content::new(primary, pulse_input, dashboard_state)
         .with_inventory(inventory)
         .with_live_mode(state.live_metrics);
+    let content = if let Some(behavior) = pulse_behavior {
+        content.with_pulse_behavior(behavior)
+    } else {
+        content
+    };
     if state.live_metrics {
         content.with_system_context(live_system_context.cloned().unwrap_or_default())
     } else {
@@ -569,8 +671,23 @@ fn content_with_health(
 
 fn scenario_health_snapshot(state: ViewerState) -> HealthSnapshot {
     let (cpu, memory, gpu, network, load, volatility) = state.scenario.values();
-    let cpu_pressure = (cpu * 0.25 + load * 0.60).clamp(0.0, 1.0) as f32;
+    let cpu_pressure = match state.scenario {
+        Scenario::Normal | Scenario::Recovery => 0.06,
+        Scenario::Active
+        | Scenario::GpuActivity
+        | Scenario::NetworkActivity
+        | Scenario::StoragePressure => 0.12,
+        Scenario::Pressure => 0.16,
+        Scenario::Thermal => 0.22,
+        Scenario::Critical => 0.98,
+    };
     let memory_pressure = (memory - 0.65).max(0.0) / 0.35;
+    let storage_pressure = ((load - 0.80) / 0.15).clamp(0.0, 1.0) as f32;
+    let thermal = match state.scenario {
+        Scenario::Thermal => 0.86,
+        Scenario::Critical => 0.98,
+        _ => 0.0,
+    };
     let gpu_signals = state.gpu_available.then_some(HealthSignals::new(
         Some(gpu as f32),
         Some((gpu * 0.30).clamp(0.0, 1.0) as f32),
@@ -596,6 +713,14 @@ fn scenario_health_snapshot(state: ViewerState) -> HealthSnapshot {
             HealthSignals::new(Some(network as f32), None, None, None),
         )
         .with_component(HealthComponent::Gpu, gpu_signals.unwrap_or_default())
+        .with_component(
+            HealthComponent::Storage,
+            HealthSignals::new(Some(volatility as f32), Some(storage_pressure), None, None),
+        )
+        .with_component(
+            HealthComponent::Temperature,
+            HealthSignals::new(None, None, (thermal > 0.0).then_some(thermal), None),
+        )
 }
 
 fn system_context_from_system(snapshot: &SystemInfo) -> DashboardV2SystemContext {
@@ -931,9 +1056,13 @@ fn cpu_model_with_history(
             normalized((1.0 - cpu * 0.90).max(0.0)),
             non_negative(3_200_000_000.0),
             non_negative(match scenario {
-                Scenario::Normal => 52.0,
-                Scenario::Active => 68.0,
-                Scenario::Warning => 84.0,
+                Scenario::Normal | Scenario::Recovery => 52.0,
+                Scenario::Active => 62.0,
+                Scenario::GpuActivity => 64.0,
+                Scenario::Pressure => 58.0,
+                Scenario::Thermal => 88.0,
+                Scenario::NetworkActivity => 52.0,
+                Scenario::StoragePressure => 54.0,
                 Scenario::Critical => 96.0,
             }),
             8,
@@ -952,11 +1081,13 @@ fn memory_model(scenario: Scenario) -> dashboard_v2::MemoryMetricModel<HISTORY> 
             non_negative((1.0 - memory) * 100.0),
             non_negative(100.0),
             non_negative(memory * 16.0),
-            non_negative(if scenario == Scenario::Critical {
-                12.0
-            } else {
-                0.0
-            }),
+            non_negative(
+                if matches!(scenario, Scenario::Pressure | Scenario::Critical) {
+                    12.0
+                } else {
+                    0.0
+                },
+            ),
             normalized(memory),
             history(MetricUnit::Percent, &scaled_history(memory)),
         )
@@ -983,9 +1114,13 @@ fn gpu_model(scenario: Scenario, available: bool) -> dashboard_v2::GpuMetricMode
             },
             if available {
                 non_negative(match scenario {
-                    Scenario::Normal => 54.0,
-                    Scenario::Active => 70.0,
-                    Scenario::Warning => 85.0,
+                    Scenario::Normal | Scenario::Recovery => 54.0,
+                    Scenario::Active => 68.0,
+                    Scenario::GpuActivity => 80.0,
+                    Scenario::Pressure => 58.0,
+                    Scenario::Thermal => 82.0,
+                    Scenario::NetworkActivity => 54.0,
+                    Scenario::StoragePressure => 56.0,
                     Scenario::Critical => 96.0,
                 })
             } else {
@@ -1033,9 +1168,12 @@ fn storage_model(scenario: Scenario) -> dashboard_v2::StorageMetricModel<HISTORY
         non_negative(activity * 120.0),
         non_negative(activity * 60.0),
         non_negative(match scenario {
-            Scenario::Normal => 0.04,
-            Scenario::Active => 0.08,
-            Scenario::Warning => 0.20,
+            Scenario::Normal | Scenario::Recovery => 0.04,
+            Scenario::Active | Scenario::GpuActivity => 0.08,
+            Scenario::Pressure => 0.20,
+            Scenario::Thermal => 0.12,
+            Scenario::NetworkActivity => 0.08,
+            Scenario::StoragePressure => 0.20,
             Scenario::Critical => 0.60,
         }),
         normalized(activity),
@@ -1134,6 +1272,51 @@ mod tests {
     }
 
     #[test]
+    fn health_scenarios_use_the_same_health_to_behavior_pipeline() {
+        let mut state = ViewerState::new();
+        let idle = PulseBehavior::from_system_health(
+            HealthEngine::new().evaluate(scenario_health_snapshot(state)),
+        );
+
+        state.scenario = Scenario::Active;
+        let activity = PulseBehavior::from_system_health(
+            HealthEngine::new().evaluate(scenario_health_snapshot(state)),
+        );
+        state.scenario = Scenario::Pressure;
+        let pressure = PulseBehavior::from_system_health(
+            HealthEngine::new().evaluate(scenario_health_snapshot(state)),
+        );
+        state.scenario = Scenario::Thermal;
+        let thermal = PulseBehavior::from_system_health(
+            HealthEngine::new().evaluate(scenario_health_snapshot(state)),
+        );
+
+        assert!(activity.energy() > idle.energy());
+        assert!(activity.tension() < pressure.tension());
+        assert!(thermal.tension() > idle.tension());
+        assert!(
+            Scenario::ALL
+                .iter()
+                .all(|scenario| !scenario.label().is_empty())
+        );
+
+        let mut health_engine = HealthEngine::new();
+        let mut behavior_engine = PulseBehaviorEngine::new();
+        state.scenario = Scenario::Critical;
+        let critical = behavior_engine.update(
+            health_engine.update(scenario_health_snapshot(state), Duration::from_secs(1)),
+            Duration::from_secs(1),
+        );
+        state.scenario = Scenario::Recovery;
+        let recovering = behavior_engine.update(
+            health_engine.update(scenario_health_snapshot(state), Duration::from_millis(100)),
+            Duration::from_millis(100),
+        );
+        assert!(recovering.tension() < critical.tension());
+        assert!(recovering.tension() > idle.tension());
+    }
+
+    #[test]
     fn cpu_preview_cycles_through_reference_sizes_without_changing_semantics() {
         let mut state = ViewerState::new();
         assert_eq!(state.cpu_preview_size.dimensions(), (45, 12));
@@ -1201,7 +1384,8 @@ mod tests {
         let content = content(state, &live_metrics, None);
         let cpu = content.primary()[0].unwrap();
         assert_eq!(cpu.visual().primary().unwrap().value(), 0.635);
-        assert_eq!(content.pulse_input().cpu(), 0.635);
+        assert!(content.pulse_behavior().is_some());
+        assert_ne!(content.pulse_input().cpu(), 0.635);
         assert_eq!(live_metrics.models().unwrap().cpu().cores(), 6);
         assert!(content.primary()[1].is_some());
         assert_eq!(
@@ -1211,11 +1395,12 @@ mod tests {
     }
 
     #[test]
-    fn live_mode_starts_with_a_quiet_pulse_until_real_metrics_arrive() {
+    fn live_mode_starts_with_a_quiet_but_living_pulse_until_real_metrics_arrive() {
         let mut state = ViewerState::new();
         state.live_metrics = true;
         let content = content(state, &LiveMetricsHistory::new(), None);
-        assert_eq!(content.pulse_input(), NormalizedPulseInput::default());
+        assert!(content.pulse_input().cpu() > 0.0);
+        assert!(content.pulse_input().load() < 0.20);
         assert!(content.primary().iter().all(|model| {
             model.is_some_and(|model| model.state() == dashboard_v2::WidgetState::Unavailable)
         }));
@@ -1238,7 +1423,7 @@ mod tests {
                 .count(),
             5
         );
-        assert_eq!(content.pulse_input().cpu(), 0.0);
+        assert!(content.pulse_behavior().is_some());
         assert!(content.pulse_input().memory() > 0.0);
         assert!(content.pulse_input().load() > 0.0);
     }
