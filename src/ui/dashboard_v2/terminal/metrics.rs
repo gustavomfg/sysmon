@@ -9,14 +9,12 @@ use crate::theme::Theme;
 use super::super::chart::SparklineModel;
 use super::super::metrics::CHART_POINTS;
 use super::super::{
-    BlockId, ChartContent, DashboardBounds, DashboardPreset, RenderBlock, WidgetRenderModel,
-    WidgetState,
+    BlockId, ChartContent, DashboardBounds, DashboardPreset, HardwareInventory, RenderBlock,
+    WidgetRenderModel, WidgetState,
 };
 use super::blocks::write;
 use super::renderer::TerminalRenderError;
 
-const GAP: u16 = 2;
-const GRAPH_RATIO: u16 = 36;
 const MIN_GRAPH_WIDTH: u16 = 10;
 const MAX_BRAILLE_CELLS: usize = 4096;
 
@@ -26,6 +24,17 @@ pub(super) fn render(
     bounds: DashboardBounds,
     theme: &Theme,
     buffer: &mut Buffer,
+) -> Result<(), TerminalRenderError> {
+    render_with_inventory(model, preset, bounds, theme, buffer, None)
+}
+
+pub(super) fn render_with_inventory(
+    model: WidgetRenderModel,
+    preset: DashboardPreset,
+    bounds: DashboardBounds,
+    theme: &Theme,
+    buffer: &mut Buffer,
+    inventory: Option<&HardwareInventory>,
 ) -> Result<(), TerminalRenderError> {
     let area = to_rect(bounds, *buffer.area())?;
     buffer.set_style(area, Style::default().bg(theme.surface));
@@ -39,15 +48,23 @@ pub(super) fn render(
             Ok(())
         }
         super::super::DashboardWidgetId::Gpu => {
-            render_gpu(model, preset, area, theme, buffer);
+            if let Some(inventory) = inventory.filter(|inventory| !inventory.gpus.is_empty()) {
+                render_gpu_inventory(model, inventory, area, theme, buffer);
+            } else {
+                render_gpu(model, preset, area, theme, buffer);
+            }
             Ok(())
         }
         super::super::DashboardWidgetId::Network => {
-            render_network(model, preset, area, theme, buffer);
+            render_network(model, area, theme, buffer, inventory);
             Ok(())
         }
         super::super::DashboardWidgetId::Storage => {
-            render_storage(model, preset, area, theme, buffer);
+            if let Some(inventory) = inventory.filter(|inventory| !inventory.storages.is_empty()) {
+                render_storage_inventory(model, inventory, area, theme, buffer);
+            } else {
+                render_storage(model, preset, area, theme, buffer);
+            }
             Ok(())
         }
         _ => Ok(()),
@@ -73,7 +90,6 @@ fn render_memory(
     let RenderBlock::MemoryContext(context) = context else {
         return;
     };
-    let left = body;
     let used = context.used();
     let total = context.total();
     let value = match (used, total) {
@@ -93,40 +109,6 @@ fn render_memory(
         .zip(total)
         .map(|(used, total)| used.value() / total.value().max(1.0))
         .or_else(|| model.visual().primary().map(|value| value.value()));
-
-    if left.height <= 2 {
-        let compact_value = if occupancy == "—" {
-            value.clone()
-        } else {
-            format!("{value}  ·  {occupancy}")
-        };
-        write(
-            buffer,
-            line(left, 0),
-            &compact_value,
-            value_style(model, theme),
-        );
-        if left.height > 1 {
-            render_meter(
-                line(left, 1),
-                fraction.unwrap_or(0.0),
-                theme.chart_primary,
-                theme,
-                buffer,
-            );
-        }
-        return;
-    }
-
-    write(buffer, line(left, 0), &value, value_style(model, theme));
-    if left.height > 1 {
-        write(
-            buffer,
-            line(left, 1),
-            &format!("{occupancy} used"),
-            context_style(model, theme),
-        );
-    }
 
     let mut details = String::new();
     if let Some(pressure) = context
@@ -154,18 +136,32 @@ fn render_memory(
     {
         details = format!("{} available", format_bytes(available.value()));
     }
-    if left.height > 3 {
-        write(buffer, line(left, 2), &details, context_style(model, theme));
-        render_meter(
-            line(left, 3),
-            fraction.unwrap_or(0.0),
-            theme.chart_primary,
-            theme,
-            buffer,
+    if body.height == 1 {
+        write(buffer, line(body, 0), &value, value_style(model, theme));
+        return;
+    }
+
+    // Memory is an occupancy instrument, not a temporal signal. The value and
+    // occupancy share one grid row; the following rows are context and a
+    // single wide gauge. No history is read here.
+    write(buffer, line(body, 0), &value, value_style(model, theme));
+    let occupancy_width = u16::try_from(occupancy.chars().count()).unwrap_or(body.width);
+    if occupancy_width < body.width {
+        buffer.set_stringn(
+            body.right().saturating_sub(occupancy_width),
+            body.y,
+            occupancy,
+            usize::from(occupancy_width),
+            context_style(model, theme),
         );
-    } else {
+    }
+    if body.height > 2 && !details.is_empty() {
+        write(buffer, line(body, 1), &details, context_style(model, theme));
+    }
+    let meter_row = if body.height > 2 { 2 } else { 1 };
+    if meter_row < body.height {
         render_meter(
-            line(left, 2),
+            line(body, meter_row),
             fraction.unwrap_or(0.0),
             theme.chart_primary,
             theme,
@@ -176,7 +172,7 @@ fn render_memory(
 
 fn render_gpu(
     model: WidgetRenderModel,
-    preset: DashboardPreset,
+    _preset: DashboardPreset,
     area: Rect,
     theme: &Theme,
     buffer: &mut Buffer,
@@ -194,13 +190,12 @@ fn render_gpu(
         render_unavailable(body, model, theme, buffer);
         return;
     };
-    let (left, graph) = split(body, preset);
     let value = model
         .visual()
         .primary()
         .map_or_else(|| "—".to_owned(), |value| format_percent(value.value()));
-    write(buffer, left, &value, value_style(model, theme));
-    if left.height > 1 {
+    write(buffer, line(body, 0), &value, value_style(model, theme));
+    if body.height > 1 {
         let vram = context
             .vram_used()
             .zip(context.vram_total())
@@ -209,17 +204,27 @@ fn render_gpu(
             .temperature()
             .map(|value| format_temperature(value.value()));
         let text = match (vram, temperature) {
-            (Some(vram), Some(temperature)) if left.width >= 24 => {
-                format!("VRAM {vram}  ·  {temperature}")
-            }
             (Some(vram), Some(temperature)) => format!("{vram}  ·  {temperature}"),
-            (Some(vram), None) => format!("VRAM {vram}"),
+            (Some(vram), None) => vram,
             (None, Some(temperature)) => temperature,
             (None, None) => String::new(),
         };
-        write(buffer, line(left, 1), &text, context_style(model, theme));
+        let usage = model.visual().primary().map(|value| value.value());
+        if let Some(usage) = usage {
+            render_segmented_meter(line(body, 1), usage, theme.chart_primary, theme, buffer);
+            if body.height > 2 {
+                write(buffer, line(body, 2), &text, context_style(model, theme));
+            }
+        } else {
+            write(
+                buffer,
+                line(body, 1),
+                "telemetry unavailable",
+                context_style(model, theme),
+            );
+        }
     }
-    if left.height > 2 && preset == DashboardPreset::LargeWidescreen {
+    if body.height > 3 && model.visual().primary().is_some() {
         let frequency = context
             .frequency()
             .map(|value| format_frequency(value.value()));
@@ -232,35 +237,22 @@ fn render_gpu(
             (None, Some(power)) => power,
             (None, None) => String::new(),
         };
-        write(buffer, line(left, 2), &text, context_style(model, theme));
-    }
-    if preset != DashboardPreset::Compact
-        && graph.width >= MIN_GRAPH_WIDTH
-        && graph.height >= 2
-        && let Some(sparkline) = sparkline(model, BlockId::PrimarySparkline)
-    {
-        let trace = Rect::new(
-            graph.x,
-            graph.y,
-            graph.width,
-            graph.height.saturating_sub(1),
-        );
-        let timestamp = Rect::new(graph.x, graph.bottom().saturating_sub(1), graph.width, 1);
-        if trace.height > 0 {
-            render_vital_line(sparkline, trace, 0.34, theme.chart_primary, theme, buffer);
-        }
-        render_window(sparkline, timestamp, theme, buffer);
+        write(buffer, line(body, 3), &text, context_style(model, theme));
     }
 }
 
 fn render_network(
     model: WidgetRenderModel,
-    preset: DashboardPreset,
     area: Rect,
     theme: &Theme,
     buffer: &mut Buffer,
+    inventory: Option<&HardwareInventory>,
 ) {
-    render_header("⇄ Network", model, area, theme, buffer);
+    let title = inventory.and_then(network_inventory_label).map_or_else(
+        || "⇄ Network".to_owned(),
+        |label| format!("⇄ Network · {label}"),
+    );
+    render_header(&title, model, area, theme, buffer);
     let body = body(area);
     if body.height == 0 {
         return;
@@ -270,7 +262,6 @@ fn render_network(
         render_unavailable(body, model, theme, buffer);
         return;
     };
-    let (left, graph) = split(body, preset);
     let download = context
         .download()
         .map_or_else(|| "—".to_owned(), |value| format_rate(value.value()));
@@ -279,33 +270,47 @@ fn render_network(
         .map_or_else(|| "—".to_owned(), |value| format_rate(value.value()));
     write(
         buffer,
-        left,
+        line(body, 0),
         &format!("↓ {download}"),
         value_style_with(model, theme, theme.chart_primary),
     );
-    if left.height > 1 {
+    if body.height > 1 {
         write(
             buffer,
-            line(left, 1),
+            line(body, 1),
             &format!("↑ {upload}"),
             value_style_with(model, theme, theme.chart_secondary),
         );
     }
-    if left.height > 2 {
+    let mut graph_offset = 2;
+    if body.height >= 7 {
         let totals = context
             .download_total()
             .zip(context.upload_total())
             .map_or_else(String::new, |(download, upload)| {
                 format!(
-                    "{}  ·  {} total",
+                    "Σ {}  ·  {}",
                     format_bytes(download.value()),
                     format_bytes(upload.value())
                 )
             });
-        write(buffer, line(left, 2), &totals, context_style(model, theme));
+        if !totals.is_empty() {
+            write(
+                buffer,
+                line(body, graph_offset),
+                &totals,
+                context_style(model, theme),
+            );
+            graph_offset += 1;
+        }
     }
-    if preset != DashboardPreset::Compact
-        && graph.width >= MIN_GRAPH_WIDTH
+    let graph = Rect::new(
+        body.x,
+        body.y.saturating_add(graph_offset),
+        body.width,
+        body.height.saturating_sub(graph_offset),
+    );
+    if graph.width >= MIN_GRAPH_WIDTH
         && let Some((download_area, upload_area, timestamp_area)) = dual_graph_areas(graph)
     {
         if let Some(sparkline) = sparkline(model, BlockId::PrimarySparkline) {
@@ -332,9 +337,22 @@ fn render_network(
     }
 }
 
+fn network_inventory_label(inventory: &HardwareInventory) -> Option<String> {
+    let physical = inventory
+        .networks
+        .iter()
+        .filter(|network| !is_loopback(&network.name))
+        .collect::<Vec<_>>();
+    match physical.as_slice() {
+        [] => Some("no physical interface".to_owned()),
+        [network] => Some(network.name.clone()),
+        _ => Some(format!("{} interfaces", physical.len())),
+    }
+}
+
 fn render_storage(
     model: WidgetRenderModel,
-    preset: DashboardPreset,
+    _preset: DashboardPreset,
     area: Rect,
     theme: &Theme,
     buffer: &mut Buffer,
@@ -349,7 +367,6 @@ fn render_storage(
         render_unavailable(body, model, theme, buffer);
         return;
     };
-    let (left, graph) = split(body, preset);
     let value = context.used_space().zip(context.total_space()).map_or_else(
         || "—".to_owned(),
         |(used, total)| {
@@ -360,8 +377,8 @@ fn render_storage(
             )
         },
     );
-    write(buffer, left, &value, value_style(model, theme));
-    if left.height > 1 {
+    write(buffer, line(body, 0), &value, value_style(model, theme));
+    if body.height > 1 {
         let text = match (context.read_rate(), context.write_rate()) {
             (Some(read), Some(write)) => format!(
                 "R {}  ·  W {}",
@@ -372,52 +389,301 @@ fn render_storage(
             (None, Some(write)) => format!("W {}", format_rate(write.value())),
             _ => String::new(),
         };
-        write(buffer, line(left, 1), &text, context_style(model, theme));
+        write(buffer, line(body, 1), &text, context_style(model, theme));
     }
-    if left.height > 2 {
+    if body.height > 2 {
         let fraction = context
             .used_space()
             .zip(context.total_space())
             .map(|(used, total)| used.value() / total.value().max(1.0))
             .or_else(|| model.visual().primary().map(|value| value.value()));
         render_meter(
-            line(left, 2),
+            line(body, 2),
             fraction.unwrap_or(0.0),
             theme.chart_primary,
             theme,
             buffer,
         );
     }
-    if left.height > 3 {
+    if body.height > 3 {
         let text = context.latency().map_or_else(String::new, |value| {
             format!("latency {:.0} ms", value.value() * 1000.0)
         });
-        write(buffer, line(left, 3), &text, context_style(model, theme));
+        write(buffer, line(body, 3), &text, context_style(model, theme));
     }
-    if preset != DashboardPreset::Compact
-        && graph.width >= MIN_GRAPH_WIDTH
-        && let Some((read_area, write_area, timestamp_area)) = dual_graph_areas(graph)
-    {
-        if let Some(sparkline) = sparkline(model, BlockId::SecondarySparkline) {
-            render_vital_line(
-                sparkline,
-                read_area,
-                0.40,
+}
+
+fn render_gpu_inventory(
+    model: WidgetRenderModel,
+    inventory: &HardwareInventory,
+    area: Rect,
+    theme: &Theme,
+    buffer: &mut Buffer,
+) {
+    clear_surface(area, theme, buffer);
+    let primary_index = select_primary_gpu(&inventory.gpus);
+    let primary = &inventory.gpus[primary_index];
+    let primary_name = gpu_display_name(&primary.name);
+    let title = if inventory.gpus.len() > 1 {
+        format!("◇ GPU · {primary_name} ({}/{})", 1, inventory.gpus.len())
+    } else {
+        format!("◇ GPU · {primary_name}")
+    };
+    render_header(&title, model, area, theme, buffer);
+    let body = body(area);
+    if body.height == 0 {
+        return;
+    }
+    let name = gpu_display_name(&primary.name);
+    if body.height == 1 {
+        let status = if gpu_has_usage(primary) {
+            format!("{name}  {}", gpu_usage_text(primary))
+        } else {
+            format!("{name}  ·  {}", gpu_unavailable_label(primary))
+        };
+        write(
+            buffer,
+            line(body, 0),
+            &status,
+            context_style_for_theme(theme),
+        );
+    } else if gpu_has_usage(primary) {
+        let usage = primary.utilization_percent.unwrap_or(0.0).clamp(0.0, 100.0) / 100.0;
+        write(
+            buffer,
+            line(body, 0),
+            &gpu_usage_text(primary),
+            value_style_for_inventory(primary.availability, theme),
+        );
+        render_segmented_meter(line(body, 1), usage, theme.chart_primary, theme, buffer);
+        if body.height > 2 {
+            write(
+                buffer,
+                line(body, 2),
+                &gpu_context(primary),
+                context_style_for_theme(theme),
+            );
+        }
+    } else {
+        write(
+            buffer,
+            line(body, 0),
+            gpu_unavailable_label(primary),
+            context_style_for_theme(theme),
+        );
+        if body.height > 1 {
+            let context = gpu_context(primary);
+            if !context.is_empty() {
+                write(
+                    buffer,
+                    line(body, 1),
+                    &context,
+                    context_style_for_theme(theme),
+                );
+            }
+        }
+    }
+}
+
+fn select_primary_gpu(gpus: &[super::super::GpuDevice]) -> usize {
+    let mut selected = 0;
+    let mut selected_score = (0_u8, 0_u8, 0_u8, 0_u8);
+    for (index, gpu) in gpus.iter().enumerate() {
+        let complete = u8::from(
+            gpu.utilization_percent.is_some()
+                && gpu.vram_used_bytes.is_some()
+                && gpu.vram_total_bytes.is_some()
+                && gpu.temperature_celsius.is_some(),
+        );
+        let usage = u8::from(gpu.utilization_percent.is_some());
+        let discrete = u8::from(is_discrete_gpu(&gpu.name));
+        let telemetry = u8::from(
+            gpu.vram_used_bytes.is_some()
+                || gpu.vram_total_bytes.is_some()
+                || gpu.temperature_celsius.is_some(),
+        );
+        let score = (complete, usage, discrete, telemetry);
+        if score > selected_score {
+            selected = index;
+            selected_score = score;
+        }
+    }
+    selected
+}
+
+fn is_discrete_gpu(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    name.contains("nvidia")
+        || name.contains("geforce")
+        || name.contains("rtx")
+        || name.contains("gtx")
+}
+
+fn gpu_has_usage(gpu: &super::super::GpuDevice) -> bool {
+    gpu.utilization_percent.is_some()
+}
+
+fn gpu_unavailable_label(gpu: &super::super::GpuDevice) -> &'static str {
+    if gpu.name.to_ascii_lowercase().contains("nvidia") {
+        "driver unavailable"
+    } else {
+        "telemetry unavailable"
+    }
+}
+
+fn gpu_display_name(name: &str) -> String {
+    let lower = name.to_ascii_lowercase();
+    if lower.contains("nvidia") && lower.contains("4060") {
+        "RTX 4060".to_owned()
+    } else if lower.contains("amd") && lower.contains("radeon") {
+        "AMD Radeon".to_owned()
+    } else {
+        name.split(" · ").next().unwrap_or(name).to_owned()
+    }
+}
+
+fn gpu_usage_text(gpu: &super::super::GpuDevice) -> String {
+    gpu.utilization_percent
+        .map_or_else(|| "—".to_owned(), |value| format!("{value:.0}%"))
+}
+
+fn gpu_context(gpu: &super::super::GpuDevice) -> String {
+    let mut values = Vec::new();
+    if let Some((used, total)) = gpu.vram_used_bytes.zip(gpu.vram_total_bytes) {
+        values.push(format_compact_capacity(used, total));
+    }
+    if let Some(temperature) = gpu.temperature_celsius {
+        values.push(format!("{temperature:.0}°C"));
+    }
+    if let Some(frequency) = gpu.frequency_hz {
+        values.push(format_frequency(frequency));
+    }
+    values.join(" · ")
+}
+
+fn render_segmented_meter(
+    area: Rect,
+    value: f64,
+    fill: ratatui::style::Color,
+    theme: &Theme,
+    buffer: &mut Buffer,
+) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let filled = (f64::from(area.width) * value.clamp(0.0, 1.0)).round() as u16;
+    for index in 0..area.width {
+        let (character, color) = if index < filled {
+            ('█', fill)
+        } else {
+            ('░', theme.border)
+        };
+        buffer[(area.x + index, area.y)]
+            .set_char(character)
+            .set_style(Style::default().fg(color).bg(theme.surface));
+    }
+}
+
+fn value_style_for_inventory(
+    availability: super::super::MetricAvailability,
+    theme: &Theme,
+) -> Style {
+    Style::default()
+        .fg(
+            if availability == super::super::MetricAvailability::Available {
+                theme.text
+            } else {
+                theme.text_muted
+            },
+        )
+        .bg(theme.surface)
+}
+
+fn is_loopback(name: &str) -> bool {
+    name == "lo" || name.starts_with("lo:")
+}
+
+fn render_storage_inventory(
+    model: WidgetRenderModel,
+    inventory: &HardwareInventory,
+    area: Rect,
+    theme: &Theme,
+    buffer: &mut Buffer,
+) {
+    if inventory.storages.is_empty() {
+        return;
+    }
+    clear_surface(area, theme, buffer);
+    let content = body(area);
+    buffer.set_style(content, Style::default().bg(theme.surface));
+    let title = format!("▰ Storage ({})", inventory.storages.len());
+    render_header(&title, model, area, theme, buffer);
+    if content.height == 0 {
+        return;
+    }
+    // A device row is intentionally a value line plus a full-width capacity
+    // gauge. If the panel is shorter, values remain visible and the gauge is
+    // the first detail to give up.
+    let rows_per_device = if content.height >= inventory.storages.len() as u16 * 2 {
+        2
+    } else {
+        1
+    };
+    let visible = usize::from(content.height / rows_per_device.max(1));
+    for (index, device) in inventory.storages.iter().take(visible).enumerate() {
+        let row = index as u16 * rows_per_device;
+        let value = storage_value(device);
+        write(
+            buffer,
+            line(content, row),
+            &value,
+            context_style_for_theme(theme),
+        );
+        if rows_per_device == 2 {
+            let fraction = device
+                .used_bytes
+                .zip(device.total_bytes)
+                .map_or(0.0, |(used, total)| used / total.max(1.0));
+            render_meter(
+                line(content, row.saturating_add(1)),
+                fraction,
                 theme.chart_primary,
                 theme,
                 buffer,
             );
         }
-        if let Some(sparkline) = sparkline(model, BlockId::TertiarySparkline) {
-            render_vital_line(
-                sparkline,
-                write_area,
-                0.40,
-                theme.chart_secondary,
-                theme,
-                buffer,
-            );
-            render_window(sparkline, timestamp_area, theme, buffer);
+    }
+    if visible < inventory.storages.len() && content.height > 0 {
+        write(
+            buffer,
+            line(content, content.height.saturating_sub(1)),
+            &format!("+{} devices", inventory.storages.len() - visible),
+            context_style_for_theme(theme),
+        );
+    }
+}
+
+fn storage_value(device: &super::super::StorageDevice) -> String {
+    let capacity = device.used_bytes.zip(device.total_bytes).map_or_else(
+        || "—".to_owned(),
+        |(used, total)| format!("{} / {}", format_bytes(used), format_bytes(total)),
+    );
+    let percent = device.used_bytes.zip(device.total_bytes).map_or_else(
+        || "—".to_owned(),
+        |(used, total)| format_percent(used / total.max(1.0)),
+    );
+    format!("{}  {}  {}", device.name, capacity, percent)
+}
+
+fn context_style_for_theme(theme: &Theme) -> Style {
+    Style::default().fg(theme.text_muted).bg(theme.surface)
+}
+
+fn clear_surface(area: Rect, theme: &Theme, buffer: &mut Buffer) {
+    buffer.set_style(area, Style::default().bg(theme.surface));
+    for y in area.y..area.bottom() {
+        for x in area.x..area.right() {
+            buffer[(x, y)].set_symbol(" ");
         }
     }
 }
@@ -454,25 +720,6 @@ fn body(area: Rect) -> Rect {
         area.y.saturating_add(1),
         area.width,
         area.height.saturating_sub(1),
-    )
-}
-
-fn split(area: Rect, preset: DashboardPreset) -> (Rect, Rect) {
-    if preset == DashboardPreset::Compact || area.width < 24 {
-        return (area, Rect::new(area.right(), area.y, 0, area.height));
-    }
-    let graph_width = (area.width.saturating_mul(GRAPH_RATIO) / 100)
-        .max(MIN_GRAPH_WIDTH)
-        .min(area.width.saturating_sub(GAP + 8));
-    let left_width = area.width.saturating_sub(graph_width).saturating_sub(GAP);
-    (
-        Rect::new(area.x, area.y, left_width, area.height),
-        Rect::new(
-            area.x.saturating_add(left_width + GAP),
-            area.y,
-            graph_width,
-            area.height,
-        ),
     )
 }
 
@@ -887,6 +1134,82 @@ mod tests {
         assert_eq!(
             format_compact_capacity(0.7 * gibibyte, 8.0 * gibibyte),
             "0.7 / 8 GB"
+        );
+    }
+
+    #[test]
+    fn segmented_meter_is_proportional_and_width_adaptive() {
+        let theme = crate::theme::Theme::pulse();
+        let mut narrow = Buffer::empty(Rect::new(0, 0, 10, 1));
+        render_segmented_meter(
+            Rect::new(0, 0, 10, 1),
+            0.3,
+            theme.chart_primary,
+            &theme,
+            &mut narrow,
+        );
+        assert_eq!(
+            narrow
+                .content
+                .iter()
+                .filter(|cell| cell.symbol() == "█")
+                .count(),
+            3
+        );
+        assert_eq!(
+            narrow
+                .content
+                .iter()
+                .filter(|cell| cell.symbol() == "░")
+                .count(),
+            7
+        );
+
+        let mut wide = Buffer::empty(Rect::new(0, 0, 20, 1));
+        render_segmented_meter(
+            Rect::new(0, 0, 20, 1),
+            0.3,
+            theme.chart_primary,
+            &theme,
+            &mut wide,
+        );
+        assert_eq!(
+            wide.content
+                .iter()
+                .filter(|cell| cell.symbol() == "█")
+                .count(),
+            6
+        );
+    }
+
+    #[test]
+    fn primary_gpu_selection_prefers_telemetry_and_has_deterministic_fallback() {
+        let gpu = |id: &str, name: &str, usage: Option<f64>, complete: bool| {
+            super::super::super::GpuDevice {
+                id: super::super::super::HardwareId::new(
+                    super::super::super::HardwareKind::Gpu,
+                    id,
+                )
+                .unwrap(),
+                name: name.to_owned(),
+                utilization_percent: usage,
+                vram_used_bytes: complete.then_some(1.0),
+                vram_total_bytes: complete.then_some(8.0),
+                temperature_celsius: complete.then_some(50.0),
+                frequency_hz: None,
+                power_watts: None,
+                availability: super::super::super::MetricAvailability::Available,
+            }
+        };
+        let complete_amd = gpu("amd", "AMD Radeon", Some(40.0), true);
+        let nvidia = gpu("nvidia", "NVIDIA GeForce RTX 4060", Some(20.0), false);
+        assert_eq!(select_primary_gpu(&[complete_amd, nvidia]), 0);
+
+        let amd_without_telemetry = gpu("amd", "AMD Radeon", None, false);
+        let nvidia_without_telemetry = gpu("nvidia", "NVIDIA GeForce RTX 4060", None, false);
+        assert_eq!(
+            select_primary_gpu(&[amd_without_telemetry, nvidia_without_telemetry]),
+            1
         );
     }
 }

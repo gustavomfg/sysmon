@@ -14,8 +14,6 @@ use super::super::{
 };
 use super::renderer::TerminalRenderError;
 
-const COLUMN_GAP: u16 = 2;
-const RIGHT_WIDTH_PERCENT: u16 = 34;
 const MIN_PLOT_RANGE: f64 = 0.08;
 const PLOT_MARGIN_RATIO: f64 = 0.18;
 const RENDER_EMA_ALPHA: f64 = 0.32;
@@ -116,62 +114,47 @@ fn render_compact_body(model: WidgetRenderModel, area: Rect, theme: &Theme, buff
     }
 }
 
-fn split_body(area: Rect) -> (Rect, Rect) {
-    let right_width = (area.width.saturating_mul(RIGHT_WIDTH_PERCENT) / 100)
-        .max(12)
-        .min(area.width.saturating_sub(COLUMN_GAP).saturating_sub(10));
-    let left_width = area
-        .width
-        .saturating_sub(right_width)
-        .saturating_sub(COLUMN_GAP);
-    (
-        Rect::new(area.x, area.y, left_width, area.height),
-        Rect::new(
-            area.x.saturating_add(left_width).saturating_add(COLUMN_GAP),
-            area.y,
-            right_width,
-            area.height,
-        ),
-    )
-}
-
 #[derive(Debug, Clone, Copy)]
 struct CpuCardRegions {
     value: Rect,
-    context: Rect,
+    hardware: Rect,
     secondary: Rect,
     history: Rect,
 }
 
 fn render_body(model: WidgetRenderModel, area: Rect, theme: &Theme, buffer: &mut Buffer) {
-    let (left, history) = split_body(area);
+    let value_offset = if area.height >= 6 { 1 } else { 0 };
+    let value = line_region(area, area.y.saturating_add(value_offset));
+    let hardware = line_region(area, value.y.saturating_add(1));
+    let secondary = line_region(area, hardware.y.saturating_add(1));
+    let history_y = secondary.y.saturating_add(1);
     let regions = CpuCardRegions {
-        value: line_region(left, value_row(area)),
-        context: line_region(left, context_row(area)),
-        secondary: line_region(left, secondary_row(area)),
-        history,
+        value,
+        hardware,
+        secondary,
+        history: Rect::new(
+            area.x,
+            history_y.min(area.bottom()),
+            area.width,
+            area.bottom().saturating_sub(history_y),
+        ),
     };
 
     render_primary_value(model, regions.value, theme, buffer);
 
-    let hardware = hardware_line(model, left.width);
-    if !hardware.is_empty() {
+    let hardware_text = hardware_line(model, area.width);
+    if !hardware_text.is_empty() {
         write(
             buffer,
-            regions.context,
-            regions.context.x,
-            regions.context.y,
-            &hardware,
+            regions.hardware,
+            regions.hardware.x,
+            regions.hardware.y,
+            &hardware_text,
             context_style(model, theme),
         );
     }
 
-    let secondary = if hardware.is_empty() {
-        regions.context
-    } else {
-        regions.secondary
-    };
-    render_secondary_context(model, secondary, theme, buffer);
+    render_secondary_context(model, regions.secondary, theme, buffer);
 
     render_history(model, regions.history, theme, buffer);
 }
@@ -182,22 +165,6 @@ fn line_region(area: Rect, row: u16) -> Rect {
     } else {
         Rect::new(area.x, row, area.width, 1)
     }
-}
-
-fn value_row(area: Rect) -> u16 {
-    area.y.saturating_add(if area.height >= 8 {
-        3
-    } else {
-        u16::from(area.height >= 6) + 1
-    })
-}
-
-fn context_row(area: Rect) -> u16 {
-    value_row(area).saturating_add(u16::from(area.height >= 7) + 1)
-}
-
-fn secondary_row(area: Rect) -> u16 {
-    context_row(area).saturating_add(1)
 }
 
 fn render_primary_value(model: WidgetRenderModel, area: Rect, theme: &Theme, buffer: &mut Buffer) {
@@ -242,14 +209,14 @@ fn render_history(model: WidgetRenderModel, area: Rect, theme: &Theme, buffer: &
         write(buffer, area, area.x, area.y, "—", chart_style(model, theme));
         return;
     };
-    if area.width < 8 || area.height < 3 {
+    if area.width < 8 || area.height < 2 {
         render_compact_history(sparkline, area, model, theme, buffer);
         return;
     }
 
-    let timestamp_height = u16::from(area.height >= 4);
+    let timestamp_height = 1;
     let available_height = area.height.saturating_sub(timestamp_height);
-    let plot_height = available_height.min(4);
+    let plot_height = available_height.clamp(1, 4);
     let plot = Rect::new(
         area.x,
         area.y
@@ -884,7 +851,7 @@ mod tests {
         let output = text(&rendered);
         assert!(output.contains("◈ CPU"));
         assert_eq!(output.matches("42%").count(), 1);
-        assert_eq!(rendered[(0, 4)].symbol(), "4");
+        assert_eq!(rendered[(0, 2)].symbol(), "4");
         assert!(output.contains("8 cores"));
         assert!(output.contains("3.2 GHz"));
         assert!(output.contains("55.0°C"));
@@ -898,12 +865,12 @@ mod tests {
         let rendered = render(DashboardPreset::Standard, 43, 10);
         let output = text(&rendered);
         assert_eq!(output.matches("42%").count(), 1);
-        assert_eq!(rendered[(0, 4)].symbol(), "4");
+        assert_eq!(rendered[(0, 2)].symbol(), "4");
         assert!(output.contains("8 cores"));
         assert!(output.contains("↑ +32%"));
         assert!(!output.contains('█'));
 
-        let chart_cells = braille_cells(&rendered, 28, 43, 1, 9);
+        let chart_cells = braille_cells(&rendered, 0, 43, 5, 9);
         assert!(chart_cells >= 5);
     }
 
@@ -912,13 +879,13 @@ mod tests {
         let rendered = render(DashboardPreset::Widescreen, 43, 10);
 
         assert_eq!(rendered[(0, 1)].symbol(), " ");
-        assert_eq!(rendered[(0, 4)].symbol(), "4");
-        assert_eq!(rendered[(0, 6)].symbol(), "8");
-        assert_eq!(rendered[(0, 7)].symbol(), "5");
+        assert_eq!(rendered[(0, 2)].symbol(), "4");
+        assert_eq!(rendered[(0, 3)].symbol(), "8");
+        assert_eq!(rendered[(0, 4)].symbol(), "5");
 
-        let chart_rows = (1..9)
+        let chart_rows = (5..9)
             .filter(|y| {
-                (28..43).any(|x| {
+                (0..43).any(|x| {
                     rendered[(x, *y)]
                         .symbol()
                         .chars()
@@ -1012,8 +979,7 @@ mod tests {
     #[test]
     fn narrow_card_uses_compact_hardware_context_without_clipping() {
         let output = text(&render(DashboardPreset::Standard, 29, 9));
-        assert!(output.contains("8c · 3.2GHz"));
-        assert!(!output.contains("3.2 G"));
+        assert!(output.contains("8 cores · 3.2 GHz"));
     }
 
     #[test]

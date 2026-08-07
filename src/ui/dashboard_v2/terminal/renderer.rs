@@ -2,7 +2,7 @@ use ratatui::{buffer::Buffer, layout::Rect, style::Style};
 
 use crate::theme::Theme;
 
-use super::super::{DashboardBounds, DashboardPreset, WidgetRenderModel};
+use super::super::{DashboardBounds, DashboardPreset, HardwareInventory, WidgetRenderModel};
 use super::{
     blocks, cpu::CpuCardRenderer, layout::TerminalLayout, layout::TerminalLayoutError, metrics,
 };
@@ -38,6 +38,18 @@ impl TerminalRenderer {
         theme: &Theme,
         buffer: &mut Buffer,
     ) -> Result<(), TerminalRenderError> {
+        self.render_with_inventory(model, preset, bounds, theme, buffer, None)
+    }
+
+    pub(crate) fn render_with_inventory(
+        self,
+        model: WidgetRenderModel,
+        preset: DashboardPreset,
+        bounds: DashboardBounds,
+        theme: &Theme,
+        buffer: &mut Buffer,
+        inventory: Option<&HardwareInventory>,
+    ) -> Result<(), TerminalRenderError> {
         if model.visual().widget_id() == super::super::DashboardWidgetId::Cpu {
             return CpuCardRenderer::render(model, preset, bounds, theme, buffer);
         }
@@ -48,7 +60,7 @@ impl TerminalRenderer {
                 | super::super::DashboardWidgetId::Network
                 | super::super::DashboardWidgetId::Storage
         ) {
-            return metrics::render(model, preset, bounds, theme, buffer);
+            return metrics::render_with_inventory(model, preset, bounds, theme, buffer, inventory);
         }
         let layout = TerminalLayout::new(model, preset, bounds, *buffer.area())?;
         buffer.set_style(layout.area(), Style::default().bg(theme.surface));
@@ -77,6 +89,25 @@ impl TerminalRenderer {
         .map_err(|_| TerminalRenderError::BoundsOverflow)?;
         self.render(model, preset, bounds, theme, buffer)
     }
+
+    pub(crate) fn render_rect_with_inventory(
+        self,
+        model: WidgetRenderModel,
+        preset: DashboardPreset,
+        area: Rect,
+        theme: &Theme,
+        buffer: &mut Buffer,
+        inventory: &HardwareInventory,
+    ) -> Result<(), TerminalRenderError> {
+        let bounds = DashboardBounds::new(
+            usize::from(area.x),
+            usize::from(area.y),
+            usize::from(area.width),
+            usize::from(area.height),
+        )
+        .map_err(|_| TerminalRenderError::BoundsOverflow)?;
+        self.render_with_inventory(model, preset, bounds, theme, buffer, Some(inventory))
+    }
 }
 
 #[cfg(test)]
@@ -96,9 +127,9 @@ mod tests {
         StorageMetricInput, StorageMetricModel,
     };
     use super::super::super::{
-        DashboardState, DashboardWidgetId, MetricAvailability, MetricUnit, MetricValue,
-        MetricVisual, VisualPriority, WidgetAvailability, WidgetContext, WidgetRenderer,
-        WidgetState,
+        DashboardState, DashboardWidgetId, GpuDevice, HardwareId, HardwareInventory, HardwareKind,
+        MetricAvailability, MetricUnit, MetricValue, MetricVisual, StorageDevice, VisualPriority,
+        WidgetAvailability, WidgetContext, WidgetRenderer, WidgetState,
     };
     use super::*;
 
@@ -277,15 +308,15 @@ mod tests {
     }
 
     #[test]
-    fn dashboard_cpu_route_uses_product_value_and_right_hand_plot() {
+    fn dashboard_cpu_route_uses_product_value_and_full_width_plot() {
         let buffer = render_cpu(DashboardPreset::Standard, 43, 10);
         let output = buffer_text(&buffer);
         assert_eq!(output.matches("42%").count(), 1);
-        assert_eq!(buffer[(0, 4)].symbol(), "4");
+        assert_eq!(buffer[(0, 2)].symbol(), "4");
 
         let mut chart_cells = 0;
-        for y in 2..10 {
-            for x in 28..43 {
+        for y in 5..10 {
+            for x in 0..43 {
                 if buffer[(x, y)]
                     .symbol()
                     .chars()
@@ -305,7 +336,7 @@ mod tests {
         let standard_text = buffer_text(&standard);
         assert!(standard_text.contains("◈ CPU"));
         assert_eq!(standard_text.matches("42%").count(), 1);
-        assert_eq!(standard[(0, 3)].symbol(), "4");
+        assert_eq!(standard[(0, 2)].symbol(), "4");
         assert!(standard_text.contains("↑ +12%"));
         assert!(standard_text.contains("8 cores"));
         assert!(standard_text.contains("55.0°C"));
@@ -518,7 +549,7 @@ mod tests {
             .unwrap();
         assert!(buffer_text(&buffer).contains("60 B"));
         let memory_text = buffer_text(&buffer);
-        assert!(memory_text.contains("60% used"));
+        assert!(memory_text.contains("60%"));
         assert!(!memory_text.lines().any(|line| line.trim() == "60%"));
         assert!(memory_text.contains('━'));
         assert!(
@@ -575,6 +606,147 @@ mod tests {
             .unwrap();
         assert!(buffer_text(&comparison).contains('↓'));
         assert!(buffer_text(&comparison).contains('↑'));
+    }
+
+    #[test]
+    fn storage_inventory_renderer_keeps_multiple_devices_visible() {
+        let model = WidgetRenderer::render_storage(
+            storage_model(),
+            context(DashboardPreset::LargeWidescreen),
+        )
+        .unwrap()
+        .unwrap();
+        let storage_device =
+            |key: &str, name: &str, model: &str, total: f64, used: f64| StorageDevice {
+                id: HardwareId::new(HardwareKind::Storage, key).unwrap(),
+                name: name.to_owned(),
+                model: Some(model.to_owned()),
+                mount_points: Vec::new(),
+                used_bytes: Some(used),
+                total_bytes: Some(total),
+                read_bytes_per_sec: Some(0.0),
+                write_bytes_per_sec: Some(0.0),
+                latency_seconds: None,
+                availability: MetricAvailability::Available,
+                is_virtual: false,
+            };
+        let inventory = HardwareInventory::new(
+            vec![
+                storage_device("nvme0n1", "nvme0n1", "KINGSTON SNV2S1000G", 931.5, 215.0),
+                storage_device("sda", "sda", "KINGSTON SA400S37480G", 447.1, 412.0),
+            ],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 72, 10));
+        TerminalRenderer::new()
+            .render_rect_with_inventory(
+                model,
+                DashboardPreset::LargeWidescreen,
+                Rect::new(0, 0, 72, 10),
+                &crate::theme::Theme::pulse(),
+                &mut buffer,
+                &inventory,
+            )
+            .unwrap();
+        let text = buffer_text(&buffer);
+        assert!(text.contains("sda"));
+        assert!(text.contains("nvme0n1"));
+        assert!(text.matches('━').count() >= 2);
+    }
+
+    #[test]
+    fn gpu_inventory_renderer_keeps_devices_separate_and_explains_missing_telemetry() {
+        let model = WidgetRenderer::render_gpu(gpu_model(), context(DashboardPreset::Standard))
+            .unwrap()
+            .unwrap();
+        let inventory = HardwareInventory::new(
+            Vec::new(),
+            vec![
+                GpuDevice {
+                    id: HardwareId::new(HardwareKind::Gpu, "amd").unwrap(),
+                    name: "AMD Radeon · AMDGPU".to_owned(),
+                    utilization_percent: None,
+                    vram_used_bytes: None,
+                    vram_total_bytes: None,
+                    temperature_celsius: None,
+                    frequency_hz: None,
+                    power_watts: None,
+                    availability: MetricAvailability::Available,
+                },
+                GpuDevice {
+                    id: HardwareId::new(HardwareKind::Gpu, "nvidia").unwrap(),
+                    name: "NVIDIA GeForce RTX 4060".to_owned(),
+                    utilization_percent: None,
+                    vram_used_bytes: None,
+                    vram_total_bytes: None,
+                    temperature_celsius: None,
+                    frequency_hz: None,
+                    power_watts: None,
+                    availability: MetricAvailability::Available,
+                },
+            ],
+            Vec::new(),
+            Vec::new(),
+        );
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 56, 8));
+        TerminalRenderer::new()
+            .render_rect_with_inventory(
+                model,
+                DashboardPreset::Standard,
+                Rect::new(0, 0, 56, 8),
+                &crate::theme::Theme::pulse(),
+                &mut buffer,
+                &inventory,
+            )
+            .unwrap();
+        let text = buffer_text(&buffer);
+        assert!(text.contains("RTX 4060"));
+        assert!(text.contains("driver unavailable"));
+        assert!(!text.contains("AMD Radeon"));
+        assert!(!text.contains("█"));
+    }
+
+    #[test]
+    fn gpu_inventory_renderer_uses_a_segmented_meter_for_real_usage() {
+        let model = WidgetRenderer::render_gpu(gpu_model(), context(DashboardPreset::Standard))
+            .unwrap()
+            .unwrap();
+        let inventory = HardwareInventory::new(
+            Vec::new(),
+            vec![GpuDevice {
+                id: HardwareId::new(HardwareKind::Gpu, "nvidia").unwrap(),
+                name: "NVIDIA GeForce RTX 4060".to_owned(),
+                utilization_percent: Some(26.0),
+                vram_used_bytes: Some(0.7 * 1024.0 * 1024.0 * 1024.0),
+                vram_total_bytes: Some(8.0 * 1024.0 * 1024.0 * 1024.0),
+                temperature_celsius: Some(51.0),
+                frequency_hz: None,
+                power_watts: None,
+                availability: MetricAvailability::Available,
+            }],
+            Vec::new(),
+            Vec::new(),
+        );
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 60, 6));
+        TerminalRenderer::new()
+            .render_rect_with_inventory(
+                model,
+                DashboardPreset::Standard,
+                Rect::new(0, 0, 60, 6),
+                &crate::theme::Theme::pulse(),
+                &mut buffer,
+                &inventory,
+            )
+            .unwrap();
+        let text = buffer_text(&buffer);
+        assert!(text.contains("RTX 4060"));
+        assert!(text.contains("26%"));
+        assert!(text.contains("█"));
+        assert!(text.contains("░"));
+        assert!(text.contains("0.7 / 8 GB"));
+        assert!(text.contains("51°C"));
     }
 
     #[test]
