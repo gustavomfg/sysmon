@@ -158,7 +158,11 @@ fn render_memory(
     if body.height > 2 && !details.is_empty() {
         write(buffer, line(body, 1), &details, context_style(model, theme));
     }
-    let meter_row = if body.height > 2 { 2 } else { 1 };
+    let meter_row = if body.height > 2 {
+        body.height.saturating_sub(1)
+    } else {
+        1
+    };
     if meter_row < body.height {
         render_meter(
             line(body, meter_row),
@@ -574,9 +578,9 @@ fn render_segmented_meter(
     let filled = (f64::from(area.width) * value.clamp(0.0, 1.0)).round() as u16;
     for index in 0..area.width {
         let (character, color) = if index < filled {
-            ('█', fill)
+            ('━', fill)
         } else {
-            ('░', theme.border)
+            ('─', theme.border)
         };
         buffer[(area.x + index, area.y)]
             .set_char(character)
@@ -630,9 +634,22 @@ fn render_storage_inventory(
         1
     };
     let visible = usize::from(content.height / rows_per_device.max(1));
+    let name_width = inventory
+        .storages
+        .iter()
+        .map(|storage| storage.name.chars().count())
+        .max()
+        .unwrap_or(0);
+    let capacity_width = inventory
+        .storages
+        .iter()
+        .map(storage_capacity)
+        .map(|capacity| capacity.chars().count())
+        .max()
+        .unwrap_or(0);
     for (index, device) in inventory.storages.iter().take(visible).enumerate() {
         let row = index as u16 * rows_per_device;
-        let value = storage_value(device);
+        let value = storage_value(device, name_width, capacity_width, content.width);
         write(
             buffer,
             line(content, row),
@@ -663,16 +680,36 @@ fn render_storage_inventory(
     }
 }
 
-fn storage_value(device: &super::super::StorageDevice) -> String {
-    let capacity = device.used_bytes.zip(device.total_bytes).map_or_else(
-        || "—".to_owned(),
-        |(used, total)| format!("{} / {}", format_bytes(used), format_bytes(total)),
-    );
+fn storage_value(
+    device: &super::super::StorageDevice,
+    name_width: usize,
+    capacity_width: usize,
+    available_width: u16,
+) -> String {
+    let capacity = storage_capacity(device);
     let percent = device.used_bytes.zip(device.total_bytes).map_or_else(
         || "—".to_owned(),
         |(used, total)| format_percent(used / total.max(1.0)),
     );
-    format!("{}  {}  {}", device.name, capacity, percent)
+    let required = name_width
+        .saturating_add(capacity_width)
+        .saturating_add(percent.chars().count())
+        .saturating_add(4);
+    if required <= usize::from(available_width) {
+        format!(
+            "{:<name_width$}  {:>capacity_width$}  {:>4}",
+            device.name, capacity, percent
+        )
+    } else {
+        format!("{}  {}  {}", device.name, capacity, percent)
+    }
+}
+
+fn storage_capacity(device: &super::super::StorageDevice) -> String {
+    device.used_bytes.zip(device.total_bytes).map_or_else(
+        || "—".to_owned(),
+        |(used, total)| format!("{} / {}", format_bytes(used), format_bytes(total)),
+    )
 }
 
 fn context_style_for_theme(theme: &Theme) -> Style {
@@ -743,7 +780,7 @@ fn render_meter(
         let (character, foreground) = if position <= value {
             ('━', color)
         } else {
-            ('·', theme.border)
+            ('─', theme.border)
         };
         buffer[(area.x + column, area.y)]
             .set_char(character)
@@ -790,8 +827,15 @@ fn render_window(
 }
 
 fn dual_graph_areas(graph: Rect) -> Option<(Rect, Rect, Rect)> {
-    if graph.height < 3 {
+    if graph.height < 2 {
         return None;
+    }
+    if graph.height == 2 {
+        return Some((
+            Rect::new(graph.x, graph.y, graph.width, 1),
+            Rect::new(graph.x, graph.y.saturating_add(1), graph.width, 1),
+            Rect::default(),
+        ));
     }
     let data_height = graph.height.saturating_sub(1);
     let first_height = (data_height / 2).max(1);
@@ -1129,6 +1173,17 @@ mod tests {
     }
 
     #[test]
+    fn dual_graphs_keep_both_directions_in_a_two_row_area() {
+        let graph = Rect::new(4, 6, 18, 2);
+        let (download, upload, timestamp) = dual_graph_areas(graph).unwrap();
+        assert_eq!(download.height, 1);
+        assert_eq!(upload.height, 1);
+        assert!(timestamp.is_empty());
+        assert_eq!(download.bottom(), upload.y);
+        assert_eq!(upload.bottom(), graph.bottom());
+    }
+
+    #[test]
     fn compact_gpu_capacity_avoids_unnecessary_precision() {
         let gibibyte = 1024.0 * 1024.0 * 1024.0;
         assert_eq!(
@@ -1152,7 +1207,7 @@ mod tests {
             narrow
                 .content
                 .iter()
-                .filter(|cell| cell.symbol() == "█")
+                .filter(|cell| cell.symbol() == "━")
                 .count(),
             3
         );
@@ -1160,7 +1215,7 @@ mod tests {
             narrow
                 .content
                 .iter()
-                .filter(|cell| cell.symbol() == "░")
+                .filter(|cell| cell.symbol() == "─")
                 .count(),
             7
         );
@@ -1176,7 +1231,36 @@ mod tests {
         assert_eq!(
             wide.content
                 .iter()
-                .filter(|cell| cell.symbol() == "█")
+                .filter(|cell| cell.symbol() == "━")
+                .count(),
+            6
+        );
+    }
+
+    #[test]
+    fn occupancy_meter_uses_a_thin_track_and_proportional_fill() {
+        let theme = crate::theme::Theme::pulse();
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 10, 1));
+        render_meter(
+            Rect::new(0, 0, 10, 1),
+            0.4,
+            theme.chart_primary,
+            &theme,
+            &mut buffer,
+        );
+        assert_eq!(
+            buffer
+                .content
+                .iter()
+                .filter(|cell| cell.symbol() == "━")
+                .count(),
+            4
+        );
+        assert_eq!(
+            buffer
+                .content
+                .iter()
+                .filter(|cell| cell.symbol() == "─")
                 .count(),
             6
         );

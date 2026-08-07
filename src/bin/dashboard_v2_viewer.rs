@@ -1188,7 +1188,7 @@ mod tests {
         assert!(text.contains("nvme0n1"));
         assert!(text.contains("447.1 GB"));
         assert!(text.contains("931.5 GB"));
-        assert!(text.contains("6 physical cores"));
+        assert!(text.contains("6 physical"));
         assert!(text.contains("no live events"));
         assert!(text.contains("not connected"));
         assert!(!text.contains("browser"));

@@ -899,7 +899,14 @@ fn render_system_context(
     buffer: &mut Buffer,
 ) {
     panel_heading(area, "SYSTEM CONTEXT", theme.info, theme, buffer);
-    if let Some(context) = system_context {
+    let has_live_context = system_context.is_some_and(|context| {
+        context.physical_cores.is_some()
+            || context.logical_threads.is_some()
+            || context.total_memory_gib.is_some()
+            || context.uptime_seconds.is_some()
+            || !context.processes.is_empty()
+    });
+    if let Some(context) = system_context.filter(|_| !live_mode || has_live_context) {
         let cores = context
             .physical_cores
             .map_or_else(|| "—".to_owned(), |value| value.to_string());
@@ -913,32 +920,89 @@ fn render_system_context(
             .uptime_seconds
             .map_or_else(|| "—".to_owned(), format_uptime);
         let rows = [
-            format!("{cores} physical cores  ·  {threads} logical threads"),
-            format!("{memory}  ·  uptime {uptime}"),
-            format!("{} processes  ·  Pulse online", context.processes.len()),
+            (format!("{cores} physical"), format!("{threads} logical")),
+            (
+                format!("{} RAM", memory.trim_end_matches(" memory")),
+                format!("{uptime} uptime"),
+            ),
+            (
+                format!("{} processes", context.processes.len()),
+                "Pulse online".to_owned(),
+            ),
         ];
-        for (index, row) in rows.into_iter().enumerate() {
-            write_panel_row(
-                area,
-                2 + index as u16,
-                &row,
-                theme.text_muted,
-                theme,
-                buffer,
-            );
+        if area.width >= 30 && area.height >= 6 {
+            for (index, (left, right)) in rows.into_iter().enumerate() {
+                write_context_pair(area, 2 + index as u16, &left, &right, theme, buffer);
+            }
+        } else {
+            let compact = [
+                format!("{} cores · {} threads", cores, threads),
+                format!("{} · {} uptime", memory, uptime),
+                format!("{} processes · Pulse online", context.processes.len()),
+            ];
+            for (index, row) in compact.into_iter().enumerate() {
+                write_panel_row(
+                    area,
+                    2 + index as u16,
+                    &row,
+                    theme.text_muted,
+                    theme,
+                    buffer,
+                );
+            }
         }
     } else if live_mode {
         write_panel_row(area, 2, "not connected", theme.text_muted, theme, buffer);
     } else {
         let rows = [
-            "8 cores  ·  16 threads",
-            "16 GB memory  ·  3d 04h",
-            "Pulse online  ·  history ready",
+            ("8 physical", "16 logical"),
+            ("16 GB RAM", "3d 04h uptime"),
+            ("Pulse online", "history ready"),
         ];
-        for (index, row) in rows.into_iter().enumerate() {
-            write_panel_row(area, 2 + index as u16, row, theme.text_muted, theme, buffer);
+        if area.width >= 30 && area.height >= 6 {
+            for (index, (left, right)) in rows.into_iter().enumerate() {
+                write_context_pair(area, 2 + index as u16, left, right, theme, buffer);
+            }
+        } else {
+            for (index, (left, right)) in rows.into_iter().enumerate() {
+                let row = format!("{left} · {right}");
+                write_panel_row(
+                    area,
+                    2 + index as u16,
+                    &row,
+                    theme.text_muted,
+                    theme,
+                    buffer,
+                );
+            }
         }
     }
+}
+
+fn write_context_pair(
+    area: Rect,
+    row: u16,
+    left: &str,
+    right: &str,
+    theme: &Theme,
+    buffer: &mut Buffer,
+) {
+    if row >= area.height || area.width < 4 {
+        return;
+    }
+    let gap = 2_u16.min(area.width.saturating_sub(2));
+    let column_width = area.width.saturating_sub(gap) / 2;
+    let y = area.y.saturating_add(row);
+    let style = Style::default().fg(theme.text_muted).bg(theme.surface);
+    buffer.set_stringn(area.x, y, left, usize::from(column_width), style);
+    let right_x = area.x.saturating_add(column_width).saturating_add(gap);
+    buffer.set_stringn(
+        right_x,
+        y,
+        right,
+        usize::from(area.right().saturating_sub(right_x)),
+        style,
+    );
 }
 
 fn render_temperatures(

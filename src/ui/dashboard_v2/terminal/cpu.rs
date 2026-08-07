@@ -14,8 +14,8 @@ use super::super::{
 };
 use super::renderer::TerminalRenderError;
 
-const MIN_PLOT_RANGE: f64 = 0.08;
-const PLOT_MARGIN_RATIO: f64 = 0.18;
+const MIN_PLOT_RANGE: f64 = 0.06;
+const PLOT_MARGIN_RATIO: f64 = 0.14;
 const RENDER_EMA_ALPHA: f64 = 0.32;
 const PEAK_PRESERVE_THRESHOLD: f64 = 0.06;
 const PEAK_PRESERVE_WEIGHT: f64 = 0.58;
@@ -214,18 +214,21 @@ fn render_history(model: WidgetRenderModel, area: Rect, theme: &Theme, buffer: &
         return;
     }
 
-    let timestamp_height = 1;
-    let available_height = area.height.saturating_sub(timestamp_height);
-    let plot_height = available_height.clamp(1, 4);
+    // The timestamp is overlaid in the lower-right corner. Keeping the full
+    // row budget for the plot is important in compact dashboard slots, where
+    // one extra Braille row materially improves the signal shape.
+    let plot_height = area.height.clamp(1, 4);
     let plot = Rect::new(
         area.x,
         area.y
-            .saturating_add(available_height.saturating_sub(plot_height) / 2),
+            .saturating_add(area.height.saturating_sub(plot_height) / 2),
         area.width,
         plot_height,
     );
     render_line_plot(sparkline, plot, model, theme, buffer);
-    if let Some(last) = sparkline.points().last() {
+    if area.height > 1
+        && let Some(last) = sparkline.points().last()
+    {
         let seconds = last.sample().offset().as_secs();
         if seconds > 0 {
             write(
@@ -900,6 +903,23 @@ mod tests {
         );
         assert!(text(&rendered).contains("50s"));
         assert!(!text(&rendered).contains("100%"));
+    }
+
+    #[test]
+    fn compact_dashboard_slot_keeps_a_two_row_vital_line() {
+        let rendered = render(DashboardPreset::Standard, 48, 7);
+        let chart_rows = (4..7)
+            .filter(|y| {
+                (0..48).any(|x| {
+                    rendered[(x, *y)]
+                        .symbol()
+                        .chars()
+                        .next()
+                        .is_some_and(|character| ('\u{2800}'..='\u{28ff}').contains(&character))
+                })
+            })
+            .count();
+        assert!(chart_rows >= 2);
     }
 
     #[test]

@@ -743,8 +743,8 @@ mod tests {
         let text = buffer_text(&buffer);
         assert!(text.contains("RTX 4060"));
         assert!(text.contains("26%"));
-        assert!(text.contains("█"));
-        assert!(text.contains("░"));
+        assert!(text.contains("━"));
+        assert!(text.contains("─"));
         assert!(text.contains("0.7 / 8 GB"));
         assert!(text.contains("51°C"));
     }
