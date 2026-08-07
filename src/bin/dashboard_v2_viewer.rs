@@ -75,7 +75,9 @@ const HISTORY: usize = 12;
 enum Scenario {
     Normal,
     Active,
+    CpuPressure,
     GpuActivity,
+    GpuPressure,
     Pressure,
     Thermal,
     NetworkActivity,
@@ -141,10 +143,12 @@ impl CpuPreviewSize {
 }
 
 impl Scenario {
-    const ALL: [Self; 9] = [
+    const ALL: [Self; 11] = [
         Self::Normal,
         Self::Active,
+        Self::CpuPressure,
         Self::GpuActivity,
+        Self::GpuPressure,
         Self::Pressure,
         Self::Thermal,
         Self::NetworkActivity,
@@ -157,13 +161,15 @@ impl Scenario {
         match self {
             Self::Normal => 0,
             Self::Active => 1,
-            Self::GpuActivity => 2,
-            Self::Pressure => 3,
-            Self::Thermal => 4,
-            Self::NetworkActivity => 5,
-            Self::StoragePressure => 6,
-            Self::Critical => 7,
-            Self::Recovery => 8,
+            Self::CpuPressure => 2,
+            Self::GpuActivity => 3,
+            Self::GpuPressure => 4,
+            Self::Pressure => 5,
+            Self::Thermal => 6,
+            Self::NetworkActivity => 7,
+            Self::StoragePressure => 8,
+            Self::Critical => 9,
+            Self::Recovery => 10,
         }
     }
 
@@ -177,7 +183,9 @@ impl Scenario {
             // High activity with safe pressure: the Pulse should become
             // energetic without immediately becoming stressed.
             Self::Active => (0.95, 0.40, 0.75, 0.65, 0.40, 0.35),
+            Self::CpuPressure => (0.96, 0.45, 0.35, 0.10, 0.40, 0.30),
             Self::GpuActivity => (0.25, 0.40, 0.98, 0.12, 0.40, 0.20),
+            Self::GpuPressure => (0.30, 0.45, 0.96, 0.10, 0.42, 0.30),
             Self::Pressure => (0.35, 0.94, 0.25, 0.12, 0.40, 0.20),
             Self::Thermal => (0.45, 0.42, 0.35, 0.12, 0.40, 0.20),
             Self::NetworkActivity => (0.25, 0.40, 0.25, 0.95, 0.40, 0.20),
@@ -191,7 +199,11 @@ impl Scenario {
         match self {
             Self::Normal => DashboardState::Calm,
             Self::Active | Self::GpuActivity | Self::NetworkActivity => DashboardState::Active,
-            Self::Pressure | Self::Thermal | Self::StoragePressure => DashboardState::Busy,
+            Self::CpuPressure
+            | Self::GpuPressure
+            | Self::Pressure
+            | Self::Thermal
+            | Self::StoragePressure => DashboardState::Busy,
             Self::Critical => DashboardState::Critical,
             Self::Recovery => DashboardState::Calm,
         }
@@ -201,7 +213,9 @@ impl Scenario {
         match self {
             Self::Normal => "IDLE",
             Self::Active => "HIGH ACTIVITY / HEALTHY",
+            Self::CpuPressure => "CPU PRESSURE",
             Self::GpuActivity => "GPU ACTIVITY",
+            Self::GpuPressure => "GPU PRESSURE",
             Self::Pressure => "MEMORY PRESSURE",
             Self::Thermal => "THERMAL PRESSURE",
             Self::NetworkActivity => "NETWORK ACTIVITY",
@@ -677,6 +691,8 @@ fn scenario_health_snapshot(state: ViewerState) -> HealthSnapshot {
         | Scenario::GpuActivity
         | Scenario::NetworkActivity
         | Scenario::StoragePressure => 0.12,
+        Scenario::CpuPressure => 0.86,
+        Scenario::GpuPressure => 0.14,
         Scenario::Pressure => 0.16,
         Scenario::Thermal => 0.22,
         Scenario::Critical => 0.98,
@@ -688,9 +704,14 @@ fn scenario_health_snapshot(state: ViewerState) -> HealthSnapshot {
         Scenario::Critical => 0.98,
         _ => 0.0,
     };
+    let gpu_pressure = match state.scenario {
+        Scenario::GpuPressure => 0.86,
+        Scenario::Critical => 0.98,
+        _ => (gpu * 0.30).clamp(0.0, 1.0),
+    };
     let gpu_signals = state.gpu_available.then_some(HealthSignals::new(
         Some(gpu as f32),
-        Some((gpu * 0.30).clamp(0.0, 1.0) as f32),
+        Some(gpu_pressure as f32),
         None,
         Some(volatility as f32),
     ));
@@ -1058,7 +1079,9 @@ fn cpu_model_with_history(
             non_negative(match scenario {
                 Scenario::Normal | Scenario::Recovery => 52.0,
                 Scenario::Active => 62.0,
+                Scenario::CpuPressure => 86.0,
                 Scenario::GpuActivity => 64.0,
+                Scenario::GpuPressure => 72.0,
                 Scenario::Pressure => 58.0,
                 Scenario::Thermal => 88.0,
                 Scenario::NetworkActivity => 52.0,
@@ -1116,7 +1139,9 @@ fn gpu_model(scenario: Scenario, available: bool) -> dashboard_v2::GpuMetricMode
                 non_negative(match scenario {
                     Scenario::Normal | Scenario::Recovery => 54.0,
                     Scenario::Active => 68.0,
+                    Scenario::CpuPressure => 58.0,
                     Scenario::GpuActivity => 80.0,
+                    Scenario::GpuPressure => 91.0,
                     Scenario::Pressure => 58.0,
                     Scenario::Thermal => 82.0,
                     Scenario::NetworkActivity => 54.0,
@@ -1169,7 +1194,10 @@ fn storage_model(scenario: Scenario) -> dashboard_v2::StorageMetricModel<HISTORY
         non_negative(activity * 60.0),
         non_negative(match scenario {
             Scenario::Normal | Scenario::Recovery => 0.04,
-            Scenario::Active | Scenario::GpuActivity => 0.08,
+            Scenario::Active
+            | Scenario::CpuPressure
+            | Scenario::GpuActivity
+            | Scenario::GpuPressure => 0.08,
             Scenario::Pressure => 0.20,
             Scenario::Thermal => 0.12,
             Scenario::NetworkActivity => 0.08,
@@ -1282,8 +1310,16 @@ mod tests {
         let activity = PulseBehavior::from_system_health(
             HealthEngine::new().evaluate(scenario_health_snapshot(state)),
         );
+        state.scenario = Scenario::CpuPressure;
+        let cpu_pressure = PulseBehavior::from_system_health(
+            HealthEngine::new().evaluate(scenario_health_snapshot(state)),
+        );
         state.scenario = Scenario::Pressure;
         let pressure = PulseBehavior::from_system_health(
+            HealthEngine::new().evaluate(scenario_health_snapshot(state)),
+        );
+        state.scenario = Scenario::GpuPressure;
+        let gpu_pressure = PulseBehavior::from_system_health(
             HealthEngine::new().evaluate(scenario_health_snapshot(state)),
         );
         state.scenario = Scenario::Thermal;
@@ -1293,6 +1329,8 @@ mod tests {
 
         assert!(activity.energy() > idle.energy());
         assert!(activity.tension() < pressure.tension());
+        assert!(cpu_pressure.tension() > activity.tension());
+        assert!(gpu_pressure.tension() > activity.tension());
         assert!(thermal.tension() > idle.tension());
         assert!(
             Scenario::ALL

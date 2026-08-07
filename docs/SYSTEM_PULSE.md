@@ -54,3 +54,16 @@ NormalizedPulseInput
      ↓
 Pulse V2 animation and renderer
 ```
+
+The input passed to the existing V2 field engine is a perceptual projection,
+not a second metric pipeline. Activity is carried primarily by cadence and
+energetic channels so a healthy workload can make the organism more active.
+Pressure and thermal pressure are carried by tension/load channels so memory,
+capacity and thermal constraints produce contraction and slower recovery. The
+V2 field dynamics preserve this distinction before the existing organic
+motion, transport, lighting and renderer stages.
+
+The dashboard viewer includes deterministic CALM, ACTIVE, CPU PRESSURE, MEMORY
+PRESSURE, GPU PRESSURE, THERMAL PRESSURE and CRITICAL scenarios. They exercise
+the same Health Engine → PulseBehavior pipeline as Live mode; they are not
+fixtures used by Live Metrics.
