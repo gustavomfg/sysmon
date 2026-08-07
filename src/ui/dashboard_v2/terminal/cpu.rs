@@ -14,8 +14,6 @@ use super::super::{
 };
 use super::renderer::TerminalRenderError;
 
-const MIN_PLOT_RANGE: f64 = 0.06;
-const PLOT_MARGIN_RATIO: f64 = 0.14;
 const RENDER_EMA_ALPHA: f64 = 0.32;
 const PEAK_PRESERVE_THRESHOLD: f64 = 0.06;
 const PEAK_PRESERVE_WEIGHT: f64 = 0.58;
@@ -258,7 +256,7 @@ fn render_compact_history(
     }
     let (raw_values, count) = chart_values(sparkline);
     let values = smooth_values(raw_values, count);
-    let scale = stable_plot_scale(sparkline, &raw_values, count);
+    let scale = PlotScale::default();
     let mut previous = None;
     for column in 0..area.width {
         let position = if area.width == 1 || count <= 1 {
@@ -305,7 +303,7 @@ fn render_line_plot(
     }
 
     let values = smooth_values(raw_values, count);
-    let scale = stable_plot_scale(sparkline, &raw_values, count);
+    let scale = PlotScale::default();
     let pixel_width = usize::from(area.width).saturating_mul(2);
     let pixel_height = usize::from(area.height).saturating_mul(4);
     if pixel_width == 0 || pixel_height == 0 {
@@ -472,55 +470,6 @@ impl Default for PlotScale {
             low: 0.0,
             high: 1.0,
         }
-    }
-}
-
-fn plot_scale(values: &[Option<f64>], count: usize) -> PlotScale {
-    let mut low = f64::INFINITY;
-    let mut high = f64::NEG_INFINITY;
-    for value in values.iter().take(count).flatten() {
-        low = low.min(*value);
-        high = high.max(*value);
-    }
-    if !low.is_finite() || !high.is_finite() {
-        return PlotScale::default();
-    }
-
-    plot_scale_bounds(low, high)
-}
-
-fn stable_plot_scale(
-    sparkline: SparklineModel<CHART_POINTS>,
-    values: &[Option<f64>],
-    count: usize,
-) -> PlotScale {
-    let stats = sparkline.stats();
-    match (stats.minimum(), stats.maximum()) {
-        (Some(low), Some(high)) if low.is_finite() && high.is_finite() => {
-            // The statistics cover the complete rolling window, rather than
-            // only the reduced render points. Old extrema therefore remain in
-            // the scale until they naturally leave the window: expansion is
-            // immediate for a real peak, while contraction is gradual.
-            plot_scale_bounds(low, high)
-        }
-        _ => plot_scale(values, count),
-    }
-}
-
-fn plot_scale_bounds(low: f64, high: f64) -> PlotScale {
-    let range = (high - low).max(0.0);
-    let margin = (range * PLOT_MARGIN_RATIO).max(0.015);
-    let mut lower = (low - margin).max(0.0);
-    let mut upper = (high + margin).min(1.0);
-    if upper - lower < MIN_PLOT_RANGE {
-        let center = (low + high) * 0.5;
-        lower = (center - MIN_PLOT_RANGE * 0.5).max(0.0);
-        upper = (lower + MIN_PLOT_RANGE).min(1.0);
-        lower = (upper - MIN_PLOT_RANGE).max(0.0);
-    }
-    PlotScale {
-        low: lower,
-        high: upper.max(lower + f64::EPSILON),
     }
 }
 
@@ -877,10 +826,75 @@ mod tests {
         .unwrap()
     }
 
+    fn model_at(utilization: f64) -> CpuMetricModel<8> {
+        let utilization = utilization.clamp(0.0, 1.0);
+        let mut history = TimeSeries::new(MetricUnit::Percent);
+        for (index, value) in [
+            utilization,
+            utilization,
+            utilization,
+            utilization,
+            utilization,
+            utilization,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            history
+                .push(
+                    TimeSample::new(
+                        Duration::from_secs(index as u64 * 10),
+                        Some(value),
+                        MetricAvailability::Available,
+                        None,
+                    )
+                    .unwrap(),
+                )
+                .unwrap();
+        }
+        CpuMetricModel::from_input(
+            CpuMetricInput::new(
+                MetricReading::normalized(Some(utilization), MetricAvailability::Available)
+                    .unwrap(),
+                MetricReading::normalized(Some(utilization * 0.70), MetricAvailability::Available)
+                    .unwrap(),
+                MetricReading::normalized(Some(utilization * 0.30), MetricAvailability::Available)
+                    .unwrap(),
+                MetricReading::normalized(Some(1.0 - utilization), MetricAvailability::Available)
+                    .unwrap(),
+                MetricReading::non_negative(Some(3_200_000_000.0), MetricAvailability::Available)
+                    .unwrap(),
+                MetricReading::new(Some(55.0), MetricAvailability::Available).unwrap(),
+                8,
+                history,
+            )
+            .unwrap(),
+        )
+        .unwrap()
+    }
+
     fn render(preset: DashboardPreset, width: u16, height: u16) -> Buffer {
+        render_model(model(), preset, width, height)
+    }
+
+    fn render_at(utilization: f64, width: u16, height: u16) -> Buffer {
+        render_model(
+            model_at(utilization),
+            DashboardPreset::Widescreen,
+            width,
+            height,
+        )
+    }
+
+    fn render_model(
+        metric_model: CpuMetricModel<8>,
+        preset: DashboardPreset,
+        width: u16,
+        height: u16,
+    ) -> Buffer {
         let context = WidgetContext::new(preset, DashboardState::Calm, Duration::ZERO)
             .with_availability(WidgetAvailability::all());
-        let model = WidgetRenderer::render_cpu(model(), context)
+        let model = WidgetRenderer::render_cpu(metric_model, context)
             .unwrap()
             .unwrap();
         let mut buffer = Buffer::empty(Rect::new(0, 0, width, height));
@@ -970,8 +984,8 @@ mod tests {
             })
             .count();
         assert!(
-            chart_rows >= 3,
-            "chart should use the available body height"
+            chart_rows >= 2,
+            "chart should remain visible across the available body height"
         );
         assert!(!text(&rendered).contains("50s"));
         assert!(!text(&rendered).contains("100%"));
@@ -995,23 +1009,17 @@ mod tests {
     }
 
     #[test]
-    fn adaptive_scale_preserves_local_shape_and_peak_candidates() {
-        let values = [
-            Some(0.20),
-            Some(0.31),
-            Some(0.24),
-            Some(0.34),
-            Some(0.22),
-            Some(0.29),
-        ];
-        let scale = plot_scale(&values, values.len());
+    fn absolute_scale_preserves_semantic_vertical_order_and_bounds() {
+        let scale = PlotScale::default();
+        assert_eq!(scale.low, 0.0);
+        assert_eq!(scale.high, 1.0);
 
-        assert!(scale.low > 0.0);
-        assert!(scale.high < 1.0);
-        assert!((scale.high - scale.low) >= MIN_PLOT_RANGE);
-        assert_ne!(plot_row(0.20, 8, scale), plot_row(0.34, 8, scale));
-        assert!(plot_row(0.31, 8, scale) < plot_row(0.24, 8, scale));
-        assert!(plot_row(0.34, 8, scale) < plot_row(0.22, 8, scale));
+        let low = plot_row(0.10, 16, scale);
+        let middle = plot_row(0.50, 16, scale);
+        let high = plot_row(0.90, 16, scale);
+        assert!(low > middle && middle > high);
+        assert_eq!(plot_row(-1.0, 16, scale), 15);
+        assert_eq!(plot_row(2.0, 16, scale), 0);
     }
 
     #[test]
@@ -1036,28 +1044,25 @@ mod tests {
     }
 
     #[test]
-    fn scale_uses_the_full_window_to_expand_fast_and_contract_slowly() {
-        let mut history: TimeSeries<8> = TimeSeries::new(MetricUnit::Percent);
-        for (offset, value) in [0.20, 0.80, 0.22, 0.23, 0.24, 0.25].into_iter().enumerate() {
-            history
-                .push(
-                    TimeSample::new(
-                        Duration::from_secs(offset as u64),
-                        Some(value),
-                        MetricAvailability::Available,
-                        None,
-                    )
-                    .unwrap(),
-                )
-                .unwrap();
-        }
-        let sparkline =
-            history.sparkline::<CHART_POINTS>(super::super::super::chart::TimeWindow::Long);
-        let (values, count) = chart_values(sparkline);
-        let scale = stable_plot_scale(sparkline, &values, count);
-
-        assert!(scale.high > 0.80);
-        assert!(scale.high - scale.low >= MIN_PLOT_RANGE);
+    fn constant_rendered_levels_use_the_absolute_cpu_scale() {
+        let positions = [0.10, 0.25, 0.50, 0.75, 0.90].map(|value| {
+            let rendered = render_at(value, 48, 12);
+            (5..12)
+                .find(|row| {
+                    (0..48).any(|column| {
+                        rendered[(column, *row)]
+                            .symbol()
+                            .chars()
+                            .next()
+                            .is_some_and(|character| ('\u{2800}'..='\u{28ff}').contains(&character))
+                    })
+                })
+                .expect("constant level should render a Braille line")
+        });
+        assert!(positions[0] > positions[2]);
+        assert!(positions[2] > positions[4]);
+        assert!(positions[0] > positions[1]);
+        assert!(positions[3] > positions[4]);
     }
 
     #[test]

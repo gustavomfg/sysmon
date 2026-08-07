@@ -1239,7 +1239,8 @@ fn render_processes(
             write_panel_row(area, 3, "not connected", theme.text_muted, theme, buffer);
             return;
         }
-        for (index, process) in context.processes.iter().take(5).enumerate() {
+        let visible_rows = usize::from(area.height.saturating_sub(3));
+        for (index, process) in context.processes.iter().take(visible_rows).enumerate() {
             render_process_row(
                 area,
                 3 + index as u16,
