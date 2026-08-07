@@ -330,6 +330,9 @@ fn human_temperature_label(label: &str) -> String {
     if normalized.contains("amdgpu") || normalized.contains("amd gpu") {
         return "AMD GPU".to_owned();
     }
+    if normalized.contains("nvidia") || normalized.contains("nouveau") {
+        return "NVIDIA GPU".to_owned();
+    }
     if normalized.contains("nvme") || normalized.contains("composite") {
         return "NVMe".to_owned();
     }
@@ -462,6 +465,7 @@ mod tests {
     fn temperature_labels_are_human_and_ordered_by_component_family() {
         assert_eq!(human_temperature_label("Tctl"), "CPU Package");
         assert_eq!(human_temperature_label("amdgpu edge"), "AMD GPU");
+        assert_eq!(human_temperature_label("NVIDIA GPU temp"), "NVIDIA GPU");
         assert_eq!(human_temperature_label("Composite"), "NVMe");
         assert!(temperature_priority("CPU Package") < temperature_priority("AMD GPU"));
         assert!(temperature_priority("AMD GPU") < temperature_priority("NVMe"));

@@ -484,24 +484,33 @@ fn content(
 }
 
 fn system_context_from_system(snapshot: &SystemInfo) -> DashboardV2SystemContext {
+    let mut processes = snapshot
+        .processes_list
+        .iter()
+        .map(|process| DashboardProcessSummary {
+            name: process.name.clone(),
+            cpu_percent: process.cpu_usage,
+            memory_bytes: if process.memory.is_finite() && process.memory >= 0.0 {
+                (process.memory * 1024.0 * 1024.0) as u64
+            } else {
+                0
+            },
+        })
+        .collect::<Vec<_>>();
+    processes.sort_unstable_by(|left, right| {
+        right
+            .cpu_percent
+            .total_cmp(&left.cpu_percent)
+            .then_with(|| right.memory_bytes.cmp(&left.memory_bytes))
+            .then_with(|| left.name.cmp(&right.name))
+    });
+
     DashboardV2SystemContext {
         physical_cores: snapshot.cpu_physical_cores,
         logical_threads: Some(snapshot.cpu_logical_threads.max(snapshot.cpu_cores)),
         total_memory_gib: Some(snapshot.total_ram).filter(|value| value.is_finite()),
         uptime_seconds: Some(snapshot.uptime),
-        processes: snapshot
-            .processes_list
-            .iter()
-            .map(|process| DashboardProcessSummary {
-                name: process.name.clone(),
-                cpu_percent: process.cpu_usage,
-                memory_bytes: if process.memory.is_finite() && process.memory >= 0.0 {
-                    (process.memory * 1024.0 * 1024.0) as u64
-                } else {
-                    0
-                },
-            })
-            .collect(),
+        processes,
     }
 }
 

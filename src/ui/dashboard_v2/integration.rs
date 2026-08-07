@@ -752,35 +752,30 @@ fn render_diagnostics_panel(
         return;
     }
 
-    let regions = [temperatures, processes, events];
+    let regions = diagnostic_sections(
+        outer,
+        [
+            temperatures.is_some(),
+            processes.is_some(),
+            events.is_some(),
+        ],
+        live_mode,
+    );
     for (index, region) in regions.into_iter().enumerate() {
         let Some(region) = region else { continue };
-        if index > 0 && region.y > outer.y {
+        if index > 0 {
             draw_rule(
                 content.x,
-                region.y,
+                region.y.saturating_sub(1),
                 content.width,
                 theme.border,
                 theme.surface,
                 buffer,
             );
         }
-        let next_y = regions
-            .iter()
-            .skip(index + 1)
-            .flatten()
-            .map(|rect| rect.y)
-            .next()
-            .unwrap_or(content.bottom());
-        let start_y = region.y.max(content.y) + u16::from(index > 0);
-        let end_y = next_y.min(content.bottom());
-        if end_y <= start_y {
-            continue;
-        }
-        let section = Rect::new(content.x, start_y, content.width, end_y - start_y);
         match index {
             0 => render_temperatures(
-                section,
+                region,
                 state,
                 gpu_available,
                 inventory,
@@ -788,10 +783,112 @@ fn render_diagnostics_panel(
                 theme,
                 buffer,
             ),
-            1 => render_processes(section, state, system_context, live_mode, theme, buffer),
-            _ => render_events(section, state, system_context, live_mode, theme, buffer),
+            1 => render_processes(region, state, system_context, live_mode, theme, buffer),
+            _ => render_events(region, state, system_context, live_mode, theme, buffer),
         }
     }
+}
+
+fn diagnostic_sections(outer: Rect, active: [bool; 3], live_mode: bool) -> [Option<Rect>; 3] {
+    let content = inset(outer, 1, 1);
+    if content.width == 0 || content.height == 0 {
+        return [None; 3];
+    }
+
+    let active_count = active.iter().filter(|value| **value).count();
+    if active_count == 0 {
+        return [None; 3];
+    }
+
+    // Headers plus their first useful row are the architectural minimums.
+    // Empty live events receive only their honest status line; the released
+    // space goes to temperatures and processes.
+    let minimums = [4_u16, 5, 3];
+    let weights = if live_mode { [4_u16, 6, 0] } else { [4, 5, 3] };
+    let gaps = active_count.saturating_sub(1) as u16;
+    let usable = content.height.saturating_sub(gaps);
+    let minimum_total = active
+        .iter()
+        .enumerate()
+        .filter_map(|(index, is_active)| is_active.then_some(minimums[index]))
+        .sum::<u16>();
+
+    let mut heights = [0_u16; 3];
+    if usable >= minimum_total {
+        for (index, is_active) in active.iter().copied().enumerate() {
+            if is_active {
+                heights[index] = minimums[index];
+            }
+        }
+        let extra = usable - minimum_total;
+        let flexible_weight = active
+            .iter()
+            .enumerate()
+            .filter(|(index, is_active)| **is_active && weights[*index] > 0)
+            .map(|(index, _)| weights[index])
+            .sum::<u16>();
+        if flexible_weight > 0 {
+            let mut distributed = 0_u16;
+            for (index, is_active) in active.iter().copied().enumerate() {
+                if !is_active || weights[index] == 0 {
+                    continue;
+                }
+                let share = extra
+                    .saturating_mul(weights[index])
+                    .checked_div(flexible_weight)
+                    .unwrap_or(0);
+                heights[index] = heights[index].saturating_add(share);
+                distributed = distributed.saturating_add(share);
+            }
+            let remainder = extra.saturating_sub(distributed);
+            if let Some(index) = active
+                .iter()
+                .enumerate()
+                .find_map(|(index, is_active)| (*is_active && weights[index] > 0).then_some(index))
+            {
+                heights[index] = heights[index].saturating_add(remainder);
+            }
+        }
+    } else {
+        // The normal layouts fit their minimums. This branch only protects
+        // unusual resize boundaries while keeping every active section valid.
+        let mut remaining = content.height;
+        let mut remaining_sections = active_count as u16;
+        for (index, is_active) in active.iter().copied().enumerate() {
+            if !is_active {
+                continue;
+            }
+            let height = remaining
+                .saturating_sub(remaining_sections.saturating_sub(1))
+                .max(1);
+            heights[index] = height;
+            remaining = remaining.saturating_sub(height);
+            remaining_sections = remaining_sections.saturating_sub(1);
+        }
+    }
+
+    let mut result = [None; 3];
+    let mut cursor = content.y;
+    let last_active = active.iter().rposition(|is_active| *is_active);
+    for (index, is_active) in active.iter().copied().enumerate() {
+        if !is_active {
+            continue;
+        }
+        let height = heights[index].min(content.bottom().saturating_sub(cursor));
+        if height == 0 {
+            continue;
+        }
+        result[index] = Some(Rect::new(content.x, cursor, content.width, height));
+        let gap = (last_active != Some(index)) as u16;
+        cursor = cursor.saturating_add(height).saturating_add(
+            gap.min(
+                content
+                    .bottom()
+                    .saturating_sub(cursor.saturating_add(height)),
+            ),
+        );
+    }
+    result
 }
 
 fn render_system_context(
@@ -1569,5 +1666,45 @@ mod tests {
                     .all(|slot| slot.bottom() <= footer.y() as u16)
             );
         }
+    }
+
+    #[test]
+    fn live_diagnostics_give_empty_events_only_their_status_row() {
+        let outer = Rect::new(0, 0, 44, 35);
+        let sections = diagnostic_sections(outer, [true, true, true], true);
+        let temperatures = sections[0].unwrap();
+        let processes = sections[1].unwrap();
+        let events = sections[2].unwrap();
+
+        assert_eq!(events.height, 3);
+        assert!(temperatures.height > events.height);
+        assert!(processes.height > events.height);
+        assert_eq!(temperatures.bottom() + 1, processes.y);
+        assert_eq!(processes.bottom() + 1, events.y);
+        assert!(events.bottom() <= outer.bottom());
+    }
+
+    #[test]
+    fn live_context_never_falls_back_to_demo_diagnostics() {
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 160, 40));
+        let content = DashboardV2Content::new([None; PRIMARY_COUNT], input(), DashboardState::Calm)
+            .with_live_mode(true);
+        DashboardV2Renderer::new()
+            .render(
+                DashboardPreset::Standard,
+                DashboardContext::default(),
+                content,
+                Duration::ZERO,
+                true,
+                &Theme::pulse(),
+                &mut buffer,
+            )
+            .unwrap();
+        let text: String = buffer.content.iter().map(|cell| cell.symbol()).collect();
+        assert!(text.contains("not connected"));
+        assert!(text.contains("no live events"));
+        assert!(!text.contains("sysmon"));
+        assert!(!text.contains("browser"));
+        assert!(!text.contains("compiler"));
     }
 }
