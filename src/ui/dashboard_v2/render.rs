@@ -22,6 +22,10 @@ pub enum BlockId {
     Value,
     Trend,
     CpuContext,
+    MemoryContext,
+    GpuContext,
+    NetworkContext,
+    StorageContext,
     PrimarySparkline,
     SecondarySparkline,
     TertiarySparkline,
@@ -188,6 +192,130 @@ impl CpuContextBlock {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MemoryContextBlock {
+    metadata: BlockMetadata,
+    used: Option<MetricValue>,
+    available: Option<MetricValue>,
+    total: Option<MetricValue>,
+    cache: Option<MetricValue>,
+    swap: Option<MetricValue>,
+    pressure: Option<MetricValue>,
+}
+
+impl MemoryContextBlock {
+    pub const fn metadata(self) -> BlockMetadata {
+        self.metadata
+    }
+    pub const fn used(self) -> Option<MetricValue> {
+        self.used
+    }
+    pub const fn available(self) -> Option<MetricValue> {
+        self.available
+    }
+    pub const fn total(self) -> Option<MetricValue> {
+        self.total
+    }
+    pub const fn cache(self) -> Option<MetricValue> {
+        self.cache
+    }
+    pub const fn swap(self) -> Option<MetricValue> {
+        self.swap
+    }
+    pub const fn pressure(self) -> Option<MetricValue> {
+        self.pressure
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GpuContextBlock {
+    metadata: BlockMetadata,
+    vram_used: Option<MetricValue>,
+    vram_total: Option<MetricValue>,
+    temperature: Option<MetricValue>,
+    frequency: Option<MetricValue>,
+    power: Option<MetricValue>,
+}
+
+impl GpuContextBlock {
+    pub const fn metadata(self) -> BlockMetadata {
+        self.metadata
+    }
+    pub const fn vram_used(self) -> Option<MetricValue> {
+        self.vram_used
+    }
+    pub const fn vram_total(self) -> Option<MetricValue> {
+        self.vram_total
+    }
+    pub const fn temperature(self) -> Option<MetricValue> {
+        self.temperature
+    }
+    pub const fn frequency(self) -> Option<MetricValue> {
+        self.frequency
+    }
+    pub const fn power(self) -> Option<MetricValue> {
+        self.power
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct NetworkContextBlock {
+    metadata: BlockMetadata,
+    download: Option<MetricValue>,
+    upload: Option<MetricValue>,
+    download_total: Option<MetricValue>,
+    upload_total: Option<MetricValue>,
+}
+
+impl NetworkContextBlock {
+    pub const fn metadata(self) -> BlockMetadata {
+        self.metadata
+    }
+    pub const fn download(self) -> Option<MetricValue> {
+        self.download
+    }
+    pub const fn upload(self) -> Option<MetricValue> {
+        self.upload
+    }
+    pub const fn download_total(self) -> Option<MetricValue> {
+        self.download_total
+    }
+    pub const fn upload_total(self) -> Option<MetricValue> {
+        self.upload_total
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StorageContextBlock {
+    metadata: BlockMetadata,
+    used_space: Option<MetricValue>,
+    total_space: Option<MetricValue>,
+    read_rate: Option<MetricValue>,
+    write_rate: Option<MetricValue>,
+    latency: Option<MetricValue>,
+}
+
+impl StorageContextBlock {
+    pub const fn metadata(self) -> BlockMetadata {
+        self.metadata
+    }
+    pub const fn used_space(self) -> Option<MetricValue> {
+        self.used_space
+    }
+    pub const fn total_space(self) -> Option<MetricValue> {
+        self.total_space
+    }
+    pub const fn read_rate(self) -> Option<MetricValue> {
+        self.read_rate
+    }
+    pub const fn write_rate(self) -> Option<MetricValue> {
+        self.write_rate
+    }
+    pub const fn latency(self) -> Option<MetricValue> {
+        self.latency
+    }
+}
+
 impl TrendBlock {
     pub const fn metadata(self) -> BlockMetadata {
         self.metadata
@@ -287,6 +415,10 @@ pub enum RenderBlock {
     Value(ValueBlock),
     Trend(TrendBlock),
     CpuContext(CpuContextBlock),
+    MemoryContext(MemoryContextBlock),
+    GpuContext(GpuContextBlock),
+    NetworkContext(NetworkContextBlock),
+    StorageContext(StorageContextBlock),
     Chart(ChartBlock),
     Indicators(IndicatorBlock),
     Status(StatusBlock),
@@ -300,6 +432,10 @@ impl RenderBlock {
             Self::Value(block) => block.metadata(),
             Self::Trend(block) => block.metadata(),
             Self::CpuContext(block) => block.metadata(),
+            Self::MemoryContext(block) => block.metadata(),
+            Self::GpuContext(block) => block.metadata(),
+            Self::NetworkContext(block) => block.metadata(),
+            Self::StorageContext(block) => block.metadata(),
             Self::Chart(block) => block.metadata(),
             Self::Indicators(block) => block.metadata(),
             Self::Status(block) => block.metadata(),
@@ -416,14 +552,33 @@ impl WidgetRenderModel {
 
     fn allows(&self, id: BlockId) -> bool {
         match self.preset {
-            DashboardPreset::Compact => matches!(id, BlockId::CpuContext | BlockId::Status),
+            DashboardPreset::Compact => matches!(
+                id,
+                BlockId::CpuContext
+                    | BlockId::MemoryContext
+                    | BlockId::GpuContext
+                    | BlockId::NetworkContext
+                    | BlockId::StorageContext
+                    | BlockId::Status
+            ),
             DashboardPreset::Standard => matches!(
                 id,
-                BlockId::CpuContext | BlockId::PrimarySparkline | BlockId::Status
+                BlockId::CpuContext
+                    | BlockId::MemoryContext
+                    | BlockId::GpuContext
+                    | BlockId::NetworkContext
+                    | BlockId::StorageContext
+                    | BlockId::PrimarySparkline
+                    | BlockId::SecondarySparkline
+                    | BlockId::Status
             ),
             DashboardPreset::Widescreen => matches!(
                 id,
                 BlockId::CpuContext
+                    | BlockId::MemoryContext
+                    | BlockId::GpuContext
+                    | BlockId::NetworkContext
+                    | BlockId::StorageContext
                     | BlockId::PrimarySparkline
                     | BlockId::SecondarySparkline
                     | BlockId::Area
@@ -508,6 +663,82 @@ impl WidgetRenderModel {
             // CPU context (temperature before frequency). Keep the extra
             // context row complementary instead of repeating it.
             frequency: model.frequency(),
+        }))
+    }
+
+    pub fn add_memory_context<const HISTORY: usize>(
+        &mut self,
+        model: MemoryMetricModel<HISTORY>,
+    ) -> Result<(), RenderError> {
+        self.push_optional(RenderBlock::MemoryContext(MemoryContextBlock {
+            metadata: self.metadata(
+                BlockId::MemoryContext,
+                VisualPriority::Secondary,
+                BlockRequirement::Hideable,
+                false,
+            ),
+            used: model.used(),
+            available: model.available(),
+            total: model.total(),
+            cache: model.cache(),
+            swap: model.swap(),
+            pressure: model.pressure(),
+        }))
+    }
+
+    pub fn add_gpu_context<const HISTORY: usize>(
+        &mut self,
+        model: GpuMetricModel<HISTORY>,
+    ) -> Result<(), RenderError> {
+        self.push_optional(RenderBlock::GpuContext(GpuContextBlock {
+            metadata: self.metadata(
+                BlockId::GpuContext,
+                VisualPriority::Secondary,
+                BlockRequirement::Hideable,
+                false,
+            ),
+            vram_used: model.vram_used(),
+            vram_total: model.vram_total(),
+            temperature: model.temperature(),
+            frequency: model.frequency(),
+            power: model.power(),
+        }))
+    }
+
+    pub fn add_network_context<const HISTORY: usize>(
+        &mut self,
+        model: NetworkMetricModel<HISTORY>,
+    ) -> Result<(), RenderError> {
+        self.push_optional(RenderBlock::NetworkContext(NetworkContextBlock {
+            metadata: self.metadata(
+                BlockId::NetworkContext,
+                VisualPriority::Secondary,
+                BlockRequirement::Hideable,
+                false,
+            ),
+            download: model.download(),
+            upload: model.upload(),
+            download_total: model.download_total(),
+            upload_total: model.upload_total(),
+        }))
+    }
+
+    pub fn add_storage_context<const HISTORY: usize>(
+        &mut self,
+        model: StorageMetricModel<HISTORY>,
+    ) -> Result<(), RenderError> {
+        self.push_optional(RenderBlock::StorageContext(StorageContextBlock {
+            metadata: self.metadata(
+                BlockId::StorageContext,
+                VisualPriority::Secondary,
+                BlockRequirement::Hideable,
+                false,
+            ),
+            used_space: model.used_space(),
+            total_space: model.total_space(),
+            read_rate: model.read_rate(),
+            write_rate: model.write_rate(),
+            latency: model.latency(),
         }))
     }
 
@@ -646,6 +877,7 @@ impl WidgetRenderer {
             return Ok(None);
         };
         if model.is_available() {
+            render.add_memory_context(model)?;
             render.add_sparkline(BlockId::PrimarySparkline, model.sparkline())?;
             if let Some(area) = model.area() {
                 render.add_area(area)?;
@@ -666,6 +898,7 @@ impl WidgetRenderer {
             return Ok(None);
         };
         if model.is_available() {
+            render.add_gpu_context(model)?;
             render.add_sparkline(BlockId::PrimarySparkline, model.sparkline())?;
             render.add_segments2(model.vram())?;
             render.add_peaks(model.peaks())?;
@@ -683,6 +916,7 @@ impl WidgetRenderer {
             return Ok(None);
         };
         if model.is_available() {
+            render.add_network_context(model)?;
             render.add_sparkline(BlockId::PrimarySparkline, model.download_sparkline())?;
             render.add_sparkline(BlockId::SecondarySparkline, model.upload_sparkline())?;
             render.add_comparison(model.comparison())?;
@@ -700,6 +934,7 @@ impl WidgetRenderer {
             return Ok(None);
         };
         if model.is_available() {
+            render.add_storage_context(model)?;
             render.add_sparkline(BlockId::PrimarySparkline, model.occupancy_sparkline())?;
             render.add_sparkline(BlockId::SecondarySparkline, model.read_sparkline())?;
             render.add_sparkline(BlockId::TertiarySparkline, model.write_sparkline())?;

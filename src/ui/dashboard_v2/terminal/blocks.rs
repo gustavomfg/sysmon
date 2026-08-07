@@ -7,9 +7,10 @@ use ratatui::{
 use crate::theme::Theme;
 
 use super::super::{
-    BlockMetadata, BlockVisibility, CpuContextBlock, FooterBlock, Highlight, IndicatorBlock,
-    MetricIndicators, MetricUnit, MetricValue, MetricVisual, RenderBlock, StatusBlock, TitleBlock,
-    TrendBlock, TrendDirection, ValueBlock, VisualPriority, WidgetState,
+    BlockMetadata, BlockVisibility, CpuContextBlock, FooterBlock, GpuContextBlock, Highlight,
+    IndicatorBlock, MemoryContextBlock, MetricIndicators, MetricUnit, MetricValue, MetricVisual,
+    NetworkContextBlock, RenderBlock, StatusBlock, StorageContextBlock, TitleBlock, TrendBlock,
+    TrendDirection, ValueBlock, VisualPriority, WidgetState,
 };
 use super::charts;
 
@@ -25,6 +26,10 @@ pub(crate) fn render_block(
         RenderBlock::Value(block) => render_value(block, visual, area, theme, buffer),
         RenderBlock::Trend(block) => render_trend(block, visual, area, theme, buffer),
         RenderBlock::CpuContext(block) => render_cpu_context(block, area, theme, buffer),
+        RenderBlock::MemoryContext(block) => render_memory_context(block, area, theme, buffer),
+        RenderBlock::GpuContext(block) => render_gpu_context(block, area, theme, buffer),
+        RenderBlock::NetworkContext(block) => render_network_context(block, area, theme, buffer),
+        RenderBlock::StorageContext(block) => render_storage_context(block, area, theme, buffer),
         RenderBlock::Chart(block) => charts::render(block, visual, area, theme, buffer),
         RenderBlock::Indicators(block) => render_indicators(block, area, theme, buffer),
         RenderBlock::Status(block) => render_status(block, area, theme, buffer),
@@ -192,6 +197,83 @@ fn render_cpu_context(block: CpuContextBlock, area: Rect, theme: &Theme, buffer:
         style.fg(theme.text_muted)
     };
     write(buffer, area, &text, style);
+}
+
+fn render_memory_context(
+    block: MemoryContextBlock,
+    area: Rect,
+    theme: &Theme,
+    buffer: &mut Buffer,
+) {
+    let text = block
+        .used()
+        .zip(block.total())
+        .map_or_else(String::new, |(used, total)| {
+            format!(
+                "{} / {}",
+                format_metric_value(used),
+                format_metric_value(total)
+            )
+        });
+    write(buffer, area, &text, context_style(block.metadata(), theme));
+}
+
+fn render_gpu_context(block: GpuContextBlock, area: Rect, theme: &Theme, buffer: &mut Buffer) {
+    let text =
+        block
+            .vram_used()
+            .zip(block.vram_total())
+            .map_or_else(String::new, |(used, total)| {
+                format!(
+                    "VRAM {} / {}",
+                    format_metric_value(used),
+                    format_metric_value(total)
+                )
+            });
+    write(buffer, area, &text, context_style(block.metadata(), theme));
+}
+
+fn render_network_context(
+    block: NetworkContextBlock,
+    area: Rect,
+    theme: &Theme,
+    buffer: &mut Buffer,
+) {
+    let text = match (block.download(), block.upload()) {
+        (Some(download), Some(upload)) => format!(
+            "↓ {}  ↑ {}",
+            format_metric_value(download),
+            format_metric_value(upload)
+        ),
+        (Some(download), None) => format!("↓ {}", format_metric_value(download)),
+        (None, Some(upload)) => format!("↑ {}", format_metric_value(upload)),
+        _ => String::new(),
+    };
+    write(buffer, area, &text, context_style(block.metadata(), theme));
+}
+
+fn render_storage_context(
+    block: StorageContextBlock,
+    area: Rect,
+    theme: &Theme,
+    buffer: &mut Buffer,
+) {
+    let text =
+        block
+            .used_space()
+            .zip(block.total_space())
+            .map_or_else(String::new, |(used, total)| {
+                format!(
+                    "{} / {}",
+                    format_metric_value(used),
+                    format_metric_value(total)
+                )
+            });
+    write(buffer, area, &text, context_style(block.metadata(), theme));
+}
+
+fn context_style(metadata: BlockMetadata, theme: &Theme) -> Style {
+    semantic_style(metadata, theme).fg(theme.text_muted)
 }
 
 fn render_indicators(block: IndicatorBlock, area: Rect, theme: &Theme, buffer: &mut Buffer) {

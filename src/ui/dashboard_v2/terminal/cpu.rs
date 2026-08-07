@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
@@ -14,10 +16,15 @@ use super::super::{
 };
 use super::renderer::TerminalRenderError;
 
-const COLUMN_GAP: u16 = 2;
-const RIGHT_WIDTH_PERCENT: u16 = 46;
-const MIN_PLOT_RANGE: f64 = 0.08;
-const PLOT_MARGIN_RATIO: f64 = 0.18;
+const RENDER_EMA_ALPHA: f64 = 0.32;
+const PEAK_PRESERVE_THRESHOLD: f64 = 0.06;
+const PEAK_PRESERVE_WEIGHT: f64 = 0.58;
+const CURRENT_POINT_WEIGHT: f64 = 0.65;
+const LOCAL_BASELINE_ALPHA: f64 = 0.45;
+const LOCAL_DETAIL_GAIN: f64 = 2.0;
+const LOCAL_DETAIL_LIMIT: f64 = 0.05;
+const CPU_VISUAL_WINDOW: Duration = Duration::from_secs(30);
+const MAX_BRAILLE_CELLS: usize = 4096;
 
 pub(super) struct CpuCardRenderer;
 
@@ -49,9 +56,7 @@ impl CpuCardRenderer {
         if preset == DashboardPreset::Compact || body.width < 24 || body.height < 4 {
             render_compact_body(model, body, theme, buffer);
         } else {
-            let (left, right) = split_body(body);
-            render_left(model, left, theme, buffer);
-            render_history(model, right, theme, buffer);
+            render_body(model, body, theme, buffer);
         }
         Ok(())
     }
@@ -113,90 +118,63 @@ fn render_compact_body(model: WidgetRenderModel, area: Rect, theme: &Theme, buff
     }
 }
 
-fn split_body(area: Rect) -> (Rect, Rect) {
-    let right_width = (area.width.saturating_mul(RIGHT_WIDTH_PERCENT) / 100)
-        .max(12)
-        .min(area.width.saturating_sub(COLUMN_GAP).saturating_sub(10));
-    let left_width = area
-        .width
-        .saturating_sub(right_width)
-        .saturating_sub(COLUMN_GAP);
-    (
-        Rect::new(area.x, area.y, left_width, area.height),
-        Rect::new(
-            area.x.saturating_add(left_width).saturating_add(COLUMN_GAP),
-            area.y,
-            right_width,
-            area.height,
-        ),
-    )
+#[derive(Debug, Clone, Copy)]
+struct CpuCardRegions {
+    value: Rect,
+    hardware: Rect,
+    secondary: Rect,
+    history: Rect,
 }
 
-fn render_left(model: WidgetRenderModel, area: Rect, theme: &Theme, buffer: &mut Buffer) {
+fn render_body(model: WidgetRenderModel, area: Rect, theme: &Theme, buffer: &mut Buffer) {
+    let value_offset = if area.height >= 6 { 1 } else { 0 };
+    let value = line_region(area, area.y.saturating_add(value_offset));
+    let hardware = line_region(area, value.y.saturating_add(1));
+    let secondary = line_region(area, hardware.y.saturating_add(1));
+    let history_y = secondary.y.saturating_add(1);
+    let regions = CpuCardRegions {
+        value,
+        hardware,
+        secondary,
+        history: Rect::new(
+            area.x,
+            history_y.min(area.bottom()),
+            area.width,
+            area.bottom().saturating_sub(history_y),
+        ),
+    };
+
+    render_primary_value(model, regions.value, theme, buffer);
+
+    let hardware_text = hardware_line(model, area.width);
+    if !hardware_text.is_empty() {
+        write_rich_context(
+            buffer,
+            regions.hardware,
+            &hardware_text,
+            context_style(model, theme),
+            theme,
+            context_value_style(model, theme),
+        );
+    }
+
+    render_secondary_context(model, regions.secondary, theme, buffer);
+
+    render_history(model, regions.history, theme, buffer);
+}
+
+fn line_region(area: Rect, row: u16) -> Rect {
+    if row >= area.bottom() {
+        Rect::new(area.x, area.bottom(), area.width, 0)
+    } else {
+        Rect::new(area.x, row, area.width, 1)
+    }
+}
+
+fn render_primary_value(model: WidgetRenderModel, area: Rect, theme: &Theme, buffer: &mut Buffer) {
     if area.width == 0 || area.height == 0 {
         return;
     }
-    // Keep one full row between the header and the value on reference-sized
-    // cards. The value remains a normal terminal string; its visual weight
-    // comes from isolation and contrast rather than invented typography.
-    let value_offset = if area.height >= 8 {
-        2
-    } else {
-        u16::from(area.height >= 6)
-    };
-    let value_y = area.y.saturating_add(value_offset);
-    let value_area = Rect::new(
-        area.x,
-        value_y,
-        area.width,
-        area.bottom().saturating_sub(value_y),
-    );
-    render_primary_value(model, value_area, theme, buffer);
-
-    // These slots intentionally leave breathing room around the primary
-    // value while using the middle of the card for its supporting context.
-    let mut y = value_y.saturating_add(u16::from(area.height >= 7) + 1);
-    if y < area.bottom() {
-        let context = hardware_line(model);
-        if !context.is_empty() {
-            write(
-                buffer,
-                area,
-                area.x,
-                y,
-                &context,
-                context_style(model, theme),
-            );
-            y = y.saturating_add(1);
-        }
-    }
-    if y < area.bottom()
-        && let Some(temperature) = temperature(model)
-    {
-        write(
-            buffer,
-            area,
-            area.x,
-            y,
-            &format_metric_value(temperature),
-            context_style(model, theme),
-        );
-        y = y.saturating_add(1);
-    }
-    if y < area.bottom() {
-        let trend = format_trend(model);
-        if !trend.is_empty() {
-            write(buffer, area, area.x, y, &trend, trend_style(model, theme));
-        }
-    }
-}
-
-fn render_primary_value(
-    model: WidgetRenderModel,
-    area: Rect,
-    theme: &Theme,
-    buffer: &mut Buffer,
-) -> u16 {
     let value = model
         .visual()
         .primary()
@@ -209,7 +187,43 @@ fn render_primary_value(
         &value,
         value_style(model, theme, true),
     );
-    1
+}
+
+fn render_secondary_context(
+    model: WidgetRenderModel,
+    area: Rect,
+    theme: &Theme,
+    buffer: &mut Buffer,
+) {
+    let x = if let Some(temperature) = temperature(model) {
+        let value = format_metric_value(temperature);
+        write(
+            buffer,
+            area,
+            area.x,
+            area.y,
+            &value,
+            context_value_style(model, theme),
+        );
+        area.x
+            .saturating_add(value.chars().count() as u16)
+            .saturating_add(2)
+    } else {
+        area.x
+    };
+
+    let trend = format_trend(model);
+    if !trend.is_empty() {
+        let trend_area = Rect::new(x, area.y, area.right().saturating_sub(x), area.height);
+        write_rich_context(
+            buffer,
+            trend_area,
+            &trend,
+            trend_style(model, theme),
+            theme,
+            context_value_style(model, theme),
+        );
+    }
 }
 
 fn render_history(model: WidgetRenderModel, area: Rect, theme: &Theme, buffer: &mut Buffer) {
@@ -222,37 +236,12 @@ fn render_history(model: WidgetRenderModel, area: Rect, theme: &Theme, buffer: &
         return;
     }
 
-    let scale_width = if area.width >= 18 { 4 } else { 0 };
-    let timestamp_height = u16::from(area.height >= 4);
-    let plot_height = area.height.saturating_sub(timestamp_height);
-    let plot = Rect::new(
-        area.x.saturating_add(scale_width),
-        area.y,
-        area.width.saturating_sub(scale_width),
-        plot_height,
-    );
-    let scale = render_plot(sparkline, plot, model, theme, buffer);
-    if scale_width > 0 {
-        render_scale(
-            scale,
-            Rect::new(area.x, area.y, scale_width, plot_height),
-            theme,
-            buffer,
-        );
-    }
-    if let Some(last) = sparkline.points().last() {
-        let seconds = last.sample().offset().as_secs();
-        if seconds > 0 {
-            write(
-                buffer,
-                area,
-                area.right().saturating_sub(5),
-                area.bottom().saturating_sub(1),
-                &format!("{seconds}s"),
-                scale_style(theme),
-            );
-        }
-    }
+    // The history region is already the lower half of the CPU instrument.
+    // Give its complete height to the Braille raster instead of centering a
+    // shorter plot inside it. This makes absolute utilization readable from
+    // the curve itself without changing the metric or its scale.
+    let plot = Rect::new(area.x, area.y, area.width, area.height);
+    render_line_plot(sparkline, plot, model, theme, buffer);
 }
 
 fn render_compact_history(
@@ -262,64 +251,15 @@ fn render_compact_history(
     theme: &Theme,
     buffer: &mut Buffer,
 ) {
-    let points = sparkline.points();
-    let values: Vec<char> = points
-        .iter()
-        .filter_map(|point| point.sample().usable_value())
-        .map(|value| match (value * 8.0).round() as u8 {
-            0 => '▁',
-            1 => '▂',
-            2 => '▃',
-            3 => '▄',
-            4 => '▅',
-            5 => '▆',
-            6 => '▇',
-            _ => '█',
-        })
-        .collect();
-    let text: String = values.into_iter().take(usize::from(area.width)).collect();
-    write(
-        buffer,
-        area,
-        area.x,
-        area.y,
-        &text,
-        chart_style(model, theme),
-    );
-}
-
-fn render_plot(
-    sparkline: SparklineModel<CHART_POINTS>,
-    area: Rect,
-    model: WidgetRenderModel,
-    theme: &Theme,
-    buffer: &mut Buffer,
-) -> PlotScale {
     if area.width == 0 || area.height == 0 {
-        return PlotScale::default();
+        return;
     }
-    let points = sparkline.points();
-    let mut values = [None; CHART_POINTS];
-    let mut count = 0;
-    for point in points.iter() {
-        if count == CHART_POINTS {
-            break;
-        }
-        values[count] = point.sample().usable_value();
-        count += 1;
-    }
-    if count == 0 {
-        write(buffer, area, area.x, area.y, "—", chart_style(model, theme));
-        return PlotScale::default();
-    }
-
-    // Keep the absolute percentage context visible like the reference card;
-    // the organic fixture still supplies enough variation for the bars to
-    // communicate local movement without becoming a solid block.
+    let (raw_values, count) = chart_values(sparkline);
+    let values = visual_values(raw_values, count);
     let scale = PlotScale::default();
-    let step = if area.width >= 14 { 2 } else { 1 };
-    for column in (0..area.width).step_by(step) {
-        let position = if area.width == 1 {
+    let mut previous = None;
+    for column in 0..area.width {
+        let position = if area.width == 1 || count <= 1 {
             0.0
         } else {
             f64::from(column) * (count - 1) as f64 / f64::from(area.width - 1)
@@ -327,43 +267,256 @@ fn render_plot(
         let lower = position.floor() as usize;
         let upper = position.ceil() as usize;
         let value = interpolate(values[lower], values[upper], position - lower as f64);
-        let Some(value) = value else {
-            continue;
+        let current = value.map(|value| plot_row(value, 2, scale));
+        let glyph = match (previous, current) {
+            (Some(previous), Some(current)) if previous < current => '╲',
+            (Some(previous), Some(current)) if previous > current => '╱',
+            (Some(_), Some(_)) => '─',
+            _ => '·',
         };
-        render_bar(value, column, area, scale, model, theme, buffer);
-    }
-    if area.width > 1 && (usize::from(area.width - 1) % step != 0) {
-        let column = area.width - 1;
-        let position = f64::from(column) * (count - 1) as f64 / f64::from(area.width - 1);
-        let lower = position.floor() as usize;
-        let upper = position.ceil() as usize;
-        if let Some(value) = interpolate(values[lower], values[upper], position - lower as f64) {
-            render_bar(value, column, area, scale, model, theme, buffer);
-        }
-    }
-
-    scale
-}
-
-fn render_bar(
-    value: f64,
-    column: u16,
-    area: Rect,
-    scale: PlotScale,
-    model: WidgetRenderModel,
-    theme: &Theme,
-    buffer: &mut Buffer,
-) {
-    let top = plot_row(value, area.height, scale);
-    for row in top..area.height {
         put(
             buffer,
             area,
             area.x + column,
-            area.y + row,
-            '█',
+            area.y,
+            glyph,
             chart_style(model, theme),
         );
+        previous = current;
+    }
+}
+
+fn render_line_plot(
+    sparkline: SparklineModel<CHART_POINTS>,
+    area: Rect,
+    model: WidgetRenderModel,
+    theme: &Theme,
+    buffer: &mut Buffer,
+) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let (raw_values, count) = chart_values(sparkline);
+    if count == 0 {
+        write(buffer, area, area.x, area.y, "—", chart_style(model, theme));
+        return;
+    }
+
+    let values = visual_values(raw_values, count);
+    let scale = PlotScale::default();
+    let pixel_width = usize::from(area.width).saturating_mul(2);
+    let pixel_height = usize::from(area.height).saturating_mul(4);
+    if pixel_width == 0 || pixel_height == 0 {
+        return;
+    }
+
+    let cell_count = usize::from(area.width) * usize::from(area.height);
+    if cell_count > MAX_BRAILLE_CELLS {
+        render_compact_history(sparkline, area, model, theme, buffer);
+        return;
+    }
+
+    // One fixed mask per Braille cell keeps the line light without allocating
+    // while rendering. A single adjacent subpixel stroke gives the signal
+    // enough presence to read at a glance while leaving its center on the
+    // absolute 0..100% scale. The raw history remains in the model; only this
+    // local presentation series is smoothed.
+    let mut cells = [0u8; MAX_BRAILLE_CELLS];
+    let mut previous = None;
+    for (index, value) in values.iter().take(count).enumerate() {
+        let Some(value) = *value else {
+            previous = None;
+            continue;
+        };
+        let x = if count <= 1 {
+            0
+        } else {
+            index.saturating_mul(pixel_width - 1) / (count - 1)
+        };
+        let y = plot_row(value, pixel_height, scale);
+        let current = (x, y);
+        let support = braille_support_point(current, pixel_height);
+        if let Some(previous) = previous {
+            draw_braille_segment(&mut cells, area, previous, current);
+            draw_braille_segment(
+                &mut cells,
+                area,
+                braille_support_point(previous, pixel_height),
+                support,
+            );
+        } else {
+            set_braille_dot(&mut cells, area, current.0, current.1);
+            set_braille_dot(&mut cells, area, support.0, support.1);
+        }
+        previous = Some(current);
+    }
+
+    for row in 0..area.height {
+        for column in 0..area.width {
+            let mask = cells[usize::from(row) * usize::from(area.width) + usize::from(column)];
+            if mask != 0 {
+                let character = char::from_u32(0x2800 + u32::from(mask)).unwrap_or('·');
+                put(
+                    buffer,
+                    area,
+                    area.x + column,
+                    area.y + row,
+                    character,
+                    chart_style(model, theme),
+                );
+            }
+        }
+    }
+}
+
+fn chart_values(sparkline: SparklineModel<CHART_POINTS>) -> ([Option<f64>; CHART_POINTS], usize) {
+    let mut values = [None; CHART_POINTS];
+    let mut count = 0;
+    let latest_offset = sparkline
+        .points()
+        .last()
+        .map(|point| point.sample().offset());
+    let visual_start = latest_offset.map(|offset| offset.saturating_sub(CPU_VISUAL_WINDOW));
+    for point in sparkline.points().iter() {
+        if visual_start.is_some_and(|start| point.sample().offset() < start) {
+            continue;
+        }
+        if count == CHART_POINTS {
+            break;
+        }
+        values[count] = point.sample().usable_value();
+        count += 1;
+    }
+    (values, count)
+}
+
+fn visual_values(
+    raw_values: [Option<f64>; CHART_POINTS],
+    count: usize,
+) -> [Option<f64>; CHART_POINTS] {
+    amplify_local_detail(smooth_values(raw_values, count), raw_values, count)
+}
+
+fn amplify_local_detail(
+    values: [Option<f64>; CHART_POINTS],
+    raw_values: [Option<f64>; CHART_POINTS],
+    count: usize,
+) -> [Option<f64>; CHART_POINTS] {
+    let mut visual = [None; CHART_POINTS];
+    let mut baseline = None;
+
+    for index in 0..count.min(CHART_POINTS) {
+        let Some(value) = values[index] else {
+            baseline = None;
+            continue;
+        };
+
+        let sample = raw_values[index].unwrap_or(value);
+        let local_baseline = baseline.unwrap_or(sample);
+        let bounded_detail = ((sample - local_baseline) * LOCAL_DETAIL_GAIN)
+            .clamp(-LOCAL_DETAIL_LIMIT, LOCAL_DETAIL_LIMIT);
+        visual[index] = Some((value + bounded_detail).clamp(0.0, 1.0));
+        baseline = Some(match baseline {
+            Some(previous) => previous + LOCAL_BASELINE_ALPHA * (sample - previous),
+            None => sample,
+        });
+    }
+
+    visual
+}
+
+fn smooth_values(
+    raw_values: [Option<f64>; CHART_POINTS],
+    count: usize,
+) -> [Option<f64>; CHART_POINTS] {
+    let mut smoothed = [None; CHART_POINTS];
+    let mut previous = None;
+    let last = count.saturating_sub(1);
+
+    for index in 0..count.min(CHART_POINTS) {
+        let Some(raw) = raw_values[index] else {
+            previous = None;
+            continue;
+        };
+
+        let mut value = match previous {
+            Some(previous) => previous + RENDER_EMA_ALPHA * (raw - previous),
+            None => raw,
+        };
+        let deviation = raw - value;
+        if deviation.abs() >= PEAK_PRESERVE_THRESHOLD {
+            value += deviation * PEAK_PRESERVE_WEIGHT;
+        }
+        if index == last {
+            value += (raw - value) * CURRENT_POINT_WEIGHT;
+        }
+
+        value = value.clamp(0.0, 1.0);
+        smoothed[index] = Some(value);
+        previous = Some(value);
+    }
+    smoothed
+}
+
+fn draw_braille_segment(cells: &mut [u8], area: Rect, start: (usize, usize), end: (usize, usize)) {
+    let mut x = start.0 as isize;
+    let mut y = start.1 as isize;
+    let target_x = end.0 as isize;
+    let target_y = end.1 as isize;
+    let delta_x = (target_x - x).abs();
+    let step_x = if x < target_x { 1 } else { -1 };
+    let delta_y = -(target_y - y).abs();
+    let step_y = if y < target_y { 1 } else { -1 };
+    let mut error = delta_x + delta_y;
+
+    loop {
+        set_braille_dot(cells, area, x as usize, y as usize);
+        if x == target_x && y == target_y {
+            break;
+        }
+        let doubled = error.saturating_mul(2);
+        if doubled >= delta_y {
+            error += delta_y;
+            x += step_x;
+        }
+        if doubled <= delta_x {
+            error += delta_x;
+            y += step_y;
+        }
+    }
+}
+
+fn braille_support_point(point: (usize, usize), pixel_height: usize) -> (usize, usize) {
+    let last_row = pixel_height.saturating_sub(1);
+    if point.1 < last_row {
+        (point.0, point.1 + 1)
+    } else {
+        (point.0, point.1.saturating_sub(1))
+    }
+}
+
+fn set_braille_dot(cells: &mut [u8], area: Rect, x: usize, y: usize) {
+    let pixel_width = usize::from(area.width).saturating_mul(2);
+    let pixel_height = usize::from(area.height).saturating_mul(4);
+    if x >= pixel_width || y >= pixel_height {
+        return;
+    }
+    let column = x / 2;
+    let row = y / 4;
+    let bit = match (x % 2, y % 4) {
+        (0, 0) => 0b0000_0001,
+        (0, 1) => 0b0000_0010,
+        (0, 2) => 0b0000_0100,
+        (0, 3) => 0b0100_0000,
+        (1, 0) => 0b0000_1000,
+        (1, 1) => 0b0001_0000,
+        (1, 2) => 0b0010_0000,
+        (1, 3) => 0b1000_0000,
+        _ => return,
+    };
+    let index = row * usize::from(area.width) + column;
+    if let Some(cell) = cells.get_mut(index) {
+        *cell |= bit;
     }
 }
 
@@ -380,67 +533,6 @@ impl Default for PlotScale {
             high: 1.0,
         }
     }
-}
-
-fn plot_scale(values: &[Option<f64>], count: usize) -> PlotScale {
-    let mut low = f64::INFINITY;
-    let mut high = f64::NEG_INFINITY;
-    for value in values.iter().take(count).flatten() {
-        low = low.min(*value);
-        high = high.max(*value);
-    }
-    if !low.is_finite() || !high.is_finite() {
-        return PlotScale::default();
-    }
-
-    let range = (high - low).max(0.0);
-    let margin = (range * PLOT_MARGIN_RATIO).max(0.015);
-    let mut lower = (low - margin).max(0.0);
-    let mut upper = (high + margin).min(1.0);
-    if upper - lower < MIN_PLOT_RANGE {
-        let center = (low + high) * 0.5;
-        lower = (center - MIN_PLOT_RANGE * 0.5).max(0.0);
-        upper = (lower + MIN_PLOT_RANGE).min(1.0);
-        lower = (upper - MIN_PLOT_RANGE).max(0.0);
-    }
-    PlotScale {
-        low: lower,
-        high: upper.max(lower + f64::EPSILON),
-    }
-}
-
-fn render_scale(scale: PlotScale, area: Rect, theme: &Theme, buffer: &mut Buffer) {
-    let middle = (scale.low + scale.high) * 0.5;
-    write(
-        buffer,
-        area,
-        area.x,
-        area.y,
-        &format_percent(scale.high),
-        scale_style(theme),
-    );
-    if area.height >= 4 {
-        write(
-            buffer,
-            area,
-            area.x,
-            area.y + area.height / 2,
-            &format_percent(middle),
-            scale_style(theme),
-        );
-    }
-    write(
-        buffer,
-        area,
-        area.x,
-        area.bottom().saturating_sub(1),
-        &format_percent(scale.low),
-        scale_style(theme),
-    );
-}
-
-fn format_percent(value: f64) -> String {
-    format!("{:.0}%", value.clamp(0.0, 1.0) * 100.0)
 }
 
 fn sparkline(model: WidgetRenderModel) -> Option<SparklineModel<CHART_POINTS>> {
@@ -462,17 +554,29 @@ fn temperature(model: WidgetRenderModel) -> Option<MetricValue> {
         .filter(|value| value.unit() == MetricUnit::TemperatureCelsius)
 }
 
-fn hardware_line(model: WidgetRenderModel) -> String {
+fn hardware_line(model: WidgetRenderModel, available_width: u16) -> String {
     let context = model.block(BlockId::CpuContext);
     let Some(RenderBlock::CpuContext(context)) = context else {
         return String::new();
     };
-    let mut line = format!("{} cores", context.cores());
-    if let Some(frequency) = context.frequency() {
-        line.push_str(" · ");
-        line.push_str(&format_metric_value(frequency));
+    let frequency = context.frequency().map(format_metric_value);
+    let full = frequency.as_ref().map_or_else(
+        || format!("{} cores", context.cores()),
+        |frequency| format!("{} cores · {frequency}", context.cores()),
+    );
+    if full.chars().count() <= usize::from(available_width) {
+        return full;
     }
-    line
+
+    let compact = frequency.as_ref().map_or_else(
+        || format!("{}c", context.cores()),
+        |frequency| format!("{}c · {}", context.cores(), frequency.replace(' ', "")),
+    );
+    if compact.chars().count() <= usize::from(available_width) {
+        compact
+    } else {
+        format!("{}c", context.cores())
+    }
 }
 
 fn format_metric_value(value: MetricValue) -> String {
@@ -543,10 +647,9 @@ fn interpolate(lower: Option<f64>, upper: Option<f64>, amount: f64) -> Option<f6
     }
 }
 
-fn plot_row(value: f64, height: u16, scale: PlotScale) -> u16 {
+fn plot_row(value: f64, height: usize, scale: PlotScale) -> usize {
     let normalized = ((value - scale.low) / (scale.high - scale.low)).clamp(0.0, 1.0);
-    let row = ((1.0 - normalized) * f64::from(height.saturating_sub(1))).round();
-    row as u16
+    ((1.0 - normalized) * height.saturating_sub(1) as f64).round() as usize
 }
 
 fn value_style(model: WidgetRenderModel, theme: &Theme, bold: bool) -> Style {
@@ -585,6 +688,10 @@ fn context_style(model: WidgetRenderModel, theme: &Theme) -> Style {
             .bg(theme.selection_background);
     }
     style
+}
+
+fn context_value_style(model: WidgetRenderModel, theme: &Theme) -> Style {
+    value_style(model, theme, true)
 }
 
 fn trend_style(model: WidgetRenderModel, theme: &Theme) -> Style {
@@ -626,10 +733,6 @@ fn chart_style(model: WidgetRenderModel, theme: &Theme) -> Style {
     style
 }
 
-fn scale_style(theme: &Theme) -> Style {
-    Style::default().fg(theme.text_muted).bg(theme.surface)
-}
-
 fn write(buffer: &mut Buffer, area: Rect, x: u16, y: u16, text: &str, style: Style) {
     if y >= area.bottom() || x >= area.right() {
         return;
@@ -641,6 +744,75 @@ fn write(buffer: &mut Buffer, area: Rect, x: u16, y: u16, text: &str, style: Sty
         usize::from(area.right().saturating_sub(x)),
         style,
     );
+}
+
+fn write_rich_context(
+    buffer: &mut Buffer,
+    area: Rect,
+    text: &str,
+    base_style: Style,
+    theme: &Theme,
+    value_style: Style,
+) {
+    write(buffer, area, area.x, area.y, text, base_style);
+    let mut token_start = None;
+    for (index, character) in text.char_indices() {
+        if character.is_whitespace() || matches!(character, '·' | '/') {
+            if let Some(start) = token_start.take() {
+                overlay_context_token(buffer, area, text, start, index, value_style);
+            }
+            if matches!(character, '·' | '/') {
+                overlay_context_token(
+                    buffer,
+                    area,
+                    text,
+                    index,
+                    index + character.len_utf8(),
+                    context_separator_style(base_style, theme),
+                );
+            }
+        } else if token_start.is_none() {
+            token_start = Some(index);
+        }
+    }
+    if let Some(start) = token_start {
+        overlay_context_token(buffer, area, text, start, text.len(), value_style);
+    }
+}
+
+fn overlay_context_token(
+    buffer: &mut Buffer,
+    area: Rect,
+    text: &str,
+    start: usize,
+    end: usize,
+    style: Style,
+) {
+    let token = &text[start..end];
+    if !is_context_value(token) && token != "·" && token != "/" {
+        return;
+    }
+    let offset = u16::try_from(text[..start].chars().count()).unwrap_or(u16::MAX);
+    write(
+        buffer,
+        area,
+        area.x.saturating_add(offset),
+        area.y,
+        token,
+        style,
+    );
+}
+
+fn context_separator_style(base_style: Style, theme: &Theme) -> Style {
+    base_style.fg(theme.text_muted)
+}
+
+fn is_context_value(token: &str) -> bool {
+    token.chars().any(|character| character.is_ascii_digit())
+        || matches!(
+            token,
+            "B" | "B/s" | "GB" | "MB" | "KB" | "Hz" | "kHz" | "MHz" | "GHz" | "ms" | "s"
+        )
 }
 
 fn put(buffer: &mut Buffer, area: Rect, x: u16, y: u16, character: char, style: Style) {
@@ -676,7 +848,7 @@ mod tests {
 
     use ratatui::{buffer::Buffer, layout::Rect};
 
-    use super::super::super::chart::{TimeSample, TimeSeries};
+    use super::super::super::chart::{TimeSample, TimeSeries, TimeWindow};
     use super::super::super::metrics::{CpuMetricInput, CpuMetricModel, MetricReading};
     use super::super::super::{
         DashboardState, DashboardWidgetId, MetricAvailability, MetricUnit, WidgetAvailability,
@@ -716,10 +888,75 @@ mod tests {
         .unwrap()
     }
 
+    fn model_at(utilization: f64) -> CpuMetricModel<8> {
+        let utilization = utilization.clamp(0.0, 1.0);
+        let mut history = TimeSeries::new(MetricUnit::Percent);
+        for (index, value) in [
+            utilization,
+            utilization,
+            utilization,
+            utilization,
+            utilization,
+            utilization,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            history
+                .push(
+                    TimeSample::new(
+                        Duration::from_secs(index as u64 * 10),
+                        Some(value),
+                        MetricAvailability::Available,
+                        None,
+                    )
+                    .unwrap(),
+                )
+                .unwrap();
+        }
+        CpuMetricModel::from_input(
+            CpuMetricInput::new(
+                MetricReading::normalized(Some(utilization), MetricAvailability::Available)
+                    .unwrap(),
+                MetricReading::normalized(Some(utilization * 0.70), MetricAvailability::Available)
+                    .unwrap(),
+                MetricReading::normalized(Some(utilization * 0.30), MetricAvailability::Available)
+                    .unwrap(),
+                MetricReading::normalized(Some(1.0 - utilization), MetricAvailability::Available)
+                    .unwrap(),
+                MetricReading::non_negative(Some(3_200_000_000.0), MetricAvailability::Available)
+                    .unwrap(),
+                MetricReading::new(Some(55.0), MetricAvailability::Available).unwrap(),
+                8,
+                history,
+            )
+            .unwrap(),
+        )
+        .unwrap()
+    }
+
     fn render(preset: DashboardPreset, width: u16, height: u16) -> Buffer {
+        render_model(model(), preset, width, height)
+    }
+
+    fn render_at(utilization: f64, width: u16, height: u16) -> Buffer {
+        render_model(
+            model_at(utilization),
+            DashboardPreset::Widescreen,
+            width,
+            height,
+        )
+    }
+
+    fn render_model(
+        metric_model: CpuMetricModel<8>,
+        preset: DashboardPreset,
+        width: u16,
+        height: u16,
+    ) -> Buffer {
         let context = WidgetContext::new(preset, DashboardState::Calm, Duration::ZERO)
             .with_availability(WidgetAvailability::all());
-        let model = WidgetRenderer::render_cpu(model(), context)
+        let model = WidgetRenderer::render_cpu(metric_model, context)
             .unwrap()
             .unwrap();
         let mut buffer = Buffer::empty(Rect::new(0, 0, width, height));
@@ -738,13 +975,34 @@ mod tests {
         buffer.content.iter().map(|cell| cell.symbol()).collect()
     }
 
+    fn raw_values(values: &[f64]) -> ([Option<f64>; CHART_POINTS], usize) {
+        let mut raw = [None; CHART_POINTS];
+        let count = values.len().min(CHART_POINTS);
+        for (slot, value) in raw.iter_mut().zip(values.iter().copied()).take(count) {
+            *slot = Some(value);
+        }
+        (raw, count)
+    }
+
+    fn braille_cells(buffer: &Buffer, x_start: u16, x_end: u16, y_start: u16, y_end: u16) -> usize {
+        (y_start..y_end)
+            .flat_map(|y| (x_start..x_end).map(move |x| buffer[(x, y)].symbol()))
+            .filter(|symbol| {
+                symbol
+                    .chars()
+                    .next()
+                    .is_some_and(|character| ('\u{2800}'..='\u{28ff}').contains(&character))
+            })
+            .count()
+    }
+
     #[test]
     fn dedicated_card_has_large_value_hardware_and_real_history() {
         let rendered = render(DashboardPreset::Widescreen, 48, 12);
         let output = text(&rendered);
         assert!(output.contains("◈ CPU"));
         assert_eq!(output.matches("42%").count(), 1);
-        assert_eq!(rendered[(0, 3)].symbol(), "4");
+        assert_eq!(rendered[(0, 2)].symbol(), "4");
         assert!(output.contains("8 cores"));
         assert!(output.contains("3.2 GHz"));
         assert!(output.contains("55.0°C"));
@@ -758,15 +1016,13 @@ mod tests {
         let rendered = render(DashboardPreset::Standard, 43, 10);
         let output = text(&rendered);
         assert_eq!(output.matches("42%").count(), 1);
-        assert_eq!(rendered[(0, 3)].symbol(), "4");
+        assert_eq!(rendered[(0, 2)].symbol(), "4");
         assert!(output.contains("8 cores"));
         assert!(output.contains("↑ +32%"));
+        assert!(!output.contains('█'));
 
-        let chart_x = 24;
-        let chart_rows = (2..10)
-            .filter(|y| (chart_x..43).any(|x| rendered[(x, *y)].symbol() == "█"))
-            .count();
-        assert!(chart_rows >= 3);
+        let chart_cells = braille_cells(&rendered, 0, 43, 5, 9);
+        assert!(chart_cells >= 5);
     }
 
     #[test]
@@ -774,38 +1030,180 @@ mod tests {
         let rendered = render(DashboardPreset::Widescreen, 43, 10);
 
         assert_eq!(rendered[(0, 1)].symbol(), " ");
-        assert_eq!(rendered[(0, 3)].symbol(), "4");
-        assert_eq!(rendered[(0, 5)].symbol(), "8");
-        assert_eq!(rendered[(0, 6)].symbol(), "5");
-        assert_eq!(rendered[(0, 7)].symbol(), "↑");
+        assert_eq!(rendered[(0, 2)].symbol(), "4");
+        assert_eq!(rendered[(0, 3)].symbol(), "8");
+        assert_eq!(rendered[(0, 4)].symbol(), "5");
 
-        let chart_rows = (1..9)
-            .filter(|y| (28..43).any(|x| rendered[(x, *y)].symbol() == "█"))
+        let chart_rows = (5..9)
+            .filter(|y| {
+                (0..43).any(|x| {
+                    rendered[(x, *y)]
+                        .symbol()
+                        .chars()
+                        .next()
+                        .is_some_and(|character| ('\u{2800}'..='\u{28ff}').contains(&character))
+                })
+            })
             .count();
         assert!(
-            chart_rows >= 5,
-            "chart should use the available body height"
+            chart_rows >= 2,
+            "chart should remain visible across the available body height"
+        );
+        assert!(!text(&rendered).contains("50s"));
+        assert!(!text(&rendered).contains("100%"));
+    }
+
+    #[test]
+    fn compact_dashboard_slot_keeps_a_two_row_vital_line() {
+        let rendered = render(DashboardPreset::Standard, 48, 7);
+        let chart_rows = (4..7)
+            .filter(|y| {
+                (0..48).any(|x| {
+                    rendered[(x, *y)]
+                        .symbol()
+                        .chars()
+                        .next()
+                        .is_some_and(|character| ('\u{2800}'..='\u{28ff}').contains(&character))
+                })
+            })
+            .count();
+        assert!(chart_rows >= 2);
+    }
+
+    #[test]
+    fn absolute_scale_preserves_semantic_vertical_order_and_bounds() {
+        let scale = PlotScale::default();
+        assert_eq!(scale.low, 0.0);
+        assert_eq!(scale.high, 1.0);
+
+        let low = plot_row(0.10, 16, scale);
+        let middle = plot_row(0.50, 16, scale);
+        let high = plot_row(0.90, 16, scale);
+        assert!(low > middle && middle > high);
+        assert_eq!(plot_row(-1.0, 16, scale), 15);
+        assert_eq!(plot_row(2.0, 16, scale), 0);
+    }
+
+    #[test]
+    fn render_smoothing_is_deterministic_and_reduces_small_oscillations() {
+        let (raw, count) = raw_values(&[0.30, 0.32, 0.31, 0.33, 0.32, 0.34]);
+        let first = smooth_values(raw, count);
+        let second = smooth_values(raw, count);
+
+        assert_eq!(first, second);
+        let raw_delta = (raw[5].unwrap() - raw[4].unwrap()).abs();
+        let smoothed_delta = (first[5].unwrap() - first[4].unwrap()).abs();
+        assert!(smoothed_delta < raw_delta);
+    }
+
+    #[test]
+    fn render_smoothing_preserves_peaks_and_keeps_the_current_point_close() {
+        let (raw, count) = raw_values(&[0.25, 0.27, 0.80, 0.29]);
+        let smoothed = smooth_values(raw, count);
+
+        assert!(smoothed[2].unwrap() > 0.50);
+        assert!((smoothed[3].unwrap() - raw[3].unwrap()).abs() < 0.20);
+    }
+
+    #[test]
+    fn local_detail_reveals_small_real_changes_without_leaving_absolute_region() {
+        let (raw, count) = raw_values(&[0.08, 0.10, 0.09, 0.12, 0.08, 0.11]);
+        let smoothed = smooth_values(raw, count);
+        let visual = visual_values(raw, count);
+
+        assert!(visual[3].unwrap() > visual[2].unwrap());
+        assert!(visual[4].unwrap() < visual[3].unwrap());
+        for (rendered, baseline) in visual[..count].iter().zip(smoothed[..count].iter()) {
+            let rendered = rendered.unwrap();
+            let baseline = baseline.unwrap();
+            assert!((rendered - baseline).abs() <= LOCAL_DETAIL_LIMIT + 1.0e-9);
+            assert!((0.0..=1.0).contains(&rendered));
+        }
+    }
+
+    #[test]
+    fn local_detail_keeps_constant_low_mid_and_high_load_stable() {
+        for value in [0.10, 0.50, 0.90] {
+            let (raw, count) = raw_values(&[value, value, value, value, value]);
+            let visual = visual_values(raw, count);
+            assert!(
+                visual[..count]
+                    .iter()
+                    .flatten()
+                    .all(|rendered| (*rendered - value).abs() < f64::EPSILON)
+            );
+        }
+    }
+
+    #[test]
+    fn constant_rendered_levels_use_the_absolute_cpu_scale() {
+        let positions = [0.10, 0.30, 0.50, 0.80, 0.95].map(|value| {
+            let rendered = render_at(value, 48, 12);
+            (5..12)
+                .find(|row| {
+                    (0..48).any(|column| {
+                        rendered[(column, *row)]
+                            .symbol()
+                            .chars()
+                            .next()
+                            .is_some_and(|character| ('\u{2800}'..='\u{28ff}').contains(&character))
+                    })
+                })
+                .expect("constant level should render a Braille line")
+        });
+        assert!(positions[0] > positions[2]);
+        assert!(positions[2] > positions[4]);
+        assert!(positions[0] > positions[1]);
+        assert!(positions[3] > positions[4]);
+    }
+
+    #[test]
+    fn visual_window_uses_recent_points_without_mutating_the_source_model() {
+        let mut history = TimeSeries::<64>::new(MetricUnit::Percent);
+        for index in 0..12 {
+            history
+                .push(
+                    TimeSample::new(
+                        Duration::from_secs(index * 5),
+                        Some(0.20 + index as f64 * 0.01),
+                        MetricAvailability::Available,
+                        None,
+                    )
+                    .unwrap(),
+                )
+                .unwrap();
+        }
+        let sparkline = history.sparkline::<CHART_POINTS>(TimeWindow::Long);
+        let source_length = sparkline.points().len();
+        let (values, count) = chart_values(sparkline);
+
+        assert!(count > 0);
+        assert!(count < source_length);
+        assert_eq!(values[count - 1], Some(0.31));
+        assert_eq!(sparkline.points().len(), source_length);
+    }
+
+    #[test]
+    fn isolated_peaks_and_abrupt_drops_remain_visible_after_smoothing() {
+        let (raw, count) = raw_values(&[0.10, 0.12, 0.92, 0.14]);
+        let smoothed = smooth_values(raw, count);
+
+        assert!(smoothed[2].unwrap() > smoothed[1].unwrap());
+        assert!(smoothed[3].unwrap() < smoothed[2].unwrap());
+        assert!(
+            smoothed[..count]
+                .iter()
+                .flatten()
+                .all(|value| value.is_finite())
         );
     }
 
     #[test]
-    fn adaptive_scale_preserves_local_shape_and_peak_candidates() {
-        let values = [
-            Some(0.20),
-            Some(0.31),
-            Some(0.24),
-            Some(0.34),
-            Some(0.22),
-            Some(0.29),
-        ];
-        let scale = plot_scale(&values, values.len());
-
-        assert!(scale.low > 0.0);
-        assert!(scale.high < 1.0);
-        assert!((scale.high - scale.low) >= MIN_PLOT_RANGE);
-        assert_ne!(plot_row(0.20, 8, scale), plot_row(0.34, 8, scale));
-        assert!(plot_row(0.31, 8, scale) < plot_row(0.24, 8, scale));
-        assert!(plot_row(0.34, 8, scale) < plot_row(0.22, 8, scale));
+    fn invalid_cpu_samples_are_rejected_before_rasterization() {
+        assert!(MetricReading::normalized(Some(f64::NAN), MetricAvailability::Available).is_err());
+        assert!(
+            MetricReading::normalized(Some(f64::INFINITY), MetricAvailability::Available).is_err()
+        );
     }
 
     #[test]
@@ -814,6 +1212,12 @@ mod tests {
         let output = text(&rendered);
         assert!(output.contains("42%"));
         assert!(!output.contains("███"));
+    }
+
+    #[test]
+    fn narrow_card_uses_compact_hardware_context_without_clipping() {
+        let output = text(&render(DashboardPreset::Standard, 29, 9));
+        assert!(output.contains("8 cores · 3.2 GHz"));
     }
 
     #[test]

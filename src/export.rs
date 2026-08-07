@@ -157,7 +157,11 @@ mod tests {
             kernel: "test".to_string(),
             cpu_name: "Test CPU".to_string(),
             cpu_cores: 4,
+            cpu_physical_cores: None,
+            cpu_logical_threads: 4,
             cpu_usage: 37.5,
+            cpu_frequency_hz: None,
+            cpu_temperature_celsius: None,
             total_ram: 8.0,
             used_ram: 2.0,
             total_swap: 2.0,
@@ -166,11 +170,18 @@ mod tests {
             uptime: 10,
             load_average: (0.1, 0.2, 0.3),
             disks: vec![DiskInfo {
+                id: "disk".to_string(),
                 name: "disk".to_string(),
+                model: None,
                 mount_point: "/".to_string(),
+                mount_points: vec!["/".to_string()],
                 total_space: 100.0,
                 available_space: 50.0,
+                is_virtual: false,
+                read_bytes_per_sec: None,
+                written_bytes_per_sec: None,
             }],
+            storage_devices: Vec::new(),
             processes_list: vec![ProcessInfo {
                 name: "test".to_string(),
                 memory: 1.0,
@@ -178,6 +189,8 @@ mod tests {
             }],
             gpus: Vec::new(),
             networks: Vec::new(),
+            all_networks: Vec::new(),
+            temperatures: Vec::new(),
         }
     }
 }

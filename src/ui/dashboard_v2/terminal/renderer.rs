@@ -2,8 +2,10 @@ use ratatui::{buffer::Buffer, layout::Rect, style::Style};
 
 use crate::theme::Theme;
 
-use super::super::{DashboardBounds, DashboardPreset, WidgetRenderModel};
-use super::{blocks, cpu::CpuCardRenderer, layout::TerminalLayout, layout::TerminalLayoutError};
+use super::super::{DashboardBounds, DashboardPreset, HardwareInventory, WidgetRenderModel};
+use super::{
+    blocks, cpu::CpuCardRenderer, layout::TerminalLayout, layout::TerminalLayoutError, metrics,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TerminalRenderError {
@@ -36,8 +38,29 @@ impl TerminalRenderer {
         theme: &Theme,
         buffer: &mut Buffer,
     ) -> Result<(), TerminalRenderError> {
+        self.render_with_inventory(model, preset, bounds, theme, buffer, None)
+    }
+
+    pub(crate) fn render_with_inventory(
+        self,
+        model: WidgetRenderModel,
+        preset: DashboardPreset,
+        bounds: DashboardBounds,
+        theme: &Theme,
+        buffer: &mut Buffer,
+        inventory: Option<&HardwareInventory>,
+    ) -> Result<(), TerminalRenderError> {
         if model.visual().widget_id() == super::super::DashboardWidgetId::Cpu {
             return CpuCardRenderer::render(model, preset, bounds, theme, buffer);
+        }
+        if matches!(
+            model.visual().widget_id(),
+            super::super::DashboardWidgetId::Memory
+                | super::super::DashboardWidgetId::Gpu
+                | super::super::DashboardWidgetId::Network
+                | super::super::DashboardWidgetId::Storage
+        ) {
+            return metrics::render_with_inventory(model, preset, bounds, theme, buffer, inventory);
         }
         let layout = TerminalLayout::new(model, preset, bounds, *buffer.area())?;
         buffer.set_style(layout.area(), Style::default().bg(theme.surface));
@@ -66,6 +89,25 @@ impl TerminalRenderer {
         .map_err(|_| TerminalRenderError::BoundsOverflow)?;
         self.render(model, preset, bounds, theme, buffer)
     }
+
+    pub(crate) fn render_rect_with_inventory(
+        self,
+        model: WidgetRenderModel,
+        preset: DashboardPreset,
+        area: Rect,
+        theme: &Theme,
+        buffer: &mut Buffer,
+        inventory: &HardwareInventory,
+    ) -> Result<(), TerminalRenderError> {
+        let bounds = DashboardBounds::new(
+            usize::from(area.x),
+            usize::from(area.y),
+            usize::from(area.width),
+            usize::from(area.height),
+        )
+        .map_err(|_| TerminalRenderError::BoundsOverflow)?;
+        self.render_with_inventory(model, preset, bounds, theme, buffer, Some(inventory))
+    }
 }
 
 #[cfg(test)]
@@ -80,13 +122,14 @@ mod tests {
 
     use super::super::super::chart::{TimeSample, TimeSeries};
     use super::super::super::metrics::{
-        CpuMetricInput, CpuMetricModel, MemoryMetricInput, MemoryMetricModel, MetricReading,
-        NetworkMetricInput, NetworkMetricModel,
+        CpuMetricInput, CpuMetricModel, GpuMetricInput, GpuMetricModel, MemoryMetricInput,
+        MemoryMetricModel, MetricReading, NetworkMetricInput, NetworkMetricModel,
+        StorageMetricInput, StorageMetricModel,
     };
     use super::super::super::{
-        DashboardState, DashboardWidgetId, MetricAvailability, MetricUnit, MetricValue,
-        MetricVisual, VisualPriority, WidgetAvailability, WidgetContext, WidgetRenderer,
-        WidgetState,
+        DashboardState, DashboardWidgetId, GpuDevice, HardwareId, HardwareInventory, HardwareKind,
+        MetricAvailability, MetricUnit, MetricValue, MetricVisual, StorageDevice, VisualPriority,
+        WidgetAvailability, WidgetContext, WidgetRenderer, WidgetState,
     };
     use super::*;
 
@@ -142,6 +185,30 @@ mod tests {
         .unwrap()
     }
 
+    fn gpu_model() -> GpuMetricModel<8> {
+        GpuMetricModel::from_input(
+            GpuMetricInput::new(
+                MetricReading::normalized(Some(0.37), MetricAvailability::Available).unwrap(),
+                MetricReading::non_negative(
+                    Some(0.7 * 1024.0 * 1024.0 * 1024.0),
+                    MetricAvailability::Available,
+                )
+                .unwrap(),
+                MetricReading::non_negative(
+                    Some(8.0 * 1024.0 * 1024.0 * 1024.0),
+                    MetricAvailability::Available,
+                )
+                .unwrap(),
+                MetricReading::new(Some(53.0), MetricAvailability::Available).unwrap(),
+                MetricReading::non_negative(Some(1.8e9), MetricAvailability::Available).unwrap(),
+                MetricReading::non_negative(Some(120.0), MetricAvailability::Available).unwrap(),
+                history(MetricUnit::Percent, &[0.20, 0.32, 0.37]),
+            )
+            .unwrap(),
+        )
+        .unwrap()
+    }
+
     fn network_model() -> NetworkMetricModel<8> {
         NetworkMetricModel::from_input(
             NetworkMetricInput::new(
@@ -152,6 +219,24 @@ mod tests {
                 MetricReading::non_negative(Some(100.0), MetricAvailability::Available).unwrap(),
                 history(MetricUnit::BytesPerSecond, &[20.0, 60.0, 80.0]),
                 history(MetricUnit::BytesPerSecond, &[10.0, 15.0, 20.0]),
+            )
+            .unwrap(),
+        )
+        .unwrap()
+    }
+
+    fn storage_model() -> StorageMetricModel<8> {
+        StorageMetricModel::from_input(
+            StorageMetricInput::new(
+                MetricReading::non_negative(Some(500.0), MetricAvailability::Available).unwrap(),
+                MetricReading::non_negative(Some(1_000.0), MetricAvailability::Available).unwrap(),
+                MetricReading::non_negative(Some(0.0), MetricAvailability::Available).unwrap(),
+                MetricReading::non_negative(Some(0.0), MetricAvailability::Available).unwrap(),
+                MetricReading::non_negative(Some(0.0), MetricAvailability::Available).unwrap(),
+                MetricReading::normalized(Some(0.0), MetricAvailability::Available).unwrap(),
+                history(MetricUnit::Percent, &[0.40, 0.50]),
+                history(MetricUnit::BytesPerSecond, &[0.0, 0.0]),
+                history(MetricUnit::BytesPerSecond, &[0.0, 0.0]),
             )
             .unwrap(),
         )
@@ -223,16 +308,26 @@ mod tests {
     }
 
     #[test]
-    fn dashboard_cpu_route_uses_product_value_and_right_hand_plot() {
+    fn dashboard_cpu_route_uses_product_value_and_full_width_plot() {
         let buffer = render_cpu(DashboardPreset::Standard, 43, 10);
         let output = buffer_text(&buffer);
         assert_eq!(output.matches("42%").count(), 1);
-        assert_eq!(buffer[(0, 3)].symbol(), "4");
+        assert_eq!(buffer[(0, 2)].symbol(), "4");
 
-        let chart_rows = (2..10)
-            .filter(|y| (24..43).any(|x| buffer[(x, *y)].symbol() == "█"))
-            .count();
-        assert!(chart_rows >= 3);
+        let mut chart_cells = 0;
+        for y in 5..10 {
+            for x in 0..43 {
+                if buffer[(x, y)]
+                    .symbol()
+                    .chars()
+                    .next()
+                    .is_some_and(|character| ('\u{2800}'..='\u{28ff}').contains(&character))
+                {
+                    chart_cells += 1;
+                }
+            }
+        }
+        assert!(chart_cells >= 5);
     }
 
     #[test]
@@ -417,8 +512,16 @@ mod tests {
                 .count()
         };
         assert!(non_blank(&standard) > non_blank(&compact));
-        assert!(buffer_text(&standard).contains('█'));
-        assert!(buffer_text(&wide).contains('█'));
+        let contains_braille = |buffer: &Buffer| {
+            buffer.content.iter().any(|cell| {
+                cell.symbol()
+                    .chars()
+                    .next()
+                    .is_some_and(|character| ('\u{2800}'..='\u{28ff}').contains(&character))
+            })
+        };
+        assert!(contains_braille(&standard));
+        assert!(contains_braille(&wide));
         assert!(non_blank(&large) >= non_blank(&wide));
 
         let memory = WidgetRenderer::render_memory(
@@ -444,7 +547,60 @@ mod tests {
                 &mut buffer,
             )
             .unwrap();
-        assert!(buffer_text(&buffer).contains('█'));
+        assert!(buffer_text(&buffer).contains("60 B"));
+        let memory_text = buffer_text(&buffer);
+        assert!(memory_text.contains("60%"));
+        assert!(!memory_text.lines().any(|line| line.trim() == "60%"));
+        assert!(memory_text.contains('▰'));
+        let memory_lines: Vec<&str> = memory_text.lines().collect();
+        let memory_value_line = memory_lines
+            .iter()
+            .position(|line| line.contains("60 B / 100 B"))
+            .expect("memory value row");
+        assert!(memory_lines[memory_value_line].contains("60%"));
+        assert!(memory_lines[memory_value_line + 1].contains('▰'));
+        assert!(
+            !memory_text
+                .chars()
+                .any(|character| ('\u{2800}'..='\u{28ff}').contains(&character))
+        );
+
+        let gpu = WidgetRenderer::render_gpu(gpu_model(), context(DashboardPreset::Standard))
+            .unwrap()
+            .unwrap();
+        let mut gpu_buffer = Buffer::empty(Rect::new(0, 0, 48, 8));
+        TerminalRenderer::new()
+            .render(
+                gpu,
+                DashboardPreset::Standard,
+                super::super::super::DashboardBounds::new(0, 0, 48, 8).unwrap(),
+                &crate::theme::Theme::pulse(),
+                &mut gpu_buffer,
+            )
+            .unwrap();
+        let gpu_text = buffer_text(&gpu_buffer);
+        assert!(gpu_text.contains("0.7 / 8 GB"));
+        assert!(gpu_text.contains("53°C"));
+        assert!(!gpu_text.contains("678.0 MB"));
+
+        let storage =
+            WidgetRenderer::render_storage(storage_model(), context(DashboardPreset::Standard))
+                .unwrap()
+                .unwrap();
+        let mut storage_buffer = Buffer::empty(Rect::new(0, 0, 48, 8));
+        TerminalRenderer::new()
+            .render(
+                storage,
+                DashboardPreset::Standard,
+                super::super::super::DashboardBounds::new(0, 0, 48, 8).unwrap(),
+                &crate::theme::Theme::pulse(),
+                &mut storage_buffer,
+            )
+            .unwrap();
+        let storage_text = buffer_text(&storage_buffer);
+        assert!(storage_text.contains("500 B / 1000 B"));
+        assert!(storage_text.contains('▰'));
+
         let mut comparison = Buffer::empty(Rect::new(0, 0, 72, 24));
         TerminalRenderer::new()
             .render(
@@ -455,7 +611,234 @@ mod tests {
                 &mut comparison,
             )
             .unwrap();
-        assert!(buffer_text(&comparison).contains("d/u"));
+        assert!(buffer_text(&comparison).contains('↓'));
+        assert!(buffer_text(&comparison).contains('↑'));
+        let vital_lines = buffer_text(&comparison)
+            .lines()
+            .filter(|line| {
+                line.chars()
+                    .any(|character| ('\u{2800}'..='\u{28ff}').contains(&character))
+            })
+            .count();
+        assert!(vital_lines >= 2);
+        assert!(!buffer_text(&comparison).contains("60s"));
+    }
+
+    #[test]
+    fn important_values_use_clear_bold_text_while_context_stays_muted() {
+        let theme = crate::theme::Theme::pulse();
+        let cpu = render_cpu(DashboardPreset::LargeWidescreen, 48, 16);
+        let cpu_output = buffer_text(&cpu);
+        let cpu_lines: Vec<&str> = cpu_output.lines().collect();
+        let hardware_row = cpu_lines
+            .iter()
+            .position(|line| line.contains("8 cores"))
+            .expect("CPU hardware context row");
+        let hardware_x = cpu_lines[hardware_row]
+            .find("8 cores")
+            .expect("CPU hardware context");
+        assert_eq!(cpu[(hardware_x as u16, hardware_row as u16)].fg, theme.text);
+        assert!(
+            cpu[(hardware_x as u16, hardware_row as u16)]
+                .modifier
+                .contains(Modifier::BOLD)
+        );
+        let label_x = cpu_lines[hardware_row]
+            .find("cores")
+            .expect("CPU hardware label");
+        assert_eq!(
+            cpu[(label_x as u16, hardware_row as u16)].fg,
+            theme.text_muted
+        );
+        assert!(
+            !cpu[(label_x as u16, hardware_row as u16)]
+                .modifier
+                .contains(Modifier::BOLD)
+        );
+
+        let memory = WidgetRenderer::render_memory(
+            memory_model(),
+            context(DashboardPreset::LargeWidescreen),
+        )
+        .unwrap()
+        .unwrap();
+        let mut memory_buffer = Buffer::empty(Rect::new(0, 0, 72, 24));
+        TerminalRenderer::new()
+            .render(
+                memory,
+                DashboardPreset::LargeWidescreen,
+                super::super::super::DashboardBounds::new(0, 0, 72, 24).unwrap(),
+                &theme,
+                &mut memory_buffer,
+            )
+            .unwrap();
+        let memory_output = buffer_text(&memory_buffer);
+        let memory_lines: Vec<&str> = memory_output.lines().collect();
+        let detail_row = memory_lines
+            .iter()
+            .position(|line| line.contains("cache"))
+            .expect("memory context row");
+        let numeric_x = memory_lines[detail_row]
+            .find("60%")
+            .expect("memory pressure value");
+        assert_eq!(
+            memory_buffer[(numeric_x as u16, detail_row as u16)].fg,
+            theme.text
+        );
+        assert!(
+            memory_buffer[(numeric_x as u16, detail_row as u16)]
+                .modifier
+                .contains(Modifier::BOLD)
+        );
+        let cache_x = memory_lines[detail_row]
+            .find("cache")
+            .expect("memory context label");
+        assert_eq!(
+            memory_buffer[(cache_x as u16, detail_row as u16)].fg,
+            theme.text_muted
+        );
+    }
+
+    #[test]
+    fn storage_inventory_renderer_keeps_multiple_devices_visible() {
+        let model = WidgetRenderer::render_storage(
+            storage_model(),
+            context(DashboardPreset::LargeWidescreen),
+        )
+        .unwrap()
+        .unwrap();
+        let storage_device =
+            |key: &str, name: &str, model: &str, total: f64, used: f64| StorageDevice {
+                id: HardwareId::new(HardwareKind::Storage, key).unwrap(),
+                name: name.to_owned(),
+                model: Some(model.to_owned()),
+                mount_points: Vec::new(),
+                used_bytes: Some(used),
+                total_bytes: Some(total),
+                read_bytes_per_sec: Some(0.0),
+                write_bytes_per_sec: Some(0.0),
+                latency_seconds: None,
+                availability: MetricAvailability::Available,
+                is_virtual: false,
+            };
+        let inventory = HardwareInventory::new(
+            vec![
+                storage_device("nvme0n1", "nvme0n1", "KINGSTON SNV2S1000G", 931.5, 215.0),
+                storage_device("sda", "sda", "KINGSTON SA400S37480G", 447.1, 412.0),
+            ],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 72, 10));
+        TerminalRenderer::new()
+            .render_rect_with_inventory(
+                model,
+                DashboardPreset::LargeWidescreen,
+                Rect::new(0, 0, 72, 10),
+                &crate::theme::Theme::pulse(),
+                &mut buffer,
+                &inventory,
+            )
+            .unwrap();
+        let text = buffer_text(&buffer);
+        assert!(text.contains("sda"));
+        assert!(text.contains("nvme0n1"));
+        assert!(text.matches('▰').count() + text.matches('▱').count() >= 72 * 2);
+    }
+
+    #[test]
+    fn gpu_inventory_renderer_keeps_devices_separate_and_explains_missing_telemetry() {
+        let model = WidgetRenderer::render_gpu(gpu_model(), context(DashboardPreset::Standard))
+            .unwrap()
+            .unwrap();
+        let inventory = HardwareInventory::new(
+            Vec::new(),
+            vec![
+                GpuDevice {
+                    id: HardwareId::new(HardwareKind::Gpu, "amd").unwrap(),
+                    name: "AMD Radeon · AMDGPU".to_owned(),
+                    utilization_percent: None,
+                    vram_used_bytes: None,
+                    vram_total_bytes: None,
+                    temperature_celsius: None,
+                    frequency_hz: None,
+                    power_watts: None,
+                    availability: MetricAvailability::Available,
+                },
+                GpuDevice {
+                    id: HardwareId::new(HardwareKind::Gpu, "nvidia").unwrap(),
+                    name: "NVIDIA GeForce RTX 4060".to_owned(),
+                    utilization_percent: None,
+                    vram_used_bytes: None,
+                    vram_total_bytes: None,
+                    temperature_celsius: None,
+                    frequency_hz: None,
+                    power_watts: None,
+                    availability: MetricAvailability::Available,
+                },
+            ],
+            Vec::new(),
+            Vec::new(),
+        );
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 56, 8));
+        TerminalRenderer::new()
+            .render_rect_with_inventory(
+                model,
+                DashboardPreset::Standard,
+                Rect::new(0, 0, 56, 8),
+                &crate::theme::Theme::pulse(),
+                &mut buffer,
+                &inventory,
+            )
+            .unwrap();
+        let text = buffer_text(&buffer);
+        assert!(text.contains("RTX 4060"));
+        assert!(text.contains("driver unavailable"));
+        assert!(!text.contains("AMD Radeon"));
+        assert!(!text.contains("▰"));
+    }
+
+    #[test]
+    fn gpu_inventory_renderer_uses_a_segmented_meter_for_real_usage() {
+        let model = WidgetRenderer::render_gpu(gpu_model(), context(DashboardPreset::Standard))
+            .unwrap()
+            .unwrap();
+        let inventory = HardwareInventory::new(
+            Vec::new(),
+            vec![GpuDevice {
+                id: HardwareId::new(HardwareKind::Gpu, "nvidia").unwrap(),
+                name: "NVIDIA GeForce RTX 4060".to_owned(),
+                utilization_percent: Some(26.0),
+                vram_used_bytes: Some(0.7 * 1024.0 * 1024.0 * 1024.0),
+                vram_total_bytes: Some(8.0 * 1024.0 * 1024.0 * 1024.0),
+                temperature_celsius: Some(51.0),
+                frequency_hz: None,
+                power_watts: None,
+                availability: MetricAvailability::Available,
+            }],
+            Vec::new(),
+            Vec::new(),
+        );
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 60, 6));
+        TerminalRenderer::new()
+            .render_rect_with_inventory(
+                model,
+                DashboardPreset::Standard,
+                Rect::new(0, 0, 60, 6),
+                &crate::theme::Theme::pulse(),
+                &mut buffer,
+                &inventory,
+            )
+            .unwrap();
+        let text = buffer_text(&buffer);
+        assert!(text.contains("RTX 4060"));
+        assert!(text.contains("26%"));
+        assert!(text.contains("▰"));
+        assert!(text.contains("▱"));
+        assert!(text.matches('▰').count() + text.matches('▱').count() >= 60);
+        assert!(text.contains("0.7 / 8 GB"));
+        assert!(text.contains("51°C"));
     }
 
     #[test]
