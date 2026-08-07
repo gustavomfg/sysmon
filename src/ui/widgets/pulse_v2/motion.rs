@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use super::behavior::{physiological_activity, physiological_pressure};
 use super::{FieldDimensions, FieldError, NormalizedPulseInput, PulseV2Preset, ScalarField};
 
 const TAU: f32 = std::f32::consts::TAU;
@@ -156,13 +157,10 @@ impl PhysiologyGrid {
                 (position.0 - core.position.0).hypot((position.1 - core.position.1) * aspect);
             let proximity =
                 smoothstep(1.0 - distance / (core.radius * (6.0 + core.breath * 0.5)).max(0.001));
-            let activity = (0.20
-                + density * 0.22
-                + pressure * 0.24
-                + input.load() * 0.13
-                + input.cpu() * 0.06
-                + input.memory() * 0.06
-                + input.gpu().unwrap_or(0.0) * 0.05
+            let activity = (0.16
+                + physiological_activity(input) * 0.36
+                + density * 0.18
+                + pressure * 0.26
                 + proximity * 0.18)
                 .clamp(0.0, 1.0);
             let phase = hash01(index * 197 + 43) * TAU;
@@ -311,11 +309,14 @@ impl OrganicMotion {
         elapsed: Duration,
         reduced_motion: bool,
     ) -> Self {
-        let pressure = pressure(input);
-        let intensity = (pressure + input.volatility() * 0.10).clamp(0.0, 1.0);
-        let density = (0.30 + intensity * 0.70 + input.volatility() * 0.20).clamp(0.0, 1.0);
-        let amplitude = 0.75 + pressure * 0.30 + input.volatility() * 0.20;
-        let speed = 1.0 + intensity * 1.8 + input.volatility() * 0.45;
+        let activity = physiological_activity(input);
+        let pressure = physiological_pressure(input);
+        let intensity =
+            (activity * 0.42 + pressure * 0.52 + input.volatility() * 0.06).clamp(0.0, 1.0);
+        let density =
+            (0.30 + intensity * 0.60 + activity * 0.18 + input.volatility() * 0.20).clamp(0.0, 1.0);
+        let amplitude = 0.75 + pressure * 0.30 + activity * 0.12 + input.volatility() * 0.20;
+        let speed = 1.0 + activity * 1.45 + pressure * 0.95 + input.volatility() * 0.45;
         let elapsed_seconds = if reduced_motion {
             0.0
         } else {
@@ -355,8 +356,10 @@ impl OrganicMotion {
         let lobes = std::array::from_fn(|index| {
             let (anchor_x, anchor_y, lobe_speed, falloff) = anchors[index];
             let phase = hash01(index * 83 + 17) * TAU;
-            let lobe_time =
-                elapsed_seconds * (0.018 + input.volatility() * 0.014) * lobe_speed + phase;
+            let lobe_time = elapsed_seconds
+                * (0.018 + activity * 0.006 + input.volatility() * 0.014)
+                * lobe_speed
+                + phase;
             MotionLobe {
                 center: (
                     (anchor_x + lobe_time.sin() * 0.045 + (core.position.0 - 0.5) * 0.14)
@@ -376,10 +379,11 @@ impl OrganicMotion {
             (0.08, -0.075, 0.100, 3.25),
             (0.18, 0.095, 0.115, 4.8),
         ];
-        let base_activity = (0.34
+        let base_activity = (0.30
             + pressure * 0.34
-            + density * 0.20
-            + input.load() * 0.12
+            + activity * 0.20
+            + density * 0.16
+            + input.load() * 0.08
             + input.volatility() * 0.10)
             .clamp(0.0, 1.0);
         let elasticity = std::array::from_fn(|index| {
@@ -987,16 +991,6 @@ fn particle_spec(index: usize, count: usize, margin: f32) -> MotionParticle {
     }
 }
 
-fn pressure(input: NormalizedPulseInput) -> f32 {
-    let base =
-        input.cpu() * 0.27 + input.memory() * 0.30 + input.network() * 0.10 + input.load() * 0.18;
-    match input.gpu() {
-        Some(gpu) => (base + gpu * 0.15).clamp(0.0, 1.0),
-        None => (base + input.cpu() * 0.04 + input.memory() * 0.08 + input.load() * 0.03)
-            .clamp(0.0, 1.0),
-    }
-}
-
 fn hash01(value: usize) -> f32 {
     let mut hash = value as u32;
     hash = hash.wrapping_mul(0x045d_9f3b);
@@ -1114,6 +1108,33 @@ mod tests {
             assert!((before.contraction - after.contraction).abs() < 0.25);
             assert!((before.release - after.release).abs() < 0.30);
         }
+    }
+
+    #[test]
+    fn healthy_activity_and_pressure_produce_distinct_bounded_motion() {
+        let dimensions = FieldDimensions::new(96, 48).unwrap();
+        let active =
+            NormalizedPulseInput::try_new(0.92, 0.10, Some(0.82), 0.18, 0.08, 0.12).unwrap();
+        let pressured =
+            NormalizedPulseInput::try_new(0.20, 0.92, Some(0.18), 0.04, 0.86, 0.10).unwrap();
+        let active_motion = OrganicMotion::new(dimensions, active, Duration::from_secs(2), false);
+        let pressured_motion =
+            OrganicMotion::new(dimensions, pressured, Duration::from_secs(2), false);
+
+        assert!(active_motion.speed > pressured_motion.speed);
+        assert!(active_motion.pressure < pressured_motion.pressure);
+        assert!((0.0..=1.0).contains(&active_motion.density));
+        assert!((0.0..=1.0).contains(&pressured_motion.density));
+
+        let mut active_field = ScalarField::try_new(dimensions).unwrap();
+        let mut pressured_field = ScalarField::try_new(dimensions).unwrap();
+        active_motion
+            .deposit_into(&mut active_field, PulseV2Preset::Widescreen)
+            .unwrap();
+        pressured_motion
+            .deposit_into(&mut pressured_field, PulseV2Preset::Widescreen)
+            .unwrap();
+        assert_ne!(active_field, pressured_field);
     }
 
     #[test]
