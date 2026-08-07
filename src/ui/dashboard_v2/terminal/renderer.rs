@@ -551,7 +551,14 @@ mod tests {
         let memory_text = buffer_text(&buffer);
         assert!(memory_text.contains("60%"));
         assert!(!memory_text.lines().any(|line| line.trim() == "60%"));
-        assert!(memory_text.contains('━'));
+        assert!(memory_text.contains('█'));
+        let memory_lines: Vec<&str> = memory_text.lines().collect();
+        let memory_value_line = memory_lines
+            .iter()
+            .position(|line| line.contains("60 B / 100 B"))
+            .expect("memory value row");
+        assert!(memory_lines[memory_value_line].contains("60%"));
+        assert!(memory_lines[memory_value_line + 1].contains('█'));
         assert!(
             !memory_text
                 .chars()
@@ -592,7 +599,7 @@ mod tests {
             .unwrap();
         let storage_text = buffer_text(&storage_buffer);
         assert!(storage_text.contains("500 B / 1000 B"));
-        assert!(storage_text.contains('━'));
+        assert!(storage_text.contains('█'));
 
         let mut comparison = Buffer::empty(Rect::new(0, 0, 72, 24));
         TerminalRenderer::new()
@@ -606,6 +613,15 @@ mod tests {
             .unwrap();
         assert!(buffer_text(&comparison).contains('↓'));
         assert!(buffer_text(&comparison).contains('↑'));
+        let vital_lines = buffer_text(&comparison)
+            .lines()
+            .filter(|line| {
+                line.chars()
+                    .any(|character| ('\u{2800}'..='\u{28ff}').contains(&character))
+            })
+            .count();
+        assert!(vital_lines >= 2);
+        assert!(!buffer_text(&comparison).contains("60s"));
     }
 
     #[test]
@@ -653,7 +669,7 @@ mod tests {
         let text = buffer_text(&buffer);
         assert!(text.contains("sda"));
         assert!(text.contains("nvme0n1"));
-        assert!(text.matches('━').count() >= 2);
+        assert!(text.matches('█').count() + text.matches('░').count() >= 72 * 2);
     }
 
     #[test]
@@ -743,8 +759,9 @@ mod tests {
         let text = buffer_text(&buffer);
         assert!(text.contains("RTX 4060"));
         assert!(text.contains("26%"));
-        assert!(text.contains("━"));
-        assert!(text.contains("─"));
+        assert!(text.contains("█"));
+        assert!(text.contains("░"));
+        assert!(text.matches('█').count() + text.matches('░').count() >= 60);
         assert!(text.contains("0.7 / 8 GB"));
         assert!(text.contains("51°C"));
     }

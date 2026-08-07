@@ -136,6 +136,11 @@ fn render_memory(
     {
         details = format!("{} available", format_bytes(available.value()));
     }
+    let secondary = context
+        .swap()
+        .filter(|value| value.value() > 0.0)
+        .map(|value| format!("swap {}", format_bytes(value.value())))
+        .unwrap_or(details);
     if body.height == 1 {
         write(buffer, line(body, 0), &value, value_style(model, theme));
         return;
@@ -155,21 +160,21 @@ fn render_memory(
             context_style(model, theme),
         );
     }
-    if body.height > 2 && !details.is_empty() {
-        write(buffer, line(body, 1), &details, context_style(model, theme));
-    }
-    let meter_row = if body.height > 2 {
-        body.height.saturating_sub(1)
-    } else {
-        1
-    };
-    if meter_row < body.height {
-        render_meter(
-            line(body, meter_row),
+    if body.height > 1 {
+        render_segmented_meter(
+            line(body, 1),
             fraction.unwrap_or(0.0),
             theme.chart_primary,
             theme,
             buffer,
+        );
+    }
+    if body.height > 2 && !secondary.is_empty() {
+        write(
+            buffer,
+            line(body, 2),
+            &secondary,
+            context_style(model, theme),
         );
     }
 }
@@ -315,7 +320,7 @@ fn render_network(
         body.height.saturating_sub(graph_offset),
     );
     if graph.width >= MIN_GRAPH_WIDTH
-        && let Some((download_area, upload_area, timestamp_area)) = dual_graph_areas(graph)
+        && let Some((download_area, upload_area)) = dual_graph_areas(graph)
     {
         if let Some(sparkline) = sparkline(model, BlockId::PrimarySparkline) {
             render_vital_line(
@@ -336,7 +341,6 @@ fn render_network(
                 theme,
                 buffer,
             );
-            render_window(sparkline, timestamp_area, theme, buffer);
         }
     }
 }
@@ -401,7 +405,7 @@ fn render_storage(
             .zip(context.total_space())
             .map(|(used, total)| used.value() / total.value().max(1.0))
             .or_else(|| model.visual().primary().map(|value| value.value()));
-        render_meter(
+        render_segmented_meter(
             line(body, 2),
             fraction.unwrap_or(0.0),
             theme.chart_primary,
@@ -578,9 +582,9 @@ fn render_segmented_meter(
     let filled = (f64::from(area.width) * value.clamp(0.0, 1.0)).round() as u16;
     for index in 0..area.width {
         let (character, color) = if index < filled {
-            ('━', fill)
+            ('█', fill)
         } else {
-            ('─', theme.border)
+            ('░', theme.border)
         };
         buffer[(area.x + index, area.y)]
             .set_char(character)
@@ -661,7 +665,7 @@ fn render_storage_inventory(
                 .used_bytes
                 .zip(device.total_bytes)
                 .map_or(0.0, |(used, total)| used / total.max(1.0));
-            render_meter(
+            render_segmented_meter(
                 line(content, row.saturating_add(1)),
                 fraction,
                 theme.chart_primary,
@@ -764,30 +768,6 @@ fn line(area: Rect, offset: u16) -> Rect {
     Rect::new(area.x, area.y.saturating_add(offset), area.width, 1)
 }
 
-fn render_meter(
-    area: Rect,
-    value: f64,
-    color: ratatui::style::Color,
-    theme: &Theme,
-    buffer: &mut Buffer,
-) {
-    if area.width == 0 || area.height == 0 {
-        return;
-    }
-    let value = value.clamp(0.0, 1.0);
-    for column in 0..area.width {
-        let position = (f64::from(column) + 0.5) / f64::from(area.width);
-        let (character, foreground) = if position <= value {
-            ('━', color)
-        } else {
-            ('─', theme.border)
-        };
-        buffer[(area.x + column, area.y)]
-            .set_char(character)
-            .set_style(Style::default().fg(foreground).bg(theme.surface));
-    }
-}
-
 fn context_block(model: WidgetRenderModel, id: BlockId) -> Option<RenderBlock> {
     model.block(id)
 }
@@ -802,31 +782,7 @@ fn sparkline(model: WidgetRenderModel, id: BlockId) -> Option<SparklineModel<CHA
     })
 }
 
-fn render_window(
-    sparkline: SparklineModel<CHART_POINTS>,
-    area: Rect,
-    theme: &Theme,
-    buffer: &mut Buffer,
-) {
-    if let Some(last) = sparkline.points().last() {
-        let seconds = last.sample().offset().as_secs();
-        if seconds > 0 && area.width >= 5 && area.height > 0 {
-            write(
-                buffer,
-                Rect::new(
-                    area.right().saturating_sub(5),
-                    area.bottom().saturating_sub(1),
-                    5,
-                    1,
-                ),
-                &format!("{seconds}s"),
-                Style::default().fg(theme.text_muted).bg(theme.surface),
-            );
-        }
-    }
-}
-
-fn dual_graph_areas(graph: Rect) -> Option<(Rect, Rect, Rect)> {
+fn dual_graph_areas(graph: Rect) -> Option<(Rect, Rect)> {
     if graph.height < 2 {
         return None;
     }
@@ -834,12 +790,10 @@ fn dual_graph_areas(graph: Rect) -> Option<(Rect, Rect, Rect)> {
         return Some((
             Rect::new(graph.x, graph.y, graph.width, 1),
             Rect::new(graph.x, graph.y.saturating_add(1), graph.width, 1),
-            Rect::default(),
         ));
     }
-    let data_height = graph.height.saturating_sub(1);
-    let first_height = (data_height / 2).max(1);
-    let second_height = data_height.saturating_sub(first_height);
+    let first_height = (graph.height / 2).max(1);
+    let second_height = graph.height.saturating_sub(first_height);
     (second_height > 0).then(|| {
         (
             Rect::new(graph.x, graph.y, graph.width, first_height),
@@ -849,7 +803,6 @@ fn dual_graph_areas(graph: Rect) -> Option<(Rect, Rect, Rect)> {
                 graph.width,
                 second_height,
             ),
-            Rect::new(graph.x, graph.bottom().saturating_sub(1), graph.width, 1),
         )
     })
 }
@@ -879,10 +832,8 @@ fn render_vital_line(
     }
     let low = sparkline.stats().minimum().unwrap_or(0.0);
     let high = sparkline.stats().maximum().unwrap_or(1.0);
-    let span = (high - low).max(0.08);
-    let margin = (span * 0.18).max(0.015);
-    let lower = (low - margin).max(0.0);
-    let upper = (high + margin).min(1.0).max(lower + 0.08);
+    let (lower, upper) = vital_scale(low, high);
+    let visual_span = (upper - lower).max(0.08);
     let pixel_width = usize::from(area.width).saturating_mul(2);
     let pixel_height = usize::from(area.height).saturating_mul(4);
     if pixel_width == 0
@@ -897,7 +848,7 @@ fn render_vital_line(
     for index in 0..count {
         let Some(raw) = values[index] else { continue };
         let mut value = previous.map_or(raw, |last: f64| last + alpha * (raw - last));
-        if (raw - value).abs() > span * 0.18 {
+        if (raw - value).abs() > visual_span * 0.18 {
             value += (raw - value) * 0.45;
         }
         if index + 1 == count {
@@ -927,6 +878,15 @@ fn render_vital_line(
         }
         previous_point = Some(point);
     }
+    if count == 1
+        && let Some(value) = smooth[0]
+    {
+        let normalized = ((value - lower) / (upper - lower)).clamp(0.0, 1.0);
+        let y = pixel_height.saturating_sub(1).saturating_sub(
+            (normalized * (pixel_height.saturating_sub(1) as f64)).round() as usize,
+        );
+        draw_segment(&mut cells, area, (0, y), (pixel_width.saturating_sub(1), y));
+    }
     let style = Style::default().fg(color).bg(theme.surface);
     for row in 0..area.height {
         for column in 0..area.width {
@@ -937,6 +897,26 @@ fn render_vital_line(
             }
         }
     }
+}
+
+fn vital_scale(low: f64, high: f64) -> (f64, f64) {
+    let low = if low.is_finite() { low.max(0.0) } else { 0.0 };
+    let high = if high.is_finite() { high.max(low) } else { low };
+    let normalized = high <= 1.0;
+    let minimum_range = if normalized {
+        0.08
+    } else {
+        (high.abs() * 0.08).max(1.0)
+    };
+    let span = (high - low).max(minimum_range);
+    let margin = (span * 0.18).max(if normalized { 0.015 } else { 0.08 });
+    let lower = (low - margin).max(0.0);
+    let upper = if normalized {
+        (high + margin).min(1.0).max(lower + 0.08)
+    } else {
+        high + margin
+    };
+    (lower, upper.max(lower + minimum_range))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1163,11 +1143,10 @@ mod tests {
     fn dual_graphs_reserve_the_window_inside_their_bounds() {
         for height in 3..=10 {
             let graph = Rect::new(4, 6, 18, height);
-            let (first, second, timestamp) = dual_graph_areas(graph).unwrap();
+            let (first, second) = dual_graph_areas(graph).unwrap();
             assert!(first.x >= graph.x && first.right() <= graph.right());
             assert!(second.x >= graph.x && second.right() <= graph.right());
-            assert!(first.y >= graph.y && second.bottom() <= timestamp.y);
-            assert_eq!(timestamp.bottom(), graph.bottom());
+            assert!(first.y >= graph.y && second.bottom() <= graph.bottom());
             assert_eq!(first.bottom(), second.y);
         }
     }
@@ -1175,10 +1154,9 @@ mod tests {
     #[test]
     fn dual_graphs_keep_both_directions_in_a_two_row_area() {
         let graph = Rect::new(4, 6, 18, 2);
-        let (download, upload, timestamp) = dual_graph_areas(graph).unwrap();
+        let (download, upload) = dual_graph_areas(graph).unwrap();
         assert_eq!(download.height, 1);
         assert_eq!(upload.height, 1);
-        assert!(timestamp.is_empty());
         assert_eq!(download.bottom(), upload.y);
         assert_eq!(upload.bottom(), graph.bottom());
     }
@@ -1207,7 +1185,7 @@ mod tests {
             narrow
                 .content
                 .iter()
-                .filter(|cell| cell.symbol() == "━")
+                .filter(|cell| cell.symbol() == "█")
                 .count(),
             3
         );
@@ -1215,7 +1193,7 @@ mod tests {
             narrow
                 .content
                 .iter()
-                .filter(|cell| cell.symbol() == "─")
+                .filter(|cell| cell.symbol() == "░")
                 .count(),
             7
         );
@@ -1231,17 +1209,17 @@ mod tests {
         assert_eq!(
             wide.content
                 .iter()
-                .filter(|cell| cell.symbol() == "━")
+                .filter(|cell| cell.symbol() == "█")
                 .count(),
             6
         );
     }
 
     #[test]
-    fn occupancy_meter_uses_a_thin_track_and_proportional_fill() {
+    fn occupancy_meter_uses_segmented_track_and_proportional_fill() {
         let theme = crate::theme::Theme::pulse();
         let mut buffer = Buffer::empty(Rect::new(0, 0, 10, 1));
-        render_meter(
+        render_segmented_meter(
             Rect::new(0, 0, 10, 1),
             0.4,
             theme.chart_primary,
@@ -1252,7 +1230,7 @@ mod tests {
             buffer
                 .content
                 .iter()
-                .filter(|cell| cell.symbol() == "━")
+                .filter(|cell| cell.symbol() == "█")
                 .count(),
             4
         );
@@ -1260,10 +1238,23 @@ mod tests {
             buffer
                 .content
                 .iter()
-                .filter(|cell| cell.symbol() == "─")
+                .filter(|cell| cell.symbol() == "░")
                 .count(),
             6
         );
+    }
+
+    #[test]
+    fn vital_scale_reveals_absolute_rate_variation_without_flattening_it() {
+        let (lower, upper) = vital_scale(20.0, 80.0);
+        assert!(lower < 20.0);
+        assert!(upper > 80.0);
+        assert!(upper - lower < 100.0);
+
+        let (normalized_lower, normalized_upper) = vital_scale(0.20, 0.80);
+        assert!(normalized_lower >= 0.0);
+        assert!(normalized_upper <= 1.0);
+        assert!(normalized_upper - normalized_lower >= 0.08);
     }
 
     #[test]

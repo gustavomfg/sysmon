@@ -226,21 +226,6 @@ fn render_history(model: WidgetRenderModel, area: Rect, theme: &Theme, buffer: &
         plot_height,
     );
     render_line_plot(sparkline, plot, model, theme, buffer);
-    if area.height > 1
-        && let Some(last) = sparkline.points().last()
-    {
-        let seconds = last.sample().offset().as_secs();
-        if seconds > 0 {
-            write(
-                buffer,
-                area,
-                area.right().saturating_sub(5),
-                area.bottom().saturating_sub(1),
-                &format!("{seconds}s"),
-                scale_style(theme),
-            );
-        }
-    }
 }
 
 fn render_compact_history(
@@ -715,10 +700,6 @@ fn chart_style(model: WidgetRenderModel, theme: &Theme) -> Style {
     style
 }
 
-fn scale_style(theme: &Theme) -> Style {
-    Style::default().fg(theme.text_muted).bg(theme.surface)
-}
-
 fn write(buffer: &mut Buffer, area: Rect, x: u16, y: u16, text: &str, style: Style) {
     if y >= area.bottom() || x >= area.right() {
         return;
@@ -901,7 +882,7 @@ mod tests {
             chart_rows >= 3,
             "chart should use the available body height"
         );
-        assert!(text(&rendered).contains("50s"));
+        assert!(!text(&rendered).contains("50s"));
         assert!(!text(&rendered).contains("100%"));
     }
 
