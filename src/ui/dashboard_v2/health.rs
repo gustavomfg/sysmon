@@ -572,7 +572,7 @@ impl HealthEngine {
                 )
             })
             .collect_components();
-        let next = aggregate(components);
+        let next = stabilize_severity(aggregate(components), previous.severity());
         self.current = Some(next);
         next
     }
@@ -721,6 +721,37 @@ fn classify(activity: f32, pressure: f32, thermal: f32) -> HealthSeverity {
     } else {
         HealthSeverity::Healthy
     }
+}
+
+/// Keeps the human-facing severity from chattering around a boundary while
+/// leaving the continuous signals untouched. Entry still follows the normal
+/// thresholds; exit uses a small hysteresis band and the existing release
+/// smoothing makes recovery gradual.
+fn stabilize_severity(mut health: SystemHealth, previous: HealthSeverity) -> SystemHealth {
+    let stress = health.pressure.max(health.thermal_pressure);
+    let severity = match previous {
+        HealthSeverity::Critical if stress >= 0.78 => HealthSeverity::Critical,
+        HealthSeverity::Stressed if stress >= 0.57 => {
+            if stress >= 0.85 {
+                HealthSeverity::Critical
+            } else {
+                HealthSeverity::Stressed
+            }
+        }
+        HealthSeverity::Elevated if stress >= 0.34 => {
+            if stress >= 0.65 {
+                HealthSeverity::Stressed
+            } else {
+                HealthSeverity::Elevated
+            }
+        }
+        HealthSeverity::Active if stress < 0.34 && health.activity >= 0.48 => {
+            HealthSeverity::Active
+        }
+        _ => classify(health.activity, health.pressure, health.thermal_pressure),
+    };
+    health.severity = severity;
+    health
 }
 
 fn weights(component: HealthComponent) -> (f32, f32, f32) {
@@ -931,6 +962,21 @@ mod tests {
             engine.current().unwrap().severity(),
             HealthSeverity::Healthy
         );
+    }
+
+    #[test]
+    fn temporal_severity_has_a_small_release_hysteresis_band() {
+        let mut engine = HealthEngine::new();
+        let critical = component(HealthComponent::Memory, None, Some(1.0), None, None);
+        let near_critical = component(HealthComponent::Memory, None, Some(0.78), None, None);
+        let first = engine.update(critical, Duration::from_secs(1));
+        assert_eq!(first.severity(), HealthSeverity::Critical);
+
+        let held = engine.update(near_critical, Duration::from_millis(100));
+        assert_eq!(held.severity(), HealthSeverity::Critical);
+
+        let recovered = engine.update(HealthSnapshot::default(), Duration::from_secs(1));
+        assert!(recovered.severity() < HealthSeverity::Critical);
     }
 
     #[test]

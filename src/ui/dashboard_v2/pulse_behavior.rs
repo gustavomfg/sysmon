@@ -37,14 +37,13 @@ impl PulseBehavior {
         let thermal = health.thermal_pressure();
         let instability = health.instability();
 
-        let rate = (0.18 + activity * 0.62 + pressure * 0.10 + instability * 0.08).clamp(0.0, 1.0);
-        let energy = (0.16 + activity * 0.56 + pressure * 0.20 + thermal * 0.08).clamp(0.0, 1.0);
-        let tension =
-            (0.03 + pressure * 0.62 + thermal * 0.30 + instability * 0.08).clamp(0.0, 1.0);
-        let turbulence =
-            (0.02 + instability * 0.62 + pressure * 0.12 + thermal * 0.05).clamp(0.0, 1.0);
-        let density = (0.14 + energy * 0.46 + tension * 0.25 + activity * 0.10).clamp(0.0, 1.0);
-        let recovery = (1.0 - pressure * 0.62 - thermal * 0.38).clamp(0.0, 1.0);
+        let stress = (pressure * 0.68 + thermal * 0.32).clamp(0.0, 1.0);
+        let rate = (0.18 + activity * 0.70 + stress * 0.08 + instability * 0.08).clamp(0.0, 1.0);
+        let energy = (0.16 + activity * 0.64 + stress * 0.14 + instability * 0.06).clamp(0.0, 1.0);
+        let tension = (0.03 + stress * 0.72 + instability * 0.10).clamp(0.0, 1.0);
+        let turbulence = (0.02 + instability * 0.70 + stress * 0.12).clamp(0.0, 1.0);
+        let density = (0.14 + energy * 0.42 + tension * 0.28 + activity * 0.08).clamp(0.0, 1.0);
+        let recovery = (1.0 - stress * 0.76 - instability * 0.04).clamp(0.0, 1.0);
 
         Self {
             rate,
@@ -62,12 +61,16 @@ impl PulseBehavior {
     /// Pulse engine can therefore remain unchanged while no longer receiving
     /// raw CPU/RAM/GPU values from the dashboard compositor.
     pub fn input(self) -> NormalizedPulseInput {
-        let cpu = (0.14 + self.rate * 0.55 + self.energy * 0.31).clamp(0.0, 1.0);
+        // This is a perceptual projection of the behavior, not raw CPU data.
+        // Activity travels through CPU/GPU-like channels; constrained state
+        // travels through memory/load-like channels for the existing engine.
+        let cpu = (0.12 + self.rate * 0.65 + self.energy * 0.18).clamp(0.0, 1.0);
         let memory = self.tension;
-        let gpu = Some((self.energy * 0.60 + self.density * 0.40).clamp(0.0, 1.0));
-        let network = self.turbulence;
-        let load = (self.energy * 0.28 + self.tension * 0.48 + (1.0 - self.recovery) * 0.24)
-            .clamp(0.0, 1.0);
+        let gpu = Some(
+            (0.10 + self.energy * 0.50 + self.rate * 0.22 + self.density * 0.18).clamp(0.0, 1.0),
+        );
+        let network = (0.04 + self.turbulence * 0.78 + self.rate * 0.06).clamp(0.0, 1.0);
+        let load = (self.tension * 0.72 + (1.0 - self.recovery) * 0.28).clamp(0.0, 1.0);
 
         NormalizedPulseInput::try_new(cpu, memory, gpu, network, load, self.turbulence)
             .unwrap_or_default()
@@ -300,5 +303,23 @@ mod tests {
 
         assert!(high.energy() >= low.energy());
         assert!(high.rate() >= low.rate());
+    }
+
+    #[test]
+    fn pressure_is_visible_without_requiring_high_component_activity() {
+        let active = health(
+            HealthComponent::Cpu,
+            HealthSignals::new(Some(0.95), Some(0.10), None, None),
+        );
+        let memory_pressure = health(
+            HealthComponent::Memory,
+            HealthSignals::new(None, Some(0.95), None, None),
+        );
+        let active = PulseBehavior::from_system_health(active);
+        let memory_pressure = PulseBehavior::from_system_health(memory_pressure);
+
+        assert!(active.energy() > memory_pressure.energy() * 0.75);
+        assert!(memory_pressure.tension() > active.tension());
+        assert!(memory_pressure.recovery() < active.recovery());
     }
 }
