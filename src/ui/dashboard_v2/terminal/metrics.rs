@@ -82,7 +82,7 @@ fn render_memory(
     theme: &Theme,
     buffer: &mut Buffer,
 ) {
-    render_header("▦ Memory", model, area, theme, buffer);
+    render_header("▦ MEMORY", model, area, theme, buffer);
     let body = body(area);
     if body.height == 0 {
         return;
@@ -114,45 +114,15 @@ fn render_memory(
         .map(|(used, total)| used.value() / total.value().max(1.0))
         .or_else(|| model.visual().primary().map(|value| value.value()));
 
-    let mut details = String::new();
-    if let Some(pressure) = context
-        .pressure()
-        .map(|value| format_percent(value.value()))
-    {
-        details.push_str(&pressure);
-    }
-    if let Some(cache) = context.cache().map(|value| format_bytes(value.value())) {
-        if !details.is_empty() {
-            details.push_str("  ·  ");
-        }
-        details.push_str("cache ");
-        details.push_str(&cache);
-    }
-    if let Some(swap) = context.swap().filter(|value| value.value() > 0.0) {
-        if !details.is_empty() {
-            details.push_str("  ·  ");
-        }
-        details.push_str("swap ");
-        details.push_str(&format_bytes(swap.value()));
-    }
-    if details.is_empty()
-        && let Some(available) = context.available()
-    {
-        details = format!("{} available", format_bytes(available.value()));
-    }
-    let secondary = context
-        .swap()
-        .filter(|value| value.value() > 0.0)
-        .map(|value| format!("swap {}", format_bytes(value.value())))
-        .unwrap_or(details);
+    let secondary = memory_context_line(&context, body.width);
     if body.height == 1 {
         write(buffer, line(body, 0), &value, value_style(model, theme));
         return;
     }
 
-    // Memory is an occupancy instrument, not a temporal signal. The value and
-    // occupancy share one grid row; the following rows are context and a
-    // single wide gauge. No history is read here.
+    // Memory is an occupancy instrument, not a temporal signal. The value,
+    // occupancy and gauge share one strict grid: one reading row, one
+    // instrument row and one context row. No history is read here.
     write(buffer, line(body, 0), &value, value_style(model, theme));
     let occupancy_width = u16::try_from(occupancy.chars().count()).unwrap_or(body.width);
     if occupancy_width < body.width {
@@ -183,6 +153,50 @@ fn render_memory(
             value_style(model, theme),
         );
     }
+}
+
+fn memory_context_line(context: &super::super::MemoryContextBlock, width: u16) -> String {
+    let available = context
+        .available()
+        .map(|value| format!("{} available", format_bytes(value.value())));
+    let pressure = context
+        .pressure()
+        .map(|value| format!("{} pressure", format_percent(value.value())));
+    let swap = context
+        .swap()
+        .filter(|value| value.value() > 0.0)
+        .map(|value| format!("swap {}", format_bytes(value.value())));
+    let cache = context
+        .cache()
+        .map(|value| format!("cache {}", format_bytes(value.value())));
+
+    let join = |left: Option<&str>, right: Option<&str>| match (left, right) {
+        (Some(left), Some(right)) => Some(format!("{left}  ·  {right}")),
+        (Some(left), None) => Some(left.to_owned()),
+        (None, Some(right)) => Some(right.to_owned()),
+        (None, None) => None,
+    };
+    let full = match (available.as_deref(), pressure.as_deref(), cache.as_deref()) {
+        (Some(available), Some(pressure), Some(cache)) => {
+            Some(format!("{available}  ·  {pressure}  ·  {cache}"))
+        }
+        _ => None,
+    };
+    let candidates = [
+        full,
+        join(available.as_deref(), pressure.as_deref()),
+        join(available.as_deref(), swap.as_deref()),
+        join(pressure.as_deref(), swap.as_deref()),
+        available.clone(),
+        pressure.clone(),
+        swap.clone(),
+        cache.clone(),
+    ];
+    candidates
+        .into_iter()
+        .flatten()
+        .find(|candidate| candidate.chars().count() <= usize::from(width))
+        .unwrap_or_default()
 }
 
 fn render_gpu(
@@ -278,8 +292,8 @@ fn render_network(
     inventory: Option<&HardwareInventory>,
 ) {
     let title = inventory.and_then(network_inventory_label).map_or_else(
-        || "⇄ Network".to_owned(),
-        |label| format!("⇄ Network · {label}"),
+        || "⇄ NETWORK".to_owned(),
+        |label| format!("⇄ NETWORK  {label}"),
     );
     render_header(&title, model, area, theme, buffer);
     let body = body(area);
@@ -297,19 +311,12 @@ fn render_network(
     let upload = context
         .upload()
         .map_or_else(|| "—".to_owned(), |value| format_rate(value.value()));
-    write(
-        buffer,
-        line(body, 0),
-        &format!("↓ {download}"),
-        value_style_with(model, theme, theme.info),
-    );
+    let download_style = value_style_with(model, theme, theme.info);
+    let upload_style = value_style_with(model, theme, theme.primary);
+    let rate_style = value_style(model, theme);
+    write_flow_value(body, 0, "↓", &download, download_style, rate_style, buffer);
     if body.height > 1 {
-        write(
-            buffer,
-            line(body, 1),
-            &format!("↑ {upload}"),
-            value_style_with(model, theme, theme.primary),
-        );
+        write_flow_value(body, 1, "↑", &upload, upload_style, rate_style, buffer);
     }
     let mut graph_offset = 2;
     if body.height >= 7 {
@@ -367,6 +374,31 @@ fn render_network(
     }
 }
 
+fn write_flow_value(
+    body: Rect,
+    offset: u16,
+    arrow: &str,
+    value: &str,
+    arrow_style: Style,
+    value_style: Style,
+    buffer: &mut Buffer,
+) {
+    if offset >= body.height || body.width == 0 {
+        return;
+    }
+    let row = line(body, offset);
+    write(buffer, row, arrow, arrow_style);
+    let value_x = row.x.saturating_add(2);
+    if value_x < row.right() {
+        write(
+            buffer,
+            Rect::new(value_x, row.y, row.right().saturating_sub(value_x), 1),
+            value,
+            value_style,
+        );
+    }
+}
+
 fn network_inventory_label(inventory: &HardwareInventory) -> Option<String> {
     let physical = inventory
         .networks
@@ -387,7 +419,7 @@ fn render_storage(
     theme: &Theme,
     buffer: &mut Buffer,
 ) {
-    render_header("▰ Storage", model, area, theme, buffer);
+    render_header("▰ STORAGE", model, area, theme, buffer);
     let body = body(area);
     if body.height == 0 {
         return;
@@ -409,26 +441,6 @@ fn render_storage(
     );
     write(buffer, line(body, 0), &value, value_style(model, theme));
     if body.height > 1 {
-        let text = match (context.read_rate(), context.write_rate()) {
-            (Some(read), Some(write)) => format!(
-                "R {}  ·  W {}",
-                format_rate(read.value()),
-                format_rate(write.value())
-            ),
-            (Some(read), None) => format!("R {}", format_rate(read.value())),
-            (None, Some(write)) => format!("W {}", format_rate(write.value())),
-            _ => String::new(),
-        };
-        write_rich_context(
-            buffer,
-            line(body, 1),
-            &text,
-            context_style(model, theme),
-            theme,
-            value_style(model, theme),
-        );
-    }
-    if body.height > 2 {
         let fraction = context
             .used_space()
             .zip(context.total_space())
@@ -440,6 +452,17 @@ fn render_storage(
             theme.chart_primary,
             theme,
             buffer,
+        );
+    }
+    if body.height > 2 {
+        let text = storage_context_activity(&context);
+        write_rich_context(
+            buffer,
+            line(body, 2),
+            &text,
+            context_style(model, theme),
+            theme,
+            value_style(model, theme),
         );
     }
     if body.height > 3 {
@@ -457,6 +480,19 @@ fn render_storage(
     }
 }
 
+fn storage_context_activity(context: &super::super::StorageContextBlock) -> String {
+    match (context.read_rate(), context.write_rate()) {
+        (Some(read), Some(write)) => format!(
+            "R {}  ·  W {}",
+            format_rate(read.value()),
+            format_rate(write.value())
+        ),
+        (Some(read), None) => format!("R {}", format_rate(read.value())),
+        (None, Some(write)) => format!("W {}", format_rate(write.value())),
+        _ => String::new(),
+    }
+}
+
 fn render_gpu_inventory(
     model: WidgetRenderModel,
     inventory: &HardwareInventory,
@@ -469,9 +505,9 @@ fn render_gpu_inventory(
     let primary = &inventory.gpus[primary_index];
     let primary_name = gpu_display_name(&primary.name);
     let title = if inventory.gpus.len() > 1 {
-        format!("◇ GPU · {primary_name} ({}/{})", 1, inventory.gpus.len())
+        format!("◇ GPU  {primary_name}  ({}/{})", 1, inventory.gpus.len())
     } else {
-        format!("◇ GPU · {primary_name}")
+        format!("◇ GPU  {primary_name}")
     };
     render_header(&title, model, area, theme, buffer);
     let body = body(area);
@@ -674,15 +710,19 @@ fn render_storage_inventory(
     clear_surface(area, theme, buffer);
     let content = body(area);
     buffer.set_style(content, Style::default().bg(theme.surface));
-    let title = format!("▰ Storage ({})", inventory.storages.len());
+    let title = format!("▰ STORAGE  {} devices", inventory.storages.len());
     render_header(&title, model, area, theme, buffer);
     if content.height == 0 {
         return;
     }
-    // A device row is intentionally a value line plus a full-width capacity
-    // gauge. If the panel is shorter, values remain visible and the gauge is
-    // the first detail to give up.
-    let rows_per_device = if content.height >= inventory.storages.len() as u16 * 2 {
+    // Storage is a capacity instrument. Every physical device gets a value
+    // row and its own gauge; I/O is a subordinate row only when the panel has
+    // enough room. This keeps the inventory readable without turning it into a
+    // raw hardware list.
+    let device_count = u16::try_from(inventory.storages.len()).unwrap_or(u16::MAX);
+    let rows_per_device = if content.height >= device_count.saturating_mul(3) {
+        3
+    } else if content.height >= device_count.saturating_mul(2) {
         2
     } else {
         1
@@ -713,7 +753,7 @@ fn render_storage_inventory(
             theme,
             context_value_style_for_theme(theme),
         );
-        if rows_per_device == 2 {
+        if rows_per_device >= 2 {
             let fraction = device
                 .used_bytes
                 .zip(device.total_bytes)
@@ -725,6 +765,18 @@ fn render_storage_inventory(
                 theme,
                 buffer,
             );
+        } else if rows_per_device == 3 {
+            let activity = storage_activity(device);
+            if !activity.is_empty() {
+                write_rich_context(
+                    buffer,
+                    line(content, row.saturating_add(2)),
+                    &activity,
+                    context_style_for_theme(theme),
+                    theme,
+                    context_value_style_for_theme(theme),
+                );
+            }
         }
     }
     if visible < inventory.storages.len() && content.height > 0 {
@@ -734,6 +786,17 @@ fn render_storage_inventory(
             &format!("+{} devices", inventory.storages.len() - visible),
             context_style_for_theme(theme),
         );
+    }
+}
+
+fn storage_activity(device: &super::super::StorageDevice) -> String {
+    match (device.read_bytes_per_sec, device.write_bytes_per_sec) {
+        (Some(read), Some(write)) => {
+            format!("R {}  ·  W {}", format_rate(read), format_rate(write))
+        }
+        (Some(read), None) => format!("R {}", format_rate(read)),
+        (None, Some(write)) => format!("W {}", format_rate(write)),
+        (None, None) => String::new(),
     }
 }
 
