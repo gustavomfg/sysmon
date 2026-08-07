@@ -115,3 +115,27 @@ Pulse summarizes.
 Metrics diagnose.
 
 Pulse communicates.
+
+## Health Interpretation
+
+The Dashboard V2 now introduces a small Health Engine between metric models
+and the Pulse boundary:
+
+```text
+Metric Models / History
+          ↓
+Component Health
+          ↓
+System Health
+          ↓
+Pulse input
+```
+
+The engine keeps activity and pressure separate. High CPU, GPU or network
+activity is not automatically a health problem; memory pressure, storage
+capacity pressure and thermal pressure are interpreted independently.
+
+The interpretation is bounded and temporal. Rising pressure responds faster
+than recovery, so a single sample cannot make the organism jump directly from
+calm to critical or back again. Diagnostic instruments continue to consume
+the objective metric models unchanged.

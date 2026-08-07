@@ -124,3 +124,34 @@ Instead they should think:
 The Pulse is responsible for emotional perception.
 
 Metrics are responsible for diagnosis.
+
+## Health Engine Foundation
+
+Dashboard V2 also exposes a collector-independent interpretation layer:
+
+```text
+Live Snapshot → Metric Models / History → HealthSnapshot
+                                      ↓
+                              HealthEngine
+                                      ↓
+                              SystemHealth
+                                      ↓
+                              Pulse input
+```
+
+`HealthSnapshot` contains normalized optional signals for CPU, Memory, GPU,
+Storage, Network and Temperature. `SystemHealth` preserves continuous
+activity, pressure, thermal pressure and instability values alongside a
+discrete severity and dominant component. `HealthEngine` applies bounded
+attack/release smoothing and uses centralized policy thresholds.
+
+The layer never collects, renders or mutates metric history. The existing
+diagnostic instrument path remains:
+
+```text
+Live Snapshot → Metric Models / History → Diagnostic Instruments
+```
+
+Only the aggregate `SystemHealth::pulse_input()` mapping crosses into the
+existing Pulse V2 input contract. This is the initial boundary for a future
+health/event interpretation system; it does not add Live fixtures or events.

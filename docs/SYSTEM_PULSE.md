@@ -26,3 +26,15 @@ GPU load should increase energetic richness.
 Storage activity should introduce localized turbulence.
 
 Rapid state changes should temporarily destabilize the heartbeat before it settles again.
+
+## Health Boundary
+
+Pulse V2 receives an aggregate `SystemHealth` interpretation rather than
+consulting CPU, memory, GPU or other instruments directly. The Health Engine
+produces bounded activity, pressure, thermal pressure, instability, severity
+and a dominant source, then maps those aggregate signals to the existing
+`NormalizedPulseInput` contract.
+
+This boundary keeps the Pulse expressive and singular while leaving metrics
+objective and diagnostic. The first mapping is intentionally conservative;
+the Pulse geometry and renderer remain unchanged.
