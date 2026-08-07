@@ -32,9 +32,25 @@ Rapid state changes should temporarily destabilize the heartbeat before it settl
 Pulse V2 receives an aggregate `SystemHealth` interpretation rather than
 consulting CPU, memory, GPU or other instruments directly. The Health Engine
 produces bounded activity, pressure, thermal pressure, instability, severity
-and a dominant source, then maps those aggregate signals to the existing
-`NormalizedPulseInput` contract.
+and a dominant source. `PulseBehavior` then maps those aggregate signals to
+the existing Pulse animation boundary.
 
 This boundary keeps the Pulse expressive and singular while leaving metrics
-objective and diagnostic. The first mapping is intentionally conservative;
-the Pulse geometry and renderer remain unchanged.
+objective and diagnostic. `PulseBehavior` maps aggregate signals to a calm
+basal rhythm, activity energy, pressure tension and bounded turbulence. Its
+attack/release controller makes entry responsive and recovery slower; the
+Pulse geometry and renderer remain unchanged.
+
+The concrete runtime path is:
+
+```text
+SystemHealth
+     ↓
+PulseBehavior
+     ↓
+PulseBehaviorEngine (attack / release)
+     ↓
+NormalizedPulseInput
+     ↓
+Pulse V2 animation and renderer
+```

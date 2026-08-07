@@ -136,7 +136,9 @@ Live Snapshot → Metric Models / History → HealthSnapshot
                                       ↓
                               SystemHealth
                                       ↓
-                              Pulse input
+                              PulseBehavior
+                                      ↓
+                       Pulse animation / renderer
 ```
 
 `HealthSnapshot` contains normalized optional signals for CPU, Memory, GPU,
@@ -152,6 +154,11 @@ diagnostic instrument path remains:
 Live Snapshot → Metric Models / History → Diagnostic Instruments
 ```
 
-Only the aggregate `SystemHealth::pulse_input()` mapping crosses into the
-existing Pulse V2 input contract. This is the initial boundary for a future
-health/event interpretation system; it does not add Live fixtures or events.
+Only the aggregate `SystemHealth` crosses into the Pulse behavior boundary.
+`PulseBehavior` maps activity, pressure, thermal pressure and instability to
+continuous perceptual parameters, and `PulseBehaviorEngine` applies attack and
+release before adapting them to the existing `NormalizedPulseInput` contract.
+The Dashboard compositor does not read raw CPU, memory, GPU, network or
+storage values to drive the Pulse. Severity and dominant source are available
+for observability and future events, but do not create one animation per
+component. This does not add Live fixtures or events.
