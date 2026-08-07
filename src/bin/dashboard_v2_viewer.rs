@@ -49,11 +49,11 @@ use crossterm::{
 use dashboard_v2::{
     CpuLiveSample, CpuMetricInput, DashboardContext, DashboardPreset, DashboardProcessSummary,
     DashboardState, DashboardV2Content, DashboardV2Renderer, DashboardV2SystemContext, GpuDevice,
-    GpuMetricInput, HardwareId, HardwareInventory, HardwareKind, LiveGpuSnapshot,
-    LiveMetricsHistory, LiveSnapshot, LiveStorageSnapshot, MemoryMetricInput, MetricAvailability,
-    MetricReading, MetricUnit, NetworkInterface, NetworkMetricInput, StorageDevice,
-    StorageMetricInput, TemperatureSensor, TerminalRenderer, TimeSample, TimeSeries, WidgetContext,
-    WidgetRenderer,
+    GpuMetricInput, HardwareId, HardwareInventory, HardwareKind, HealthComponent, HealthEngine,
+    HealthSignals, HealthSnapshot, LiveGpuSnapshot, LiveMetricsHistory, LiveSnapshot,
+    LiveStorageSnapshot, MemoryMetricInput, MetricAvailability, MetricReading, MetricUnit,
+    NetworkInterface, NetworkMetricInput, StorageDevice, StorageMetricInput, TemperatureSensor,
+    TerminalRenderer, TimeSample, TimeSeries, WidgetContext, WidgetRenderer,
 };
 use pulse_v2::NormalizedPulseInput;
 use ratatui::{
@@ -291,6 +291,8 @@ fn run_viewer(stdout: &mut io::Stdout) -> io::Result<()> {
     let (live_snapshots, _live_collector) = spawn_live_collector();
     let mut live_metrics = LiveMetricsHistory::new();
     let mut live_system_context = None;
+    let mut health_engine = HealthEngine::new();
+    let mut health_live_mode = false;
     let theme = Theme::pulse();
     let renderer = DashboardV2Renderer::new();
     let mut last_tick = Instant::now();
@@ -319,11 +321,32 @@ fn run_viewer(stdout: &mut io::Stdout) -> io::Result<()> {
             state.elapsed = state.elapsed.saturating_add(delta);
         }
 
+        if state.live_metrics != health_live_mode {
+            health_engine.reset();
+            health_live_mode = state.live_metrics;
+        }
+        let health_snapshot = if state.live_metrics {
+            live_metrics
+                .models()
+                .map(|models| {
+                    HealthSnapshot::from_models_with_policy(&models, health_engine.policy())
+                })
+                .unwrap_or_default()
+        } else {
+            scenario_health_snapshot(state)
+        };
+        let system_health = health_engine.update(health_snapshot, delta);
+
         terminal.draw(|frame| {
             if state.cpu_only {
                 render_cpu_preview(frame, state, &live_metrics, &theme);
             } else {
-                let content = content(state, &live_metrics, live_system_context.as_ref());
+                let content = content_with_health(
+                    state,
+                    &live_metrics,
+                    live_system_context.as_ref(),
+                    Some(system_health),
+                );
                 let context = context_for(frame.area());
                 if renderer
                     .render(
@@ -461,10 +484,20 @@ fn render_cpu_preview(
     }
 }
 
+#[allow(dead_code)]
 fn content(
     state: ViewerState,
     live_metrics: &LiveMetricsHistory,
     live_system_context: Option<&DashboardV2SystemContext>,
+) -> DashboardV2Content {
+    content_with_health(state, live_metrics, live_system_context, None)
+}
+
+fn content_with_health(
+    state: ViewerState,
+    live_metrics: &LiveMetricsHistory,
+    live_system_context: Option<&DashboardV2SystemContext>,
+    system_health: Option<dashboard_v2::SystemHealth>,
 ) -> DashboardV2Content {
     let live_models = state
         .live_metrics
@@ -505,9 +538,15 @@ fn content(
         .as_ref()
         .map(|models| models.inventory().clone())
         .unwrap_or_default();
-    let pulse_input = live_models
-        .as_ref()
-        .map(live_pulse_input)
+    let pulse_input = system_health
+        .map(dashboard_v2::SystemHealth::pulse_input)
+        .or_else(|| {
+            live_models.as_ref().map(|models| {
+                dashboard_v2::HealthEngine::new()
+                    .evaluate(dashboard_v2::HealthSnapshot::from_models(models))
+                    .pulse_input()
+            })
+        })
         .unwrap_or_else(|| {
             if state.live_metrics {
                 // A live frame without its first snapshot is intentionally
@@ -526,6 +565,37 @@ fn content(
     } else {
         content
     }
+}
+
+fn scenario_health_snapshot(state: ViewerState) -> HealthSnapshot {
+    let (cpu, memory, gpu, network, load, volatility) = state.scenario.values();
+    let cpu_pressure = (cpu * 0.25 + load * 0.60).clamp(0.0, 1.0) as f32;
+    let memory_pressure = (memory - 0.65).max(0.0) / 0.35;
+    let gpu_signals = state.gpu_available.then_some(HealthSignals::new(
+        Some(gpu as f32),
+        Some((gpu * 0.30).clamp(0.0, 1.0) as f32),
+        None,
+        Some(volatility as f32),
+    ));
+    HealthSnapshot::default()
+        .with_component(
+            HealthComponent::Cpu,
+            HealthSignals::new(
+                Some(cpu as f32),
+                Some(cpu_pressure),
+                None,
+                Some(volatility as f32),
+            ),
+        )
+        .with_component(
+            HealthComponent::Memory,
+            HealthSignals::new(None, Some(memory_pressure as f32), None, None),
+        )
+        .with_component(
+            HealthComponent::Network,
+            HealthSignals::new(Some(network as f32), None, None, None),
+        )
+        .with_component(HealthComponent::Gpu, gpu_signals.unwrap_or_default())
 }
 
 fn system_context_from_system(snapshot: &SystemInfo) -> DashboardV2SystemContext {
@@ -622,38 +692,6 @@ fn dashboard_state_for_models(models: &dashboard_v2::LiveMetricModels) -> Dashbo
     } else {
         DashboardState::Calm
     }
-}
-
-/// Keep Live Metrics honest at the Pulse boundary as well: the instruments
-/// and the ambient summary must consume the same prepared snapshot. The
-/// future health engine will replace this small projection with a richer
-/// interpretation without coupling the Pulse renderer to metric widgets.
-fn live_pulse_input(models: &dashboard_v2::LiveMetricModels) -> NormalizedPulseInput {
-    let cpu = models
-        .cpu()
-        .visual()
-        .primary()
-        .map_or(0.0, |value| value.value())
-        .clamp(0.0, 1.0) as f32;
-    let memory = models
-        .memory()
-        .visual()
-        .primary()
-        .map_or(0.0, |value| value.value())
-        .clamp(0.0, 1.0) as f32;
-    let gpu = models
-        .gpu()
-        .visual()
-        .primary()
-        .map(|value| value.value().clamp(0.0, 1.0) as f32);
-    let network_bytes_per_second = models
-        .network()
-        .download()
-        .zip(models.network().upload())
-        .map_or(0.0, |(download, upload)| download.value() + upload.value());
-    let network = (network_bytes_per_second / (100.0 * 1024.0 * 1024.0)).clamp(0.0, 1.0) as f32;
-
-    NormalizedPulseInput::try_new(cpu, memory, gpu, network, cpu, 0.0).unwrap_or_default()
 }
 
 fn cpu_live_sample_from_snapshot(snapshot: &SystemInfo) -> CpuLiveSample {
@@ -1181,6 +1219,28 @@ mod tests {
         assert!(content.primary().iter().all(|model| {
             model.is_some_and(|model| model.state() == dashboard_v2::WidgetState::Unavailable)
         }));
+    }
+
+    #[test]
+    fn dashboard_pulse_boundary_accepts_health_without_changing_instruments() {
+        let state = ViewerState::new();
+        let health = HealthEngine::new().evaluate(HealthSnapshot::default().with_component(
+            HealthComponent::Memory,
+            HealthSignals::new(None, Some(0.92), None, None),
+        ));
+        let content = content_with_health(state, &LiveMetricsHistory::new(), None, Some(health));
+
+        assert_eq!(
+            content
+                .primary()
+                .iter()
+                .filter(|model| model.is_some())
+                .count(),
+            5
+        );
+        assert_eq!(content.pulse_input().cpu(), 0.0);
+        assert!(content.pulse_input().memory() > 0.0);
+        assert!(content.pulse_input().load() > 0.0);
     }
 
     #[test]
