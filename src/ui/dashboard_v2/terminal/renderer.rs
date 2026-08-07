@@ -551,14 +551,14 @@ mod tests {
         let memory_text = buffer_text(&buffer);
         assert!(memory_text.contains("60%"));
         assert!(!memory_text.lines().any(|line| line.trim() == "60%"));
-        assert!(memory_text.contains('█'));
+        assert!(memory_text.contains('▰'));
         let memory_lines: Vec<&str> = memory_text.lines().collect();
         let memory_value_line = memory_lines
             .iter()
             .position(|line| line.contains("60 B / 100 B"))
             .expect("memory value row");
         assert!(memory_lines[memory_value_line].contains("60%"));
-        assert!(memory_lines[memory_value_line + 1].contains('█'));
+        assert!(memory_lines[memory_value_line + 1].contains('▰'));
         assert!(
             !memory_text
                 .chars()
@@ -599,7 +599,7 @@ mod tests {
             .unwrap();
         let storage_text = buffer_text(&storage_buffer);
         assert!(storage_text.contains("500 B / 1000 B"));
-        assert!(storage_text.contains('█'));
+        assert!(storage_text.contains('▰'));
 
         let mut comparison = Buffer::empty(Rect::new(0, 0, 72, 24));
         TerminalRenderer::new()
@@ -622,6 +622,81 @@ mod tests {
             .count();
         assert!(vital_lines >= 2);
         assert!(!buffer_text(&comparison).contains("60s"));
+    }
+
+    #[test]
+    fn important_values_use_clear_bold_text_while_context_stays_muted() {
+        let theme = crate::theme::Theme::pulse();
+        let cpu = render_cpu(DashboardPreset::LargeWidescreen, 48, 16);
+        let cpu_output = buffer_text(&cpu);
+        let cpu_lines: Vec<&str> = cpu_output.lines().collect();
+        let hardware_row = cpu_lines
+            .iter()
+            .position(|line| line.contains("8 cores"))
+            .expect("CPU hardware context row");
+        let hardware_x = cpu_lines[hardware_row]
+            .find("8 cores")
+            .expect("CPU hardware context");
+        assert_eq!(cpu[(hardware_x as u16, hardware_row as u16)].fg, theme.text);
+        assert!(
+            cpu[(hardware_x as u16, hardware_row as u16)]
+                .modifier
+                .contains(Modifier::BOLD)
+        );
+        let label_x = cpu_lines[hardware_row]
+            .find("cores")
+            .expect("CPU hardware label");
+        assert_eq!(
+            cpu[(label_x as u16, hardware_row as u16)].fg,
+            theme.text_muted
+        );
+        assert!(
+            !cpu[(label_x as u16, hardware_row as u16)]
+                .modifier
+                .contains(Modifier::BOLD)
+        );
+
+        let memory = WidgetRenderer::render_memory(
+            memory_model(),
+            context(DashboardPreset::LargeWidescreen),
+        )
+        .unwrap()
+        .unwrap();
+        let mut memory_buffer = Buffer::empty(Rect::new(0, 0, 72, 24));
+        TerminalRenderer::new()
+            .render(
+                memory,
+                DashboardPreset::LargeWidescreen,
+                super::super::super::DashboardBounds::new(0, 0, 72, 24).unwrap(),
+                &theme,
+                &mut memory_buffer,
+            )
+            .unwrap();
+        let memory_output = buffer_text(&memory_buffer);
+        let memory_lines: Vec<&str> = memory_output.lines().collect();
+        let detail_row = memory_lines
+            .iter()
+            .position(|line| line.contains("cache"))
+            .expect("memory context row");
+        let numeric_x = memory_lines[detail_row]
+            .find("60%")
+            .expect("memory pressure value");
+        assert_eq!(
+            memory_buffer[(numeric_x as u16, detail_row as u16)].fg,
+            theme.text
+        );
+        assert!(
+            memory_buffer[(numeric_x as u16, detail_row as u16)]
+                .modifier
+                .contains(Modifier::BOLD)
+        );
+        let cache_x = memory_lines[detail_row]
+            .find("cache")
+            .expect("memory context label");
+        assert_eq!(
+            memory_buffer[(cache_x as u16, detail_row as u16)].fg,
+            theme.text_muted
+        );
     }
 
     #[test]
@@ -669,7 +744,7 @@ mod tests {
         let text = buffer_text(&buffer);
         assert!(text.contains("sda"));
         assert!(text.contains("nvme0n1"));
-        assert!(text.matches('█').count() + text.matches('░').count() >= 72 * 2);
+        assert!(text.matches('▰').count() + text.matches('▱').count() >= 72 * 2);
     }
 
     #[test]
@@ -721,7 +796,7 @@ mod tests {
         assert!(text.contains("RTX 4060"));
         assert!(text.contains("driver unavailable"));
         assert!(!text.contains("AMD Radeon"));
-        assert!(!text.contains("█"));
+        assert!(!text.contains("▰"));
     }
 
     #[test]
@@ -759,9 +834,9 @@ mod tests {
         let text = buffer_text(&buffer);
         assert!(text.contains("RTX 4060"));
         assert!(text.contains("26%"));
-        assert!(text.contains("█"));
-        assert!(text.contains("░"));
-        assert!(text.matches('█').count() + text.matches('░').count() >= 60);
+        assert!(text.contains("▰"));
+        assert!(text.contains("▱"));
+        assert!(text.matches('▰').count() + text.matches('▱').count() >= 60);
         assert!(text.contains("0.7 / 8 GB"));
         assert!(text.contains("51°C"));
     }

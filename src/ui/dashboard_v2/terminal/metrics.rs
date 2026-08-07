@@ -17,6 +17,10 @@ use super::renderer::TerminalRenderError;
 
 const MIN_GRAPH_WIDTH: u16 = 10;
 const MAX_BRAILLE_CELLS: usize = 4096;
+// A medium-weight pair: more legible than a thin rule, without returning to
+// the visually heavy full blocks used by the original meters.
+const METER_FILL_GLYPH: char = '▰';
+const METER_TRACK_GLYPH: char = '▱';
 
 pub(super) fn render(
     model: WidgetRenderModel,
@@ -157,7 +161,7 @@ fn render_memory(
             body.y,
             occupancy,
             usize::from(occupancy_width),
-            context_style(model, theme),
+            value_style(model, theme),
         );
     }
     if body.height > 1 {
@@ -170,11 +174,13 @@ fn render_memory(
         );
     }
     if body.height > 2 && !secondary.is_empty() {
-        write(
+        write_rich_context(
             buffer,
             line(body, 2),
             &secondary,
             context_style(model, theme),
+            theme,
+            value_style(model, theme),
         );
     }
 }
@@ -222,7 +228,14 @@ fn render_gpu(
         if let Some(usage) = usage {
             render_segmented_meter(line(body, 1), usage, theme.chart_primary, theme, buffer);
             if body.height > 2 {
-                write(buffer, line(body, 2), &text, context_style(model, theme));
+                write_rich_context(
+                    buffer,
+                    line(body, 2),
+                    &text,
+                    context_style(model, theme),
+                    theme,
+                    value_style(model, theme),
+                );
             }
         } else {
             write(
@@ -246,7 +259,14 @@ fn render_gpu(
             (None, Some(power)) => power,
             (None, None) => String::new(),
         };
-        write(buffer, line(body, 3), &text, context_style(model, theme));
+        write_rich_context(
+            buffer,
+            line(body, 3),
+            &text,
+            context_style(model, theme),
+            theme,
+            value_style(model, theme),
+        );
     }
 }
 
@@ -281,14 +301,14 @@ fn render_network(
         buffer,
         line(body, 0),
         &format!("↓ {download}"),
-        value_style_with(model, theme, theme.chart_primary),
+        value_style_with(model, theme, theme.info),
     );
     if body.height > 1 {
         write(
             buffer,
             line(body, 1),
             &format!("↑ {upload}"),
-            value_style_with(model, theme, theme.chart_secondary),
+            value_style_with(model, theme, theme.primary),
         );
     }
     let mut graph_offset = 2;
@@ -304,11 +324,13 @@ fn render_network(
                 )
             });
         if !totals.is_empty() {
-            write(
+            write_rich_context(
                 buffer,
                 line(body, graph_offset),
                 &totals,
                 context_style(model, theme),
+                theme,
+                value_style(model, theme),
             );
             graph_offset += 1;
         }
@@ -397,7 +419,14 @@ fn render_storage(
             (None, Some(write)) => format!("W {}", format_rate(write.value())),
             _ => String::new(),
         };
-        write(buffer, line(body, 1), &text, context_style(model, theme));
+        write_rich_context(
+            buffer,
+            line(body, 1),
+            &text,
+            context_style(model, theme),
+            theme,
+            value_style(model, theme),
+        );
     }
     if body.height > 2 {
         let fraction = context
@@ -417,7 +446,14 @@ fn render_storage(
         let text = context.latency().map_or_else(String::new, |value| {
             format!("latency {:.0} ms", value.value() * 1000.0)
         });
-        write(buffer, line(body, 3), &text, context_style(model, theme));
+        write_rich_context(
+            buffer,
+            line(body, 3),
+            &text,
+            context_style(model, theme),
+            theme,
+            value_style(model, theme),
+        );
     }
 }
 
@@ -465,11 +501,13 @@ fn render_gpu_inventory(
         );
         render_segmented_meter(line(body, 1), usage, theme.chart_primary, theme, buffer);
         if body.height > 2 {
-            write(
+            write_rich_context(
                 buffer,
                 line(body, 2),
                 &gpu_context(primary),
                 context_style_for_theme(theme),
+                theme,
+                context_value_style_for_theme(theme),
             );
         }
     } else {
@@ -482,11 +520,13 @@ fn render_gpu_inventory(
         if body.height > 1 {
             let context = gpu_context(primary);
             if !context.is_empty() {
-                write(
+                write_rich_context(
                     buffer,
                     line(body, 1),
                     &context,
                     context_style_for_theme(theme),
+                    theme,
+                    context_value_style_for_theme(theme),
                 );
             }
         }
@@ -581,14 +621,23 @@ fn render_segmented_meter(
     }
     let filled = (f64::from(area.width) * value.clamp(0.0, 1.0)).round() as u16;
     for index in 0..area.width {
-        let (character, color) = if index < filled {
-            ('█', fill)
+        let (character, style) = if index < filled {
+            (
+                METER_FILL_GLYPH,
+                Style::default().fg(fill).bg(theme.surface),
+            )
         } else {
-            ('░', theme.border)
+            (
+                METER_TRACK_GLYPH,
+                Style::default()
+                    .fg(theme.surface_alt)
+                    .bg(theme.surface)
+                    .add_modifier(Modifier::DIM),
+            )
         };
         buffer[(area.x + index, area.y)]
             .set_char(character)
-            .set_style(Style::default().fg(color).bg(theme.surface));
+            .set_style(style);
     }
 }
 
@@ -605,6 +654,7 @@ fn value_style_for_inventory(
             },
         )
         .bg(theme.surface)
+        .add_modifier(Modifier::BOLD)
 }
 
 fn is_loopback(name: &str) -> bool {
@@ -654,11 +704,14 @@ fn render_storage_inventory(
     for (index, device) in inventory.storages.iter().take(visible).enumerate() {
         let row = index as u16 * rows_per_device;
         let value = storage_value(device, name_width, capacity_width, content.width);
-        write(
+        write_storage_value(
             buffer,
             line(content, row),
             &value,
+            &device.name,
             context_style_for_theme(theme),
+            theme,
+            context_value_style_for_theme(theme),
         );
         if rows_per_device == 2 {
             let fraction = device
@@ -718,6 +771,110 @@ fn storage_capacity(device: &super::super::StorageDevice) -> String {
 
 fn context_style_for_theme(theme: &Theme) -> Style {
     Style::default().fg(theme.text_muted).bg(theme.surface)
+}
+
+fn context_value_style_for_theme(theme: &Theme) -> Style {
+    Style::default()
+        .fg(theme.text)
+        .bg(theme.surface)
+        .add_modifier(Modifier::BOLD)
+}
+
+fn write_rich_context(
+    buffer: &mut Buffer,
+    area: Rect,
+    text: &str,
+    base_style: Style,
+    theme: &Theme,
+    value_style: Style,
+) {
+    write(buffer, area, text, base_style);
+    let mut token_start = None;
+    for (index, character) in text.char_indices() {
+        if character.is_whitespace() || matches!(character, '·' | '/') {
+            if let Some(start) = token_start.take() {
+                overlay_context_token(buffer, area, text, start, index, value_style);
+            }
+            if matches!(character, '·' | '/') {
+                overlay_context_token(
+                    buffer,
+                    area,
+                    text,
+                    index,
+                    index + character.len_utf8(),
+                    base_style.fg(theme.text_muted),
+                );
+            }
+        } else if token_start.is_none() {
+            token_start = Some(index);
+        }
+    }
+    if let Some(start) = token_start {
+        overlay_context_token(buffer, area, text, start, text.len(), value_style);
+    }
+}
+
+fn write_storage_value(
+    buffer: &mut Buffer,
+    area: Rect,
+    text: &str,
+    name: &str,
+    base_style: Style,
+    theme: &Theme,
+    value_style: Style,
+) {
+    write(buffer, area, text, base_style);
+    let name_width = name.chars().count();
+    let value_start = name.len().min(text.len());
+    write_rich_context(
+        buffer,
+        Rect::new(
+            area.x
+                .saturating_add(u16::try_from(name_width).unwrap_or(0)),
+            area.y,
+            area.width
+                .saturating_sub(u16::try_from(name_width).unwrap_or(0)),
+            area.height,
+        ),
+        &text[value_start..],
+        base_style,
+        theme,
+        value_style,
+    );
+}
+
+fn overlay_context_token(
+    buffer: &mut Buffer,
+    area: Rect,
+    text: &str,
+    start: usize,
+    end: usize,
+    style: Style,
+) {
+    let token = &text[start..end];
+    if !is_context_value(token) && token != "·" && token != "/" {
+        return;
+    }
+    let offset = u16::try_from(text[..start].chars().count()).unwrap_or(u16::MAX);
+    write(
+        buffer,
+        Rect::new(
+            area.x.saturating_add(offset),
+            area.y,
+            area.width.saturating_sub(offset),
+            area.height,
+        ),
+        token,
+        style,
+    );
+}
+
+fn is_context_value(token: &str) -> bool {
+    token.chars().any(|character| character.is_ascii_digit())
+        || matches!(
+            token,
+            "B" | "B/s" | "GB" | "MB" | "KB" | "Hz" | "kHz" | "MHz" | "GHz" | "ms" | "s"
+        )
 }
 
 fn clear_surface(area: Rect, theme: &Theme, buffer: &mut Buffer) {
@@ -1185,7 +1342,7 @@ mod tests {
             narrow
                 .content
                 .iter()
-                .filter(|cell| cell.symbol() == "█")
+                .filter(|cell| cell.symbol() == METER_FILL_GLYPH.to_string())
                 .count(),
             3
         );
@@ -1193,7 +1350,7 @@ mod tests {
             narrow
                 .content
                 .iter()
-                .filter(|cell| cell.symbol() == "░")
+                .filter(|cell| cell.symbol() == METER_TRACK_GLYPH.to_string())
                 .count(),
             7
         );
@@ -1209,7 +1366,7 @@ mod tests {
         assert_eq!(
             wide.content
                 .iter()
-                .filter(|cell| cell.symbol() == "█")
+                .filter(|cell| cell.symbol() == METER_FILL_GLYPH.to_string())
                 .count(),
             6
         );
@@ -1230,7 +1387,7 @@ mod tests {
             buffer
                 .content
                 .iter()
-                .filter(|cell| cell.symbol() == "█")
+                .filter(|cell| cell.symbol() == METER_FILL_GLYPH.to_string())
                 .count(),
             4
         );
@@ -1238,7 +1395,7 @@ mod tests {
             buffer
                 .content
                 .iter()
-                .filter(|cell| cell.symbol() == "░")
+                .filter(|cell| cell.symbol() == METER_TRACK_GLYPH.to_string())
                 .count(),
             6
         );

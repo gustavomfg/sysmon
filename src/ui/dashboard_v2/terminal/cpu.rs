@@ -144,13 +144,13 @@ fn render_body(model: WidgetRenderModel, area: Rect, theme: &Theme, buffer: &mut
 
     let hardware_text = hardware_line(model, area.width);
     if !hardware_text.is_empty() {
-        write(
+        write_rich_context(
             buffer,
             regions.hardware,
-            regions.hardware.x,
-            regions.hardware.y,
             &hardware_text,
             context_style(model, theme),
+            theme,
+            context_value_style(model, theme),
         );
     }
 
@@ -191,16 +191,34 @@ fn render_secondary_context(
     theme: &Theme,
     buffer: &mut Buffer,
 ) {
-    let mut x = area.x;
-    if let Some(temperature) = temperature(model) {
+    let x = if let Some(temperature) = temperature(model) {
         let value = format_metric_value(temperature);
-        write(buffer, area, x, area.y, &value, context_style(model, theme));
-        x = x.saturating_add(value.chars().count() as u16 + 2);
-    }
+        write(
+            buffer,
+            area,
+            area.x,
+            area.y,
+            &value,
+            context_value_style(model, theme),
+        );
+        area.x
+            .saturating_add(value.chars().count() as u16)
+            .saturating_add(2)
+    } else {
+        area.x
+    };
 
     let trend = format_trend(model);
     if !trend.is_empty() {
-        write(buffer, area, x, area.y, &trend, trend_style(model, theme));
+        let trend_area = Rect::new(x, area.y, area.right().saturating_sub(x), area.height);
+        write_rich_context(
+            buffer,
+            trend_area,
+            &trend,
+            trend_style(model, theme),
+            theme,
+            context_value_style(model, theme),
+        );
     }
 }
 
@@ -661,6 +679,10 @@ fn context_style(model: WidgetRenderModel, theme: &Theme) -> Style {
     style
 }
 
+fn context_value_style(model: WidgetRenderModel, theme: &Theme) -> Style {
+    value_style(model, theme, true)
+}
+
 fn trend_style(model: WidgetRenderModel, theme: &Theme) -> Style {
     let color = match model.state() {
         WidgetState::Warning => theme.warning,
@@ -711,6 +733,75 @@ fn write(buffer: &mut Buffer, area: Rect, x: u16, y: u16, text: &str, style: Sty
         usize::from(area.right().saturating_sub(x)),
         style,
     );
+}
+
+fn write_rich_context(
+    buffer: &mut Buffer,
+    area: Rect,
+    text: &str,
+    base_style: Style,
+    theme: &Theme,
+    value_style: Style,
+) {
+    write(buffer, area, area.x, area.y, text, base_style);
+    let mut token_start = None;
+    for (index, character) in text.char_indices() {
+        if character.is_whitespace() || matches!(character, '·' | '/') {
+            if let Some(start) = token_start.take() {
+                overlay_context_token(buffer, area, text, start, index, value_style);
+            }
+            if matches!(character, '·' | '/') {
+                overlay_context_token(
+                    buffer,
+                    area,
+                    text,
+                    index,
+                    index + character.len_utf8(),
+                    context_separator_style(base_style, theme),
+                );
+            }
+        } else if token_start.is_none() {
+            token_start = Some(index);
+        }
+    }
+    if let Some(start) = token_start {
+        overlay_context_token(buffer, area, text, start, text.len(), value_style);
+    }
+}
+
+fn overlay_context_token(
+    buffer: &mut Buffer,
+    area: Rect,
+    text: &str,
+    start: usize,
+    end: usize,
+    style: Style,
+) {
+    let token = &text[start..end];
+    if !is_context_value(token) && token != "·" && token != "/" {
+        return;
+    }
+    let offset = u16::try_from(text[..start].chars().count()).unwrap_or(u16::MAX);
+    write(
+        buffer,
+        area,
+        area.x.saturating_add(offset),
+        area.y,
+        token,
+        style,
+    );
+}
+
+fn context_separator_style(base_style: Style, theme: &Theme) -> Style {
+    base_style.fg(theme.text_muted)
+}
+
+fn is_context_value(token: &str) -> bool {
+    token.chars().any(|character| character.is_ascii_digit())
+        || matches!(
+            token,
+            "B" | "B/s" | "GB" | "MB" | "KB" | "Hz" | "kHz" | "MHz" | "GHz" | "ms" | "s"
+        )
 }
 
 fn put(buffer: &mut Buffer, area: Rect, x: u16, y: u16, character: char, style: Style) {

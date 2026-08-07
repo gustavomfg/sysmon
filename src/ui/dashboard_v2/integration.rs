@@ -760,6 +760,7 @@ fn render_diagnostics_panel(
             events.is_some(),
         ],
         live_mode,
+        inventory.temperatures.len(),
     );
     for (index, region) in regions.into_iter().enumerate() {
         let Some(region) = region else { continue };
@@ -789,7 +790,12 @@ fn render_diagnostics_panel(
     }
 }
 
-fn diagnostic_sections(outer: Rect, active: [bool; 3], live_mode: bool) -> [Option<Rect>; 3] {
+fn diagnostic_sections(
+    outer: Rect,
+    active: [bool; 3],
+    live_mode: bool,
+    temperature_count: usize,
+) -> [Option<Rect>; 3] {
     let content = inset(outer, 1, 1);
     if content.width == 0 || content.height == 0 {
         return [None; 3];
@@ -800,11 +806,19 @@ fn diagnostic_sections(outer: Rect, active: [bool; 3], live_mode: bool) -> [Opti
         return [None; 3];
     }
 
-    // Headers plus their first useful row are the architectural minimums.
-    // Empty live events receive only their honest status line; the released
-    // space goes to temperatures and processes.
-    let minimums = [4_u16, 5, 3];
-    let weights = if live_mode { [4_u16, 6, 0] } else { [4, 5, 3] };
+    // Temperature height follows its real row count: heading, rule, and one
+    // row per sensor. Empty live telemetry still receives one honest status
+    // row. The released space goes to processes while empty live events stay
+    // at their compact status height.
+    let temperature_rows = if live_mode {
+        temperature_count.max(1)
+    } else {
+        3
+    };
+    let temperature_minimum =
+        2_u16.saturating_add(u16::try_from(temperature_rows).unwrap_or(u16::MAX.saturating_sub(2)));
+    let minimums = [temperature_minimum, 5, 3];
+    let weights = if live_mode { [0_u16, 1, 0] } else { [4, 5, 3] };
     let gaps = active_count.saturating_sub(1) as u16;
     let usable = content.height.saturating_sub(gaps);
     let minimum_total = active
@@ -941,14 +955,7 @@ fn render_system_context(
                 format!("{} processes · Pulse online", context.processes.len()),
             ];
             for (index, row) in compact.into_iter().enumerate() {
-                write_panel_row(
-                    area,
-                    2 + index as u16,
-                    &row,
-                    theme.text_muted,
-                    theme,
-                    buffer,
-                );
+                write_rich_panel_row(area, 2 + index as u16, &row, theme, buffer);
             }
         }
     } else if live_mode {
@@ -966,14 +973,7 @@ fn render_system_context(
         } else {
             for (index, (left, right)) in rows.into_iter().enumerate() {
                 let row = format!("{left} · {right}");
-                write_panel_row(
-                    area,
-                    2 + index as u16,
-                    &row,
-                    theme.text_muted,
-                    theme,
-                    buffer,
-                );
+                write_rich_panel_row(area, 2 + index as u16, &row, theme, buffer);
             }
         }
     }
@@ -993,16 +993,132 @@ fn write_context_pair(
     let gap = 2_u16.min(area.width.saturating_sub(2));
     let column_width = area.width.saturating_sub(gap) / 2;
     let y = area.y.saturating_add(row);
-    let style = Style::default().fg(theme.text_muted).bg(theme.surface);
-    buffer.set_stringn(area.x, y, left, usize::from(column_width), style);
+    let style = context_label_style(theme);
+    let value_style = context_value_style(theme);
+    write_rich_text(
+        Rect::new(area.x, y, column_width, 1),
+        left,
+        style,
+        value_style,
+        theme,
+        buffer,
+    );
     let right_x = area.x.saturating_add(column_width).saturating_add(gap);
-    buffer.set_stringn(
-        right_x,
-        y,
+    write_rich_text(
+        Rect::new(right_x, y, area.right().saturating_sub(right_x), 1),
         right,
-        usize::from(area.right().saturating_sub(right_x)),
+        style,
+        value_style,
+        theme,
+        buffer,
+    );
+}
+
+fn write_rich_panel_row(area: Rect, row: u16, text: &str, theme: &Theme, buffer: &mut Buffer) {
+    if row >= area.height {
+        return;
+    }
+    write_rich_text(
+        Rect::new(area.x, area.y.saturating_add(row), area.width, 1),
+        text,
+        context_label_style(theme),
+        context_value_style(theme),
+        theme,
+        buffer,
+    );
+}
+
+fn write_rich_text(
+    area: Rect,
+    text: &str,
+    base_style: Style,
+    value_style: Style,
+    theme: &Theme,
+    buffer: &mut Buffer,
+) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    buffer.set_stringn(area.x, area.y, text, usize::from(area.width), base_style);
+
+    let mut token_start = None;
+    for (index, character) in text.char_indices() {
+        if character.is_whitespace() || matches!(character, '·' | '/') {
+            if let Some(start) = token_start.take() {
+                overlay_context_value(area, text, start, index, value_style, theme, buffer);
+            }
+            if matches!(character, '·' | '/') {
+                overlay_context_value(
+                    area,
+                    text,
+                    index,
+                    index + character.len_utf8(),
+                    base_style,
+                    theme,
+                    buffer,
+                );
+            }
+        } else if token_start.is_none() {
+            token_start = Some(index);
+        }
+    }
+    if let Some(start) = token_start {
+        overlay_context_value(area, text, start, text.len(), value_style, theme, buffer);
+    }
+}
+
+fn overlay_context_value(
+    area: Rect,
+    text: &str,
+    start: usize,
+    end: usize,
+    style: Style,
+    theme: &Theme,
+    buffer: &mut Buffer,
+) {
+    let token = &text[start..end];
+    if !is_context_value(token) && !is_status_value(token) {
+        return;
+    }
+    let offset = u16::try_from(text[..start].chars().count()).unwrap_or(u16::MAX);
+    if offset >= area.width {
+        return;
+    }
+    let style = if token == "·" || token == "/" {
+        style.fg(theme.text_muted)
+    } else {
+        style
+    };
+    buffer.set_stringn(
+        area.x.saturating_add(offset),
+        area.y,
+        token,
+        usize::from(area.width.saturating_sub(offset)),
         style,
     );
+}
+
+fn context_label_style(theme: &Theme) -> Style {
+    Style::default().fg(theme.text_muted).bg(theme.surface)
+}
+
+fn context_value_style(theme: &Theme) -> Style {
+    Style::default()
+        .fg(theme.text)
+        .bg(theme.surface)
+        .add_modifier(Modifier::BOLD)
+}
+
+fn is_context_value(token: &str) -> bool {
+    token.chars().any(|character| character.is_ascii_digit())
+        || matches!(
+            token,
+            "B" | "B/s" | "GB" | "MB" | "KB" | "Hz" | "kHz" | "MHz" | "GHz" | "ms" | "s"
+        )
+}
+
+fn is_status_value(token: &str) -> bool {
+    matches!(token, "Pulse" | "online")
 }
 
 fn render_temperatures(
@@ -1063,7 +1179,7 @@ fn render_temperature_row(
     let value_width = u16::try_from(value_text.chars().count()).unwrap_or(area.width);
     let label_width = area
         .width
-        .saturating_mul(38)
+        .saturating_mul(35)
         .saturating_div(100)
         .max(8)
         .min(area.width.saturating_sub(value_width.saturating_add(2)));
@@ -1102,7 +1218,7 @@ fn render_temperature_row(
         y,
         value_text,
         usize::from(area.right().saturating_sub(value_x)),
-        Style::default().fg(theme.text).bg(theme.surface),
+        context_value_style(theme),
     );
 }
 
@@ -1161,8 +1277,8 @@ fn render_processes(
 }
 
 fn render_process_columns_header(area: Rect, theme: &Theme, buffer: &mut Buffer) {
-    let memory_width = 8_u16.min(area.width);
-    let cpu_width = 7_u16.min(area.width.saturating_sub(memory_width));
+    let memory_width = 10_u16.min(area.width);
+    let cpu_width = 8_u16.min(area.width.saturating_sub(memory_width));
     let cpu_x = area.right().saturating_sub(memory_width + cpu_width);
     let memory_x = area.right().saturating_sub(memory_width);
     buffer.set_stringn(
@@ -1200,8 +1316,8 @@ fn render_process_row(
     if row >= area.height {
         return;
     }
-    let memory_width = 8_u16.min(area.width);
-    let cpu_width = 7_u16.min(area.width.saturating_sub(memory_width));
+    let memory_width = 10_u16.min(area.width);
+    let cpu_width = 8_u16.min(area.width.saturating_sub(memory_width));
     let cpu_x = area.right().saturating_sub(memory_width + cpu_width);
     let memory_x = area.right().saturating_sub(memory_width);
     let y = area.y.saturating_add(row);
@@ -1217,14 +1333,14 @@ fn render_process_row(
         y,
         format!("{cpu_percent:>5.1}%"),
         usize::from(cpu_width),
-        Style::default().fg(theme.text_muted).bg(theme.surface),
+        context_value_style(theme),
     );
     buffer.set_stringn(
         memory_x,
         y,
         format_bytes(memory_bytes as f64),
         usize::from(memory_width),
-        Style::default().fg(theme.text_muted).bg(theme.surface),
+        context_value_style(theme),
     );
 }
 
@@ -1403,10 +1519,10 @@ fn draw_horizontal_bar(
         let position = (f64::from(column) + 0.5) / f64::from(width.max(1));
         let filled = position <= value.clamp(0.0, 1.0);
         buffer[(x.saturating_add(column), y)]
-            .set_char(if filled { '━' } else { '·' })
+            .set_char(if filled { '━' } else { '─' })
             .set_style(
                 Style::default()
-                    .fg(if filled { color } else { theme.border })
+                    .fg(if filled { color } else { theme.surface_alt })
                     .bg(theme.surface),
             );
     }
@@ -1735,11 +1851,12 @@ mod tests {
     #[test]
     fn live_diagnostics_give_empty_events_only_their_status_row() {
         let outer = Rect::new(0, 0, 44, 35);
-        let sections = diagnostic_sections(outer, [true, true, true], true);
+        let sections = diagnostic_sections(outer, [true, true, true], true, 3);
         let temperatures = sections[0].unwrap();
         let processes = sections[1].unwrap();
         let events = sections[2].unwrap();
 
+        assert_eq!(temperatures.height, 5);
         assert_eq!(events.height, 3);
         assert!(temperatures.height > events.height);
         assert!(processes.height > events.height);
@@ -1770,5 +1887,47 @@ mod tests {
         assert!(!text.contains("sysmon"));
         assert!(!text.contains("browser"));
         assert!(!text.contains("compiler"));
+    }
+
+    #[test]
+    fn diagnostic_values_are_clear_while_labels_and_headers_remain_muted() {
+        let theme = Theme::pulse();
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 80, 12));
+        render_temperature_row(
+            Rect::new(0, 0, 80, 12),
+            0,
+            "CPU Package",
+            Some(42),
+            &theme,
+            &mut buffer,
+        );
+        let value_x = 80 - "42°C".chars().count() as u16;
+        assert_eq!(buffer[(value_x, 0)].fg, theme.text);
+        assert!(
+            buffer[(value_x, 0)]
+                .modifier
+                .contains(ratatui::style::Modifier::BOLD)
+        );
+        assert_eq!(buffer[(0, 0)].fg, theme.text_muted);
+
+        render_process_columns_header(Rect::new(0, 1, 80, 12), &theme, &mut buffer);
+        render_process_row(
+            Rect::new(0, 1, 80, 12),
+            1,
+            "sysmon",
+            12.5,
+            1024 * 1024,
+            &theme,
+            &mut buffer,
+        );
+        assert_eq!(buffer[(0, 2)].fg, theme.text);
+        let cpu_x = 80 - 10 - 8;
+        assert_eq!(buffer[(cpu_x, 2)].fg, theme.text);
+        assert!(
+            buffer[(cpu_x, 2)]
+                .modifier
+                .contains(ratatui::style::Modifier::BOLD)
+        );
+        assert_eq!(buffer[(0, 3)].fg, theme.text_muted);
     }
 }
