@@ -24,25 +24,44 @@ use super::{
 
 const PRIMARY_COUNT: usize = 5;
 const PRIMARY_CARD_GAP: u16 = 1;
-const PRIMARY_CPU_MINIMUM: u16 = 9;
-const PRIMARY_CARD_MINIMUMS: [u16; PRIMARY_COUNT] = [PRIMARY_CPU_MINIMUM, 5, 5, 5, 6];
+const PRIMARY_CPU_MINIMUM: u16 = 7;
+const PRIMARY_CARD_MINIMUMS: [u16; PRIMARY_COUNT] = [PRIMARY_CPU_MINIMUM, 4, 4, 4, 4];
 const PULSE_TITLE: &str = "PULSE V2";
 const HEADER_TITLE: &str = "SYSMON V2";
 const HEADER_CENTER: &str = "SYSTEM MONITOR";
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct DashboardProcessSummary {
+    pub(crate) name: String,
+    pub(crate) cpu_percent: f32,
+    pub(crate) memory_bytes: u64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct DashboardV2SystemContext {
+    pub(crate) physical_cores: Option<usize>,
+    pub(crate) logical_threads: Option<usize>,
+    pub(crate) total_memory_gib: Option<f64>,
+    pub(crate) uptime_seconds: Option<u64>,
+    pub(crate) processes: Vec<DashboardProcessSummary>,
+}
 
 /// All semantic inputs needed by the V2 dashboard compositor.
 ///
 /// The compositor deliberately accepts prepared widget models. It never reaches
 /// into collectors, snapshots, or the V1 application state.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct DashboardV2Content {
     primary: [Option<WidgetRenderModel>; PRIMARY_COUNT],
     pulse_input: NormalizedPulseInput,
     state: DashboardState,
+    inventory: super::HardwareInventory,
+    system_context: Option<DashboardV2SystemContext>,
+    live_mode: bool,
 }
 
 impl DashboardV2Content {
-    pub(crate) const fn new(
+    pub(crate) fn new(
         primary: [Option<WidgetRenderModel>; PRIMARY_COUNT],
         pulse_input: NormalizedPulseInput,
         state: DashboardState,
@@ -51,19 +70,49 @@ impl DashboardV2Content {
             primary,
             pulse_input,
             state,
+            inventory: super::HardwareInventory::default(),
+            system_context: None,
+            live_mode: false,
         }
     }
 
-    pub(crate) const fn primary(self) -> [Option<WidgetRenderModel>; PRIMARY_COUNT] {
+    pub(crate) fn primary(&self) -> [Option<WidgetRenderModel>; PRIMARY_COUNT] {
         self.primary
     }
 
-    pub(crate) const fn pulse_input(self) -> NormalizedPulseInput {
+    pub(crate) fn pulse_input(&self) -> NormalizedPulseInput {
         self.pulse_input
     }
 
-    pub(crate) const fn state(self) -> DashboardState {
+    pub(crate) fn state(&self) -> DashboardState {
         self.state
+    }
+
+    pub(crate) fn with_inventory(mut self, inventory: super::HardwareInventory) -> Self {
+        self.inventory = inventory;
+        self
+    }
+
+    pub(crate) fn inventory(&self) -> &super::HardwareInventory {
+        &self.inventory
+    }
+
+    pub(crate) fn with_system_context(mut self, context: DashboardV2SystemContext) -> Self {
+        self.system_context = Some(context);
+        self
+    }
+
+    pub(crate) fn system_context(&self) -> Option<&DashboardV2SystemContext> {
+        self.system_context.as_ref()
+    }
+
+    pub(crate) fn with_live_mode(mut self, live_mode: bool) -> Self {
+        self.live_mode = live_mode;
+        self
+    }
+
+    pub(crate) const fn live_mode(&self) -> bool {
+        self.live_mode
     }
 }
 
@@ -173,6 +222,7 @@ impl DashboardV2Renderer {
                 to_rect(section.bounds(), area)?,
                 preset,
                 content.state(),
+                content.live_mode(),
                 theme,
                 buffer,
             );
@@ -210,25 +260,60 @@ impl DashboardV2Renderer {
                 theme,
                 buffer,
                 &mut rendered_primary,
+                content.inventory(),
             )?;
         }
 
-        for region in [
-            DashboardRegion::SecondaryMetrics,
-            DashboardRegion::Charts,
-            DashboardRegion::Processes,
-            DashboardRegion::Alerts,
-        ] {
-            if let Some(section) = layout.section(region) {
-                render_auxiliary(
-                    region,
-                    to_rect(section.bounds(), area)?,
-                    content.state(),
-                    gpu_is_available(content.primary()),
-                    theme,
-                    buffer,
-                );
-            }
+        if let Some(section) = layout.section(DashboardRegion::SecondaryMetrics) {
+            render_auxiliary(
+                DashboardRegion::SecondaryMetrics,
+                to_rect(section.bounds(), area)?,
+                content.state(),
+                gpu_is_available(content.primary()),
+                content.inventory(),
+                content.system_context(),
+                content.live_mode(),
+                theme,
+                buffer,
+            );
+        }
+
+        let diagnostics = [
+            layout
+                .section(DashboardRegion::Charts)
+                .map(|section| to_rect(section.bounds(), area))
+                .transpose()?,
+            layout
+                .section(DashboardRegion::Processes)
+                .map(|section| to_rect(section.bounds(), area))
+                .transpose()?,
+            layout
+                .section(DashboardRegion::Alerts)
+                .map(|section| to_rect(section.bounds(), area))
+                .transpose()?,
+        ];
+        if diagnostics.iter().any(Option::is_some) {
+            let first = diagnostics.into_iter().flatten().next().unwrap_or_default();
+            let last = diagnostics.into_iter().flatten().last().unwrap_or(first);
+            let outer = Rect::new(
+                first.x,
+                first.y,
+                first.width,
+                last.bottom().saturating_sub(first.y),
+            );
+            render_diagnostics_panel(
+                outer,
+                diagnostics[0],
+                diagnostics[1],
+                diagnostics[2],
+                content.state(),
+                gpu_is_available(content.primary()),
+                content.inventory(),
+                content.system_context(),
+                content.live_mode(),
+                theme,
+                buffer,
+            );
         }
 
         Ok(DashboardV2RenderSummary {
@@ -239,6 +324,7 @@ impl DashboardV2Renderer {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn render_primary(
         self,
         area: Rect,
@@ -247,13 +333,27 @@ impl DashboardV2Renderer {
         theme: &Theme,
         buffer: &mut Buffer,
         rendered: &mut [Option<DashboardWidgetId>; PRIMARY_COUNT],
+        inventory: &super::HardwareInventory,
     ) -> Result<usize, DashboardV2RenderError> {
-        let visible = visible_primary(preset, area);
+        if area.width == 0 || area.height == 0 {
+            return Ok(0);
+        }
+
+        // Primary metrics are one instrument panel. Individual metric
+        // renderers still own their semantic anatomy, but they no longer
+        // create competing outer boxes of their own.
+        let framed = area.width >= 16 && area.height >= 20;
+        buffer.set_style(area, Style::default().bg(theme.surface));
+        if framed {
+            draw_panel_frame(area, theme.border, theme.surface, buffer);
+        }
+        let panel = if framed { inset(area, 1, 1) } else { area };
+        let visible = visible_primary(preset, panel);
         let active_count = visible
             .iter()
             .filter(|index| **index != usize::MAX && models[**index].is_some())
             .count();
-        let slots = split_primary_area(area, active_count);
+        let slots = split_primary_area(panel, active_count);
         let mut length = 0;
         let mut slot_index = 0;
 
@@ -269,19 +369,25 @@ impl DashboardV2Renderer {
             if slot.width < 2 || slot.height < 1 {
                 continue;
             }
-            if slot.width >= 12 && slot.height >= 4 {
-                buffer.set_style(slot, Style::default().bg(theme.surface));
-                draw_panel_frame(slot, theme.border, theme.surface, buffer);
-            }
-            let card = inset(slot, 1, u16::from(slot.height >= 4));
-            if card.width == 0 || card.height == 0 {
-                continue;
-            }
             self.widgets
-                .render_rect(model, preset, card, theme, buffer)?;
+                .render_rect_with_inventory(model, preset, slot, theme, buffer, inventory)?;
             if length < rendered.len() {
                 rendered[length] = Some(model.visual().widget_id());
                 length += 1;
+            }
+        }
+
+        for pair in slots[..active_count].windows(2) {
+            let divider_y = pair[0].bottom();
+            if divider_y < panel.bottom() {
+                draw_rule(
+                    panel.x,
+                    divider_y,
+                    panel.width,
+                    theme.border,
+                    theme.surface,
+                    buffer,
+                );
             }
         }
 
@@ -497,6 +603,7 @@ fn render_header(
     area: Rect,
     preset: DashboardPreset,
     state: DashboardState,
+    live: bool,
     theme: &Theme,
     buffer: &mut Buffer,
 ) {
@@ -504,7 +611,11 @@ fn render_header(
         return;
     }
     buffer.set_style(area, Style::default().bg(theme.background));
-    let right = format!("{}  ·  {}", preset_label(preset), state_label(state));
+    let right = if live {
+        format!("{}  ·  LIVE METRICS", preset_label(preset))
+    } else {
+        format!("{}  ·  {}", preset_label(preset), state_label(state))
+    };
     buffer.set_stringn(
         area.x,
         area.y,
@@ -573,11 +684,15 @@ fn render_footer(
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_auxiliary(
     region: DashboardRegion,
     area: Rect,
     state: DashboardState,
     gpu_available: bool,
+    inventory: &super::HardwareInventory,
+    system_context: Option<&DashboardV2SystemContext>,
+    live_mode: bool,
     theme: &Theme,
     buffer: &mut Buffer,
 ) {
@@ -591,25 +706,141 @@ fn render_auxiliary(
         return;
     }
     match region {
-        DashboardRegion::SecondaryMetrics => render_system_context(content, theme, buffer),
-        DashboardRegion::Charts => {
-            render_temperatures(content, state, gpu_available, theme, buffer)
+        DashboardRegion::SecondaryMetrics => {
+            render_system_context(content, system_context, live_mode, theme, buffer)
         }
-        DashboardRegion::Processes => render_processes(content, state, theme, buffer),
-        DashboardRegion::Alerts => render_events(content, state, theme, buffer),
+        DashboardRegion::Charts => render_temperatures(
+            content,
+            state,
+            gpu_available,
+            inventory,
+            live_mode,
+            theme,
+            buffer,
+        ),
+        DashboardRegion::Processes => {
+            render_processes(content, state, system_context, live_mode, theme, buffer)
+        }
+        DashboardRegion::Alerts => {
+            render_events(content, state, system_context, live_mode, theme, buffer)
+        }
         _ => {}
     }
 }
 
-fn render_system_context(area: Rect, theme: &Theme, buffer: &mut Buffer) {
+#[allow(clippy::too_many_arguments)]
+fn render_diagnostics_panel(
+    outer: Rect,
+    temperatures: Option<Rect>,
+    processes: Option<Rect>,
+    events: Option<Rect>,
+    state: DashboardState,
+    gpu_available: bool,
+    inventory: &super::HardwareInventory,
+    system_context: Option<&DashboardV2SystemContext>,
+    live_mode: bool,
+    theme: &Theme,
+    buffer: &mut Buffer,
+) {
+    if outer.width == 0 || outer.height == 0 {
+        return;
+    }
+    buffer.set_style(outer, Style::default().bg(theme.surface));
+    draw_panel_frame(outer, theme.border, theme.surface, buffer);
+    let content = inset(outer, 1, 1);
+    if content.width == 0 || content.height == 0 {
+        return;
+    }
+
+    let regions = [temperatures, processes, events];
+    for (index, region) in regions.into_iter().enumerate() {
+        let Some(region) = region else { continue };
+        if index > 0 && region.y > outer.y {
+            draw_rule(
+                content.x,
+                region.y,
+                content.width,
+                theme.border,
+                theme.surface,
+                buffer,
+            );
+        }
+        let next_y = regions
+            .iter()
+            .skip(index + 1)
+            .flatten()
+            .map(|rect| rect.y)
+            .next()
+            .unwrap_or(content.bottom());
+        let start_y = region.y.max(content.y) + u16::from(index > 0);
+        let end_y = next_y.min(content.bottom());
+        if end_y <= start_y {
+            continue;
+        }
+        let section = Rect::new(content.x, start_y, content.width, end_y - start_y);
+        match index {
+            0 => render_temperatures(
+                section,
+                state,
+                gpu_available,
+                inventory,
+                live_mode,
+                theme,
+                buffer,
+            ),
+            1 => render_processes(section, state, system_context, live_mode, theme, buffer),
+            _ => render_events(section, state, system_context, live_mode, theme, buffer),
+        }
+    }
+}
+
+fn render_system_context(
+    area: Rect,
+    system_context: Option<&DashboardV2SystemContext>,
+    live_mode: bool,
+    theme: &Theme,
+    buffer: &mut Buffer,
+) {
     panel_heading(area, "SYSTEM CONTEXT", theme.info, theme, buffer);
-    let rows = [
-        "8 cores  ·  16 threads",
-        "16 GB memory  ·  3d 04h",
-        "Pulse online  ·  history ready",
-    ];
-    for (index, row) in rows.into_iter().enumerate() {
-        write_panel_row(area, 2 + index as u16, row, theme.text_muted, theme, buffer);
+    if let Some(context) = system_context {
+        let cores = context
+            .physical_cores
+            .map_or_else(|| "—".to_owned(), |value| value.to_string());
+        let threads = context
+            .logical_threads
+            .map_or_else(|| "—".to_owned(), |value| value.to_string());
+        let memory = context
+            .total_memory_gib
+            .map_or_else(|| "—".to_owned(), |value| format!("{value:.1} GB memory"));
+        let uptime = context
+            .uptime_seconds
+            .map_or_else(|| "—".to_owned(), format_uptime);
+        let rows = [
+            format!("{cores} physical cores  ·  {threads} logical threads"),
+            format!("{memory}  ·  uptime {uptime}"),
+            format!("{} processes  ·  Pulse online", context.processes.len()),
+        ];
+        for (index, row) in rows.into_iter().enumerate() {
+            write_panel_row(
+                area,
+                2 + index as u16,
+                &row,
+                theme.text_muted,
+                theme,
+                buffer,
+            );
+        }
+    } else if live_mode {
+        write_panel_row(area, 2, "not connected", theme.text_muted, theme, buffer);
+    } else {
+        let rows = [
+            "8 cores  ·  16 threads",
+            "16 GB memory  ·  3d 04h",
+            "Pulse online  ·  history ready",
+        ];
+        for (index, row) in rows.into_iter().enumerate() {
+            write_panel_row(area, 2 + index as u16, row, theme.text_muted, theme, buffer);
+        }
     }
 }
 
@@ -617,10 +848,29 @@ fn render_temperatures(
     area: Rect,
     state: DashboardState,
     gpu_available: bool,
+    inventory: &super::HardwareInventory,
+    live: bool,
     theme: &Theme,
     buffer: &mut Buffer,
 ) {
     panel_heading(area, "TEMPERATURES", theme.warning, theme, buffer);
+    if !inventory.temperatures.is_empty() {
+        for (index, sensor) in inventory.temperatures.iter().enumerate() {
+            render_temperature_row(
+                area,
+                2 + index as u16,
+                &sensor.label,
+                sensor.celsius.map(|value| value.clamp(0.0, 100.0) as u16),
+                theme,
+                buffer,
+            );
+        }
+        return;
+    }
+    if live {
+        write_panel_row(area, 2, "no live sensors", theme.text_muted, theme, buffer);
+        return;
+    }
     let values = match state {
         DashboardState::Calm => [52_u16, 54, 42],
         DashboardState::Active => [68, 70, 48],
@@ -649,9 +899,17 @@ fn render_temperature_row(
         return;
     }
     let value_text = value.map_or_else(|| "—".to_owned(), |value| format!("{value}°C"));
-    let label_width = 6_u16.min(area.width.saturating_sub(1));
-    let bar_start = area.x.saturating_add(label_width);
-    let bar_width = area.width.saturating_sub(label_width).saturating_sub(7);
+    let value_width = u16::try_from(value_text.chars().count()).unwrap_or(area.width);
+    let label_width = area
+        .width
+        .saturating_mul(38)
+        .saturating_div(100)
+        .max(8)
+        .min(area.width.saturating_sub(value_width.saturating_add(2)));
+    let bar_start = area.x.saturating_add(label_width.saturating_add(1));
+    let bar_width = area
+        .width
+        .saturating_sub(label_width.saturating_add(value_width).saturating_add(2));
     let y = area.y.saturating_add(row);
     buffer.set_stringn(
         area.x,
@@ -677,7 +935,7 @@ fn render_temperature_row(
             buffer,
         );
     }
-    let value_x = area.right().saturating_sub(7);
+    let value_x = area.right().saturating_sub(value_width);
     buffer.set_stringn(
         value_x,
         y,
@@ -687,8 +945,40 @@ fn render_temperature_row(
     );
 }
 
-fn render_processes(area: Rect, state: DashboardState, theme: &Theme, buffer: &mut Buffer) {
+fn render_processes(
+    area: Rect,
+    state: DashboardState,
+    system_context: Option<&DashboardV2SystemContext>,
+    live_mode: bool,
+    theme: &Theme,
+    buffer: &mut Buffer,
+) {
     panel_heading(area, "TOP PROCESSES", theme.primary, theme, buffer);
+    if area.height > 2 {
+        render_process_columns_header(area, theme, buffer);
+    }
+    if let Some(context) = system_context {
+        if context.processes.is_empty() {
+            write_panel_row(area, 3, "not connected", theme.text_muted, theme, buffer);
+            return;
+        }
+        for (index, process) in context.processes.iter().take(5).enumerate() {
+            render_process_row(
+                area,
+                3 + index as u16,
+                &process.name,
+                process.cpu_percent,
+                process.memory_bytes,
+                theme,
+                buffer,
+            );
+        }
+        return;
+    }
+    if live_mode {
+        write_panel_row(area, 3, "not connected", theme.text_muted, theme, buffer);
+        return;
+    }
     let load = match state {
         DashboardState::Calm => [12_u16, 8, 5],
         DashboardState::Active => [34, 22, 14],
@@ -697,32 +987,99 @@ fn render_processes(area: Rect, state: DashboardState, theme: &Theme, buffer: &m
     };
     let processes = ["sysmon", "browser", "compiler"];
     for (index, (name, cpu)) in processes.into_iter().zip(load).enumerate() {
-        let y = area.y.saturating_add(2 + index as u16);
-        if y >= area.bottom() {
-            break;
-        }
-        let value = format!("{cpu:>3}%  {:>3}%", (cpu / 2).max(1));
-        let available = usize::from(area.width).saturating_sub(value.chars().count() + 1);
-        buffer.set_stringn(
-            area.x,
-            y,
+        render_process_row(
+            area,
+            3 + index as u16,
             name,
-            available,
-            Style::default().fg(theme.text).bg(theme.surface),
-        );
-        buffer.set_stringn(
-            area.right()
-                .saturating_sub(u16::try_from(value.chars().count()).unwrap_or(area.width)),
-            y,
-            value,
-            usize::from(area.width),
-            Style::default().fg(theme.text_muted).bg(theme.surface),
+            f32::from(cpu),
+            u64::from((cpu / 2).max(1)) * 1024 * 1024,
+            theme,
+            buffer,
         );
     }
 }
 
-fn render_events(area: Rect, state: DashboardState, theme: &Theme, buffer: &mut Buffer) {
+fn render_process_columns_header(area: Rect, theme: &Theme, buffer: &mut Buffer) {
+    let memory_width = 8_u16.min(area.width);
+    let cpu_width = 7_u16.min(area.width.saturating_sub(memory_width));
+    let cpu_x = area.right().saturating_sub(memory_width + cpu_width);
+    let memory_x = area.right().saturating_sub(memory_width);
+    buffer.set_stringn(
+        area.x,
+        area.y.saturating_add(2),
+        "PROCESS",
+        usize::from(cpu_x.saturating_sub(area.x)),
+        Style::default().fg(theme.text_muted).bg(theme.surface),
+    );
+    buffer.set_stringn(
+        cpu_x,
+        area.y.saturating_add(2),
+        "CPU",
+        usize::from(cpu_width),
+        Style::default().fg(theme.text_muted).bg(theme.surface),
+    );
+    buffer.set_stringn(
+        memory_x,
+        area.y.saturating_add(2),
+        "MEM",
+        usize::from(memory_width),
+        Style::default().fg(theme.text_muted).bg(theme.surface),
+    );
+}
+
+fn render_process_row(
+    area: Rect,
+    row: u16,
+    name: &str,
+    cpu_percent: f32,
+    memory_bytes: u64,
+    theme: &Theme,
+    buffer: &mut Buffer,
+) {
+    if row >= area.height {
+        return;
+    }
+    let memory_width = 8_u16.min(area.width);
+    let cpu_width = 7_u16.min(area.width.saturating_sub(memory_width));
+    let cpu_x = area.right().saturating_sub(memory_width + cpu_width);
+    let memory_x = area.right().saturating_sub(memory_width);
+    let y = area.y.saturating_add(row);
+    buffer.set_stringn(
+        area.x,
+        y,
+        name,
+        usize::from(cpu_x.saturating_sub(area.x).saturating_sub(1)),
+        Style::default().fg(theme.text).bg(theme.surface),
+    );
+    buffer.set_stringn(
+        cpu_x,
+        y,
+        format!("{cpu_percent:>5.1}%"),
+        usize::from(cpu_width),
+        Style::default().fg(theme.text_muted).bg(theme.surface),
+    );
+    buffer.set_stringn(
+        memory_x,
+        y,
+        format_bytes(memory_bytes as f64),
+        usize::from(memory_width),
+        Style::default().fg(theme.text_muted).bg(theme.surface),
+    );
+}
+
+fn render_events(
+    area: Rect,
+    state: DashboardState,
+    system_context: Option<&DashboardV2SystemContext>,
+    live_mode: bool,
+    theme: &Theme,
+    buffer: &mut Buffer,
+) {
     panel_heading(area, "RECENT EVENTS", theme.secondary, theme, buffer);
+    if live_mode || system_context.is_some() {
+        write_panel_row(area, 2, "no live events", theme.text_muted, theme, buffer);
+        return;
+    }
     let events = match state {
         DashboardState::Calm => ["Pulse stabilized", "No active pressure"],
         DashboardState::Active => ["Workload increased", "Network flow active"],
@@ -738,6 +1095,32 @@ fn render_events(area: Rect, state: DashboardState, theme: &Theme, buffer: &mut 
             theme,
             buffer,
         );
+    }
+}
+
+fn format_uptime(seconds: u64) -> String {
+    let days = seconds / 86_400;
+    let hours = (seconds % 86_400) / 3_600;
+    let minutes = (seconds % 3_600) / 60;
+    if days > 0 {
+        format!("{days}d {hours:02}h")
+    } else if hours > 0 {
+        format!("{hours}h {minutes:02}m")
+    } else {
+        format!("{minutes}m")
+    }
+}
+
+fn format_bytes(value: f64) -> String {
+    let value = value.max(0.0);
+    if value >= 1024.0 * 1024.0 * 1024.0 {
+        format!("{:.1} GB", value / 1024.0 / 1024.0 / 1024.0)
+    } else if value >= 1024.0 * 1024.0 {
+        format!("{:.1} MB", value / 1024.0 / 1024.0)
+    } else if value >= 1024.0 {
+        format!("{:.1} KB", value / 1024.0)
+    } else {
+        format!("{value:.0} B")
     }
 }
 
@@ -992,7 +1375,7 @@ mod tests {
                 .render(
                     DashboardPreset::LargeWidescreen,
                     DashboardContext::default(),
-                    content,
+                    content.clone(),
                     Duration::from_secs(5),
                     true,
                     &Theme::pulse(),
@@ -1102,8 +1485,8 @@ mod tests {
     fn primary_column_gives_cpu_a_reference_sized_region() {
         let slots = split_primary_area(Rect::new(0, 0, 48, 37), PRIMARY_COUNT);
         let heights: Vec<u16> = slots.iter().map(|slot| slot.height).collect();
-        assert!((9..=10).contains(&heights[0]));
-        assert!(heights[0] > heights[1]);
+        assert!((6..=7).contains(&heights[0]));
+        assert!(heights[0] >= heights[1]);
         assert!(heights[1..].iter().all(|height| *height >= 5));
         assert_eq!(heights.iter().sum::<u16>() + PRIMARY_CARD_GAP * 4, 37);
         for pair in slots.windows(2) {
@@ -1113,12 +1496,12 @@ mod tests {
 
     #[test]
     fn primary_column_degrades_lower_priority_cards_without_invalid_slots() {
-        let area = Rect::new(0, 0, 48, 21);
+        let area = Rect::new(0, 0, 48, 20);
         let visible = visible_primary(DashboardPreset::Widescreen, area);
         assert_eq!(visible, [0, 1, 2, usize::MAX, usize::MAX]);
 
         let slots = split_primary_area(area, 3);
-        assert!(slots[0].height > slots[1].height);
+        assert!(slots[0].height >= slots[1].height);
         assert!(
             slots[..3]
                 .iter()
@@ -1158,7 +1541,7 @@ mod tests {
             let count = visible.iter().filter(|index| **index != usize::MAX).count();
             let expected_count = match height {
                 24 => 3,
-                32 => 4,
+                32 => 5,
                 40 => 5,
                 _ => unreachable!(),
             };

@@ -1,5 +1,6 @@
 use std::time::{Duration, Instant};
 
+use super::HardwareInventory;
 use super::chart::{ChartError, TimeSample, TimeSeries};
 use super::metrics::{
     CpuMetricModel, GpuMetricInput, GpuMetricModel, MemoryMetricInput, MemoryMetricModel,
@@ -32,7 +33,7 @@ impl From<MetricModelError> for LiveMetricsError {
 }
 
 /// Collector-independent input produced by the viewer's snapshot adapter.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct LiveSnapshot {
     pub cpu: CpuLiveSample,
     pub memory_used_bytes: Option<f64>,
@@ -43,6 +44,7 @@ pub struct LiveSnapshot {
     pub download_bytes_per_sec: Option<f64>,
     pub upload_bytes_per_sec: Option<f64>,
     pub storage: Option<LiveStorageSnapshot>,
+    pub hardware: HardwareInventory,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -95,30 +97,35 @@ struct StorageSample {
     write_bytes_per_sec: Option<f64>,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct LiveMetricModels {
     cpu: CpuMetricModel<LIVE_METRICS_HISTORY_CAPACITY>,
     memory: MemoryMetricModel<LIVE_METRICS_HISTORY_CAPACITY>,
     gpu: GpuMetricModel<LIVE_METRICS_HISTORY_CAPACITY>,
     network: NetworkMetricModel<LIVE_METRICS_HISTORY_CAPACITY>,
     storage: StorageMetricModel<LIVE_METRICS_HISTORY_CAPACITY>,
+    hardware: HardwareInventory,
 }
 
 impl LiveMetricModels {
-    pub const fn cpu(self) -> CpuMetricModel<LIVE_METRICS_HISTORY_CAPACITY> {
+    pub fn cpu(&self) -> CpuMetricModel<LIVE_METRICS_HISTORY_CAPACITY> {
         self.cpu
     }
-    pub const fn memory(self) -> MemoryMetricModel<LIVE_METRICS_HISTORY_CAPACITY> {
+    pub fn memory(&self) -> MemoryMetricModel<LIVE_METRICS_HISTORY_CAPACITY> {
         self.memory
     }
-    pub const fn gpu(self) -> GpuMetricModel<LIVE_METRICS_HISTORY_CAPACITY> {
+    pub fn gpu(&self) -> GpuMetricModel<LIVE_METRICS_HISTORY_CAPACITY> {
         self.gpu
     }
-    pub const fn network(self) -> NetworkMetricModel<LIVE_METRICS_HISTORY_CAPACITY> {
+    pub fn network(&self) -> NetworkMetricModel<LIVE_METRICS_HISTORY_CAPACITY> {
         self.network
     }
-    pub const fn storage(self) -> StorageMetricModel<LIVE_METRICS_HISTORY_CAPACITY> {
+    pub fn storage(&self) -> StorageMetricModel<LIVE_METRICS_HISTORY_CAPACITY> {
         self.storage
+    }
+
+    pub fn inventory(&self) -> &HardwareInventory {
+        &self.hardware
     }
 }
 
@@ -137,6 +144,7 @@ pub struct LiveMetricsHistory {
     gpu: GpuSample,
     network: NetworkSample,
     storage: StorageSample,
+    hardware: HardwareInventory,
 }
 
 impl Default for LiveMetricsHistory {
@@ -146,7 +154,7 @@ impl Default for LiveMetricsHistory {
 }
 
 impl LiveMetricsHistory {
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             origin: None,
             cpu: CpuLiveHistory::new(),
@@ -181,6 +189,7 @@ impl LiveMetricsHistory {
                 read_bytes_per_sec: None,
                 write_bytes_per_sec: None,
             },
+            hardware: HardwareInventory::default(),
         }
     }
 
@@ -193,6 +202,7 @@ impl LiveMetricsHistory {
         let offset = collected_at.saturating_duration_since(origin);
 
         self.cpu.push(collected_at, snapshot.cpu)?;
+        self.hardware = snapshot.hardware.clone();
         self.memory = MemorySample {
             used_bytes: finite_non_negative(snapshot.memory_used_bytes),
             available_bytes: finite_non_negative(snapshot.memory_available_bytes),
@@ -310,6 +320,7 @@ impl LiveMetricsHistory {
             gpu,
             network,
             storage,
+            hardware: self.hardware.clone(),
         })
     }
 }
@@ -423,6 +434,7 @@ mod tests {
                 read_bytes_per_sec: Some(8.0e6),
                 write_bytes_per_sec: Some(2.0e6),
             }),
+            hardware: HardwareInventory::default(),
         }
     }
 

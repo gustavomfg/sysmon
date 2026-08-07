@@ -1,6 +1,7 @@
 mod chart;
 mod engine;
 mod integration;
+mod inventory;
 mod layout;
 mod live_cpu;
 mod live_metrics;
@@ -25,7 +26,13 @@ pub use chart::{
 pub use engine::{DashboardEngine, DashboardFrame};
 #[allow(unused_imports)]
 pub(crate) use integration::{
-    DashboardV2Content, DashboardV2RenderError, DashboardV2RenderSummary, DashboardV2Renderer,
+    DashboardProcessSummary, DashboardV2Content, DashboardV2RenderError, DashboardV2RenderSummary,
+    DashboardV2Renderer, DashboardV2SystemContext,
+};
+#[allow(unused_imports)]
+pub use inventory::{
+    GpuDevice, HardwareId, HardwareInventory, HardwareKind, NetworkInterface, StorageDevice,
+    TemperatureSensor,
 };
 #[allow(unused_imports)]
 pub use layout::{DashboardLayout, DashboardLayoutEngine, DashboardSection};
