@@ -480,44 +480,47 @@ fn content(
             .focused_cpu
             .then_some(dashboard_v2::DashboardWidgetId::Cpu),
     );
-    let primary = [
-        if let Some(models) = live_models.as_ref() {
-            compose_live_cpu_model(models.cpu(), context)
-        } else {
-            compose_cpu(state, context)
-        },
-        if let Some(models) = live_models.as_ref() {
-            compose_live_memory(models.memory(), context)
-        } else {
-            compose_memory(state, context)
-        },
-        if let Some(models) = live_models.as_ref() {
-            compose_live_gpu(models.gpu(), context)
-        } else {
-            compose_gpu(state, context)
-        },
-        if let Some(models) = live_models.as_ref() {
-            compose_live_network(models.network(), context)
-        } else {
-            compose_network(state, context)
-        },
-        if let Some(models) = live_models.as_ref() {
-            compose_live_storage(models.storage(), context)
-        } else {
-            compose_storage(state, context)
-        },
-    ];
+    let primary = if let Some(models) = live_models.as_ref() {
+        [
+            compose_live_cpu_model(models.cpu(), context),
+            compose_live_memory(models.memory(), context),
+            compose_live_gpu(models.gpu(), context),
+            compose_live_network(models.network(), context),
+            compose_live_storage(models.storage(), context),
+        ]
+    } else if state.live_metrics {
+        // Live mode has no meaningful metric until the collector publishes a
+        // snapshot. Keep the surface honest instead of borrowing demo models.
+        [None; 5]
+    } else {
+        [
+            compose_cpu(state, context),
+            compose_memory(state, context),
+            compose_gpu(state, context),
+            compose_network(state, context),
+            compose_storage(state, context),
+        ]
+    };
     let inventory = live_models
         .as_ref()
         .map(|models| models.inventory().clone())
         .unwrap_or_default();
-    let content = DashboardV2Content::new(
-        primary,
-        state.scenario.pulse_input(state.gpu_available),
-        dashboard_state,
-    )
-    .with_inventory(inventory)
-    .with_live_mode(state.live_metrics);
+    let pulse_input = live_models
+        .as_ref()
+        .map(live_pulse_input)
+        .unwrap_or_else(|| {
+            if state.live_metrics {
+                // A live frame without its first snapshot is intentionally
+                // quiet. It must not borrow the demo scenario while the
+                // instruments are still waiting for real data.
+                NormalizedPulseInput::default()
+            } else {
+                state.scenario.pulse_input(state.gpu_available)
+            }
+        });
+    let content = DashboardV2Content::new(primary, pulse_input, dashboard_state)
+        .with_inventory(inventory)
+        .with_live_mode(state.live_metrics);
     if state.live_metrics {
         content.with_system_context(live_system_context.cloned().unwrap_or_default())
     } else {
@@ -619,6 +622,38 @@ fn dashboard_state_for_models(models: &dashboard_v2::LiveMetricModels) -> Dashbo
     } else {
         DashboardState::Calm
     }
+}
+
+/// Keep Live Metrics honest at the Pulse boundary as well: the instruments
+/// and the ambient summary must consume the same prepared snapshot. The
+/// future health engine will replace this small projection with a richer
+/// interpretation without coupling the Pulse renderer to metric widgets.
+fn live_pulse_input(models: &dashboard_v2::LiveMetricModels) -> NormalizedPulseInput {
+    let cpu = models
+        .cpu()
+        .visual()
+        .primary()
+        .map_or(0.0, |value| value.value())
+        .clamp(0.0, 1.0) as f32;
+    let memory = models
+        .memory()
+        .visual()
+        .primary()
+        .map_or(0.0, |value| value.value())
+        .clamp(0.0, 1.0) as f32;
+    let gpu = models
+        .gpu()
+        .visual()
+        .primary()
+        .map(|value| value.value().clamp(0.0, 1.0) as f32);
+    let network_bytes_per_second = models
+        .network()
+        .download()
+        .zip(models.network().upload())
+        .map_or(0.0, |(download, upload)| download.value() + upload.value());
+    let network = (network_bytes_per_second / (100.0 * 1024.0 * 1024.0)).clamp(0.0, 1.0) as f32;
+
+    NormalizedPulseInput::try_new(cpu, memory, gpu, network, cpu, 0.0).unwrap_or_default()
 }
 
 fn cpu_live_sample_from_snapshot(snapshot: &SystemInfo) -> CpuLiveSample {
@@ -1128,12 +1163,24 @@ mod tests {
         let content = content(state, &live_metrics, None);
         let cpu = content.primary()[0].unwrap();
         assert_eq!(cpu.visual().primary().unwrap().value(), 0.635);
+        assert_eq!(content.pulse_input().cpu(), 0.635);
         assert_eq!(live_metrics.models().unwrap().cpu().cores(), 6);
         assert!(content.primary()[1].is_some());
         assert_eq!(
             content.primary()[2].unwrap().state(),
             dashboard_v2::WidgetState::Unavailable
         );
+    }
+
+    #[test]
+    fn live_mode_starts_with_a_quiet_pulse_until_real_metrics_arrive() {
+        let mut state = ViewerState::new();
+        state.live_metrics = true;
+        let content = content(state, &LiveMetricsHistory::new(), None);
+        assert_eq!(content.pulse_input(), NormalizedPulseInput::default());
+        assert!(content.primary().iter().all(|model| {
+            model.is_some_and(|model| model.state() == dashboard_v2::WidgetState::Unavailable)
+        }));
     }
 
     #[test]
@@ -1278,7 +1325,7 @@ mod tests {
         assert!(text.contains("931.5 GB"));
         assert!(text.contains("6 physical"));
         assert!(text.contains("no live events"));
-        assert!(text.contains("not connected"));
+        assert!(text.contains("no live processes"));
         assert!(!text.contains("browser"));
         assert!(!text.contains("compiler"));
     }

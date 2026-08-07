@@ -182,16 +182,32 @@ fn memory_context_line(context: &super::super::MemoryContextBlock, width: u16) -
         }
         _ => None,
     };
-    let candidates = [
-        full,
-        join(available.as_deref(), pressure.as_deref()),
-        join(available.as_deref(), swap.as_deref()),
-        join(pressure.as_deref(), swap.as_deref()),
-        available.clone(),
-        pressure.clone(),
-        swap.clone(),
-        cache.clone(),
-    ];
+    // Active swap is a diagnostic signal, not just another context token.
+    // Prefer it over a long availability label so the instrument answers the
+    // more urgent question first while remaining compact.
+    let candidates = if swap.is_some() {
+        [
+            join(available.as_deref(), swap.as_deref()),
+            join(swap.as_deref(), pressure.as_deref()),
+            join(swap.as_deref(), cache.as_deref()),
+            full,
+            join(available.as_deref(), pressure.as_deref()),
+            available.clone(),
+            pressure.clone(),
+            swap.clone(),
+        ]
+    } else {
+        [
+            full,
+            join(available.as_deref(), pressure.as_deref()),
+            join(available.as_deref(), cache.as_deref()),
+            available.clone(),
+            pressure.clone(),
+            cache.clone(),
+            None,
+            None,
+        ]
+    };
     candidates
         .into_iter()
         .flatten()
@@ -400,15 +416,20 @@ fn write_flow_value(
 }
 
 fn network_inventory_label(inventory: &HardwareInventory) -> Option<String> {
-    let physical = inventory
+    let mut count = 0usize;
+    let mut first = None;
+    for network in inventory
         .networks
         .iter()
         .filter(|network| !is_loopback(&network.name))
-        .collect::<Vec<_>>();
-    match physical.as_slice() {
-        [] => Some("no physical interface".to_owned()),
-        [network] => Some(network.name.clone()),
-        _ => Some(format!("{} interfaces", physical.len())),
+    {
+        count += 1;
+        first = first.or(Some(network.name.as_str()));
+    }
+    match (count, first) {
+        (0, _) => Some("no physical interface".to_owned()),
+        (1, Some(name)) => Some(name.to_owned()),
+        (count, _) => Some(format!("{count} interfaces")),
     }
 }
 
@@ -447,7 +468,7 @@ fn render_storage(
             .map(|(used, total)| used.value() / total.value().max(1.0))
             .or_else(|| model.visual().primary().map(|value| value.value()));
         render_segmented_meter(
-            line(body, 2),
+            line(body, 1),
             fraction.unwrap_or(0.0),
             theme.chart_primary,
             theme,
@@ -765,7 +786,8 @@ fn render_storage_inventory(
                 theme,
                 buffer,
             );
-        } else if rows_per_device == 3 {
+        }
+        if rows_per_device == 3 {
             let activity = storage_activity(device);
             if !activity.is_empty() {
                 write_rich_context(

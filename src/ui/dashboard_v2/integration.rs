@@ -1188,11 +1188,12 @@ fn render_temperature_row(
         .width
         .saturating_sub(label_width.saturating_add(value_width).saturating_add(2));
     let y = area.y.saturating_add(row);
-    buffer.set_stringn(
+    write_truncated(
+        buffer,
         area.x,
         y,
         label,
-        usize::from(label_width),
+        label_width,
         Style::default().fg(theme.text_muted).bg(theme.surface),
     );
     if let Some(value) = value {
@@ -1236,7 +1237,14 @@ fn render_processes(
     }
     if let Some(context) = system_context {
         if context.processes.is_empty() {
-            write_panel_row(area, 3, "not connected", theme.text_muted, theme, buffer);
+            write_panel_row(
+                area,
+                3,
+                "no live processes",
+                theme.text_muted,
+                theme,
+                buffer,
+            );
             return;
         }
         let visible_rows = usize::from(area.height.saturating_sub(3));
@@ -1322,11 +1330,12 @@ fn render_process_row(
     let cpu_x = area.right().saturating_sub(memory_width + cpu_width);
     let memory_x = area.right().saturating_sub(memory_width);
     let y = area.y.saturating_add(row);
-    buffer.set_stringn(
+    write_truncated(
+        buffer,
         area.x,
         y,
         name,
-        usize::from(cpu_x.saturating_sub(area.x).saturating_sub(1)),
+        cpu_x.saturating_sub(area.x).saturating_sub(1),
         Style::default().fg(theme.text).bg(theme.surface),
     );
     buffer.set_stringn(
@@ -1504,6 +1513,31 @@ fn write_panel_row(
             usize::from(area.width),
             Style::default().fg(color).bg(theme.surface),
         );
+    }
+}
+
+/// Keep measurement columns intact while making long diagnostic labels
+/// legible. A plain `set_stringn` silently cuts names at the column edge;
+/// this preserves the table grid and communicates that text was shortened.
+fn write_truncated(buffer: &mut Buffer, x: u16, y: u16, text: &str, width: u16, style: Style) {
+    if width == 0 {
+        return;
+    }
+    let width = usize::from(width);
+    let truncated = text.chars().nth(width).is_some();
+    let mut chars = text.chars();
+    for column in 0..width {
+        let character = if truncated && column + 1 == width {
+            '…'
+        } else {
+            chars.next().unwrap_or(' ')
+        };
+        buffer[(
+            x.saturating_add(u16::try_from(column).unwrap_or(u16::MAX)),
+            y,
+        )]
+            .set_char(character)
+            .set_style(style);
     }
 }
 
@@ -1930,5 +1964,21 @@ mod tests {
                 .contains(ratatui::style::Modifier::BOLD)
         );
         assert_eq!(buffer[(0, 3)].fg, theme.text_muted);
+    }
+
+    #[test]
+    fn long_diagnostic_labels_preserve_the_measurement_columns() {
+        let theme = Theme::pulse();
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 32, 1));
+        write_truncated(
+            &mut buffer,
+            0,
+            0,
+            "a-process-with-a-long-name",
+            12,
+            context_label_style(&theme),
+        );
+        assert_eq!(buffer[(11, 0)].symbol(), "…");
+        assert_eq!(buffer[(12, 0)].symbol(), " ");
     }
 }
