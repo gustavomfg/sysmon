@@ -271,6 +271,8 @@ mod tests {
             kernel: "6.x".to_string(),
             cpu_name: "Test CPU".to_string(),
             cpu_cores: 8,
+            cpu_physical_cores: None,
+            cpu_logical_threads: 8,
             cpu_usage: 42.0,
             cpu_frequency_hz: None,
             cpu_temperature_celsius: None,
@@ -282,9 +284,12 @@ mod tests {
             uptime: 90_061,
             load_average: (0.5, 0.4, 0.3),
             disks: Vec::new(),
+            storage_devices: Vec::new(),
             processes_list: Vec::new(),
             gpus: Vec::new(),
             networks: Vec::new(),
+            all_networks: Vec::new(),
+            temperatures: Vec::new(),
         }
     }
 

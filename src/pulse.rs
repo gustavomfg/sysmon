@@ -420,6 +420,8 @@ mod tests {
             kernel: "Test".to_string(),
             cpu_name: "Test".to_string(),
             cpu_cores: 4,
+            cpu_physical_cores: None,
+            cpu_logical_threads: 4,
             cpu_usage,
             cpu_frequency_hz: None,
             cpu_temperature_celsius: None,
@@ -431,9 +433,12 @@ mod tests {
             uptime: 0,
             load_average: (1.0, 0.0, 0.0),
             disks: Vec::new(),
+            storage_devices: Vec::new(),
             processes_list: Vec::new(),
             gpus: Vec::new(),
             networks: Vec::new(),
+            all_networks: Vec::new(),
+            temperatures: Vec::new(),
         }
     }
 }
