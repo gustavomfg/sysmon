@@ -1,11 +1,13 @@
 mod chart;
 mod engine;
+mod health;
 mod integration;
 mod inventory;
 mod layout;
 mod live_cpu;
 mod live_metrics;
 mod metrics;
+mod pulse_behavior;
 mod regions;
 mod render;
 mod terminal;
@@ -24,6 +26,11 @@ pub use chart::{
 };
 #[allow(unused_imports)]
 pub use engine::{DashboardEngine, DashboardFrame};
+#[allow(unused_imports)]
+pub use health::{
+    ComponentHealth, HealthComponent, HealthEngine, HealthPolicy, HealthSeverity, HealthSignals,
+    HealthSnapshot, SystemHealth,
+};
 #[allow(unused_imports)]
 pub(crate) use integration::{
     DashboardProcessSummary, DashboardV2Content, DashboardV2RenderError, DashboardV2RenderSummary,
@@ -53,6 +60,8 @@ pub use metrics::{
     STORAGE_LATENCY_CRITICAL_SECONDS, STORAGE_LATENCY_WARNING_SECONDS, STORAGE_THRESHOLDS,
     StorageMetricInput, StorageMetricModel,
 };
+#[allow(unused_imports)]
+pub use pulse_behavior::{PulseBehavior, PulseBehaviorEngine};
 #[allow(unused_imports)]
 pub use regions::{DashboardComposition, DashboardPriority, DashboardRegion};
 #[allow(unused_imports)]

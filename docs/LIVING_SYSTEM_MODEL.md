@@ -102,7 +102,8 @@ Storage saturation during backups is expected.
 
 Health depends on context.
 
-Future versions may expose an explicit Health Engine responsible for converting subsystem conditions into Pulse behavior.
+The Health Engine converts those conditions into a bounded system state before
+the Pulse decides how to move.
 
 ---
 
@@ -115,3 +116,38 @@ Pulse summarizes.
 Metrics diagnose.
 
 Pulse communicates.
+
+## Health Interpretation
+
+The Dashboard V2 now introduces a small Health Engine between metric models
+and the Pulse boundary:
+
+```text
+Metric Models / History
+          ↓
+Component Health
+          ↓
+System Health
+          ↓
+Pulse Behavior
+          ↓
+Pulse Animation / Renderer
+```
+
+The engine keeps activity and pressure separate. High CPU, GPU or network
+activity is not automatically a health problem; memory pressure, storage
+capacity pressure and thermal pressure are interpreted independently.
+
+The interpretation is bounded and temporal. Rising pressure responds faster
+than recovery, so a single sample cannot make the organism jump directly from
+calm to critical or back again. Diagnostic instruments continue to consume
+the objective metric models unchanged.
+
+`PulseBehavior` translates aggregate activity, pressure, thermal pressure and
+instability into continuous rate, energy, tension, turbulence, density and
+recovery parameters. Its small attack/release controller keeps the Pulse
+alive at idle, responsive under activity and slower to relax after pressure.
+Within the existing Pulse V2 field contract, activity primarily changes
+cadence, source reorganization and energy, while pressure and thermal pressure
+primarily change intensity, compression and recovery. A busy but healthy
+workload can therefore look energetic without looking distressed.

@@ -10,6 +10,7 @@ use super::NormalizedPulseInput;
 /// the source of all visible organization.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct FieldDynamics {
+    activity: f32,
     intensity: f32,
     pressure: f32,
     rhythm: f32,
@@ -26,12 +27,14 @@ impl FieldDynamics {
         elapsed: Duration,
         reduced_motion: bool,
     ) -> Self {
-        let pressure = pressure(input);
-        let intensity = (pressure + input.volatility() * 0.10).clamp(0.0, 1.0);
+        let activity = physiological_activity(input);
+        let pressure = physiological_pressure(input);
+        let intensity =
+            (activity * 0.42 + pressure * 0.52 + input.volatility() * 0.06).clamp(0.0, 1.0);
         // This follows the V1 health-speed relationship, but is used only to
         // evolve the field's sources and transport, never as a frame-rate or
         // brightness multiplier.
-        let rhythm = 1.0 + intensity * 1.8 + input.volatility() * 0.45;
+        let rhythm = 1.0 + activity * 1.15 + pressure * 1.35 + input.volatility() * 0.40;
         let elapsed_seconds = if reduced_motion {
             0.0
         } else {
@@ -50,6 +53,7 @@ impl FieldDynamics {
         };
 
         Self {
+            activity,
             intensity,
             pressure,
             rhythm,
@@ -63,6 +67,10 @@ impl FieldDynamics {
 
     pub(crate) fn intensity(self) -> f32 {
         self.intensity
+    }
+
+    pub(crate) fn activity(self) -> f32 {
+        self.activity
     }
 
     pub(crate) fn pressure(self) -> f32 {
@@ -163,14 +171,22 @@ impl FieldDynamics {
     }
 }
 
-fn pressure(input: NormalizedPulseInput) -> f32 {
-    let base =
-        input.cpu() * 0.27 + input.memory() * 0.30 + input.network() * 0.10 + input.load() * 0.18;
-    match input.gpu() {
-        Some(gpu) => (base + gpu * 0.15).clamp(0.0, 1.0),
-        None => (base + input.cpu() * 0.04 + input.memory() * 0.08 + input.load() * 0.03)
-            .clamp(0.0, 1.0),
-    }
+pub(super) fn physiological_activity(input: NormalizedPulseInput) -> f32 {
+    (input.cpu() * 0.48
+        + input.gpu().unwrap_or(0.0) * 0.28
+        + input.network() * 0.10
+        + input.volatility() * 0.14)
+        .clamp(0.0, 1.0)
+}
+
+pub(super) fn physiological_pressure(input: NormalizedPulseInput) -> f32 {
+    (input.memory() * 0.45
+        + input.load() * 0.35
+        + input.cpu() * 0.08
+        + input.gpu().unwrap_or(0.0) * 0.05
+        + input.network() * 0.02
+        + input.volatility() * 0.05)
+        .clamp(0.0, 1.0)
 }
 
 pub(crate) fn interpolate_input(
@@ -227,5 +243,41 @@ mod tests {
         assert_eq!(end, target);
         assert!(middle.cpu() > from.cpu() && middle.cpu() < target.cpu());
         assert!(middle.gpu().is_some_and(|value| value > 0.0 && value < 0.7));
+    }
+
+    #[test]
+    fn activity_and_pressure_have_distinct_physiological_roles() {
+        let calm = NormalizedPulseInput::try_new(0.12, 0.08, Some(0.10), 0.04, 0.06, 0.02).unwrap();
+        let active =
+            NormalizedPulseInput::try_new(0.92, 0.10, Some(0.82), 0.18, 0.08, 0.12).unwrap();
+        let pressured =
+            NormalizedPulseInput::try_new(0.20, 0.92, Some(0.18), 0.04, 0.86, 0.10).unwrap();
+
+        let calm = FieldDynamics::new(calm, Duration::from_secs(2), false);
+        let active = FieldDynamics::new(active, Duration::from_secs(2), false);
+        let pressured = FieldDynamics::new(pressured, Duration::from_secs(2), false);
+
+        assert!(active.activity() > calm.activity());
+        assert!(active.activity() > pressured.activity());
+        assert!(active.pressure() < pressured.pressure());
+        assert!(active.rhythm() > calm.rhythm());
+        assert!(pressured.intensity() > active.intensity());
+    }
+
+    #[test]
+    fn physiological_signals_are_bounded_for_extreme_inputs() {
+        let input = NormalizedPulseInput::try_new(1.0, 1.0, Some(1.0), 1.0, 1.0, 1.0).unwrap();
+        let dynamics = FieldDynamics::new(input, Duration::from_secs(1), false);
+
+        for value in [
+            dynamics.activity(),
+            dynamics.intensity(),
+            dynamics.pressure(),
+        ] {
+            assert!(value.is_finite());
+            assert!((0.0..=1.0).contains(&value));
+        }
+        assert!(dynamics.rhythm().is_finite());
+        assert!((1.0..=3.9).contains(&dynamics.rhythm()));
     }
 }
