@@ -6,6 +6,11 @@ pub const REFRESH_RATES: [Duration; 3] = [
     Duration::from_secs(4),
 ];
 
+pub fn history_window(sample_count: usize, refresh_interval: Duration) -> Duration {
+    let sample_count = sample_count.min(u32::MAX as usize) as u32;
+    refresh_interval.saturating_mul(sample_count)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConfigField {
     Theme,
@@ -70,7 +75,9 @@ impl ConfigState {
 
 #[cfg(test)]
 mod tests {
-    use super::{ConfigField, ConfigState, REFRESH_RATES};
+    use std::time::Duration;
+
+    use super::{ConfigField, ConfigState, REFRESH_RATES, history_window};
 
     #[test]
     fn cycles_configuration_fields_and_defines_refresh_rates() {
@@ -82,5 +89,12 @@ mod tests {
         config.move_selection(-1);
         assert_eq!(config.selected(), ConfigField::Theme);
         assert_eq!(REFRESH_RATES.len(), 3);
+    }
+
+    #[test]
+    fn derives_history_window_for_each_refresh_rate() {
+        assert_eq!(history_window(60, Duration::from_secs(1)), Duration::from_secs(60));
+        assert_eq!(history_window(60, Duration::from_secs(2)), Duration::from_secs(120));
+        assert_eq!(history_window(60, Duration::from_secs(4)), Duration::from_secs(240));
     }
 }

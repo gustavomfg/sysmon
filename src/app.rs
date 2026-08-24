@@ -4,7 +4,7 @@ use crate::{
     action::Action,
     animation::Tween,
     command_palette::{Command, CommandPaletteState, CommandStatus},
-    config::{ConfigField, ConfigState, REFRESH_RATES},
+    config::{ConfigField, ConfigState, REFRESH_RATES, history_window},
     export,
     focus::{FocusState, FocusTarget},
     history::{History, Metric},
@@ -118,6 +118,13 @@ impl AppState {
 
     pub fn refresh_interval(&self) -> Duration {
         self.refresh_interval
+    }
+
+    pub fn history_window(&self) -> Duration {
+        history_window(
+            self.history.samples(Metric::Cpu).len(),
+            self.refresh_interval,
+        )
     }
 
     pub fn cpu_usage(&self) -> f64 {
@@ -515,6 +522,22 @@ mod tests {
         assert_eq!(samples.len(), HISTORY_LIMIT);
         assert_eq!(samples.first(), Some(&1.0));
         assert_eq!(samples.last(), Some(&(HISTORY_LIMIT as f64)));
+    }
+
+    #[test]
+    fn history_window_tracks_refresh_rate_for_the_recorded_samples() {
+        let mut app = AppState::new();
+        for sample in 0..HISTORY_LIMIT {
+            app.update(snapshot(sample as f32));
+        }
+
+        assert_eq!(app.history_window(), std::time::Duration::from_secs(60));
+
+        app.adjust_refresh_rate(1);
+        assert_eq!(app.history_window(), std::time::Duration::from_secs(120));
+
+        app.adjust_refresh_rate(1);
+        assert_eq!(app.history_window(), std::time::Duration::from_secs(240));
     }
 
     #[test]
