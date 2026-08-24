@@ -11,8 +11,17 @@ use sysinfo::{
     RefreshKind, System,
 };
 
-const DISK_LIST_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
+const PROCESS_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
+const DISK_IO_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
+const DISK_INVENTORY_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
+const DISK_METADATA_REFRESH_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const GPU_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
+const TOP_PROCESS_COUNT: usize = 5;
+
+struct DiskModelCacheEntry {
+    model: Option<String>,
+    refreshed_at: Instant,
+}
 
 pub struct SystemInfoCollector {
     system: System,
@@ -20,9 +29,14 @@ pub struct SystemInfoCollector {
     disks: Disks,
     gpus: GpuCollector,
     components: Components,
-    last_disk_list_refresh: Instant,
+    last_disk_inventory_refresh: Option<Instant>,
     last_disk_io_sample: Option<Instant>,
     last_network_refresh: Option<Instant>,
+    last_process_refresh: Option<Instant>,
+    cached_disks: Vec<DiskInfo>,
+    cached_storage_devices: Vec<DiskInfo>,
+    processes_list: Vec<ProcessInfo>,
+    disk_models: BTreeMap<String, DiskModelCacheEntry>,
 }
 
 #[derive(Debug, Clone)]
@@ -51,6 +65,7 @@ pub struct TemperatureInfo {
     pub celsius: Option<f64>,
 }
 
+#[derive(Debug, Clone)]
 pub struct ProcessInfo {
     pub name: String,
     pub memory: f64,
@@ -105,9 +120,14 @@ impl SystemInfoCollector {
             disks: Disks::new_with_refreshed_list(),
             gpus: GpuCollector::new(GPU_REFRESH_INTERVAL),
             components: Components::new_with_refreshed_list(),
-            last_disk_list_refresh: Instant::now(),
+            last_disk_inventory_refresh: None,
             last_disk_io_sample: None,
             last_network_refresh: None,
+            last_process_refresh: None,
+            cached_disks: Vec::new(),
+            cached_storage_devices: Vec::new(),
+            processes_list: Vec::new(),
+            disk_models: BTreeMap::new(),
         }
     }
 
@@ -120,111 +140,26 @@ impl SystemInfoCollector {
         self.networks.refresh(true);
         self.last_network_refresh = Some(collected_at);
 
-        self.system.refresh_specifics(system_refresh_kind());
+        let process_refresh_due = refresh_due(
+            self.last_process_refresh,
+            collected_at,
+            PROCESS_REFRESH_INTERVAL,
+        );
+        let mut refresh_kind = system_refresh_kind();
+        if process_refresh_due {
+            refresh_kind = refresh_kind.with_processes(process_refresh_kind());
+        }
+        self.system.refresh_specifics(refresh_kind);
+        if process_refresh_due {
+            self.refresh_processes(collected_at);
+        }
         self.components.refresh(false);
 
-        if self.last_disk_list_refresh.elapsed() >= DISK_LIST_REFRESH_INTERVAL {
-            self.disks.refresh(true);
-            self.last_disk_list_refresh = std::time::Instant::now();
-        } else {
-            for disk in self.disks.list_mut() {
-                disk.refresh();
-            }
-        }
+        self.refresh_disks_if_due(collected_at);
 
-        let disk_interval = self
-            .last_disk_io_sample
-            .map(|previous| collected_at.saturating_duration_since(previous));
-        let mut legacy_disks = Vec::new();
-        let mut grouped_disks = BTreeMap::<String, DiskInfo>::new();
-        let raw_disk_names = self
-            .disks
-            .iter()
-            .map(|disk| disk.name().to_string_lossy().to_string())
-            .collect::<BTreeSet<_>>();
-        let partitioned_devices = raw_disk_names
-            .iter()
-            .filter_map(|name| {
-                let id = physical_disk_id(name);
-                (id != *name).then_some(id)
-            })
-            .collect::<BTreeSet<_>>();
-        let mut seen_partition_names = BTreeSet::new();
-        for disk in self.disks.iter() {
-            let raw_name = disk.name().to_string_lossy().to_string();
-            let id = physical_disk_id(&raw_name);
-            let count_capacity = should_count_storage_sample(
-                &mut seen_partition_names,
-                &raw_name,
-                &id,
-                partitioned_devices.contains(&id),
-            );
-            let mount_point = disk.mount_point().to_string_lossy().to_string();
-            let total_space = disk.total_space() as f64 / 1024.0 / 1024.0 / 1024.0;
-            let available_space = disk.available_space() as f64 / 1024.0 / 1024.0 / 1024.0;
-            let usage = disk.usage();
-            legacy_disks.push(DiskInfo {
-                id: id.clone(),
-                name: raw_name,
-                model: read_disk_model(&id),
-                mount_point: mount_point.clone(),
-                mount_points: (!mount_point.is_empty())
-                    .then_some(vec![mount_point.clone()])
-                    .unwrap_or_default(),
-                total_space,
-                available_space,
-                is_virtual: id.starts_with("zram") || mount_point == "[SWAP]",
-                read_bytes_per_sec: bytes_per_second(usage.read_bytes, disk_interval),
-                written_bytes_per_sec: bytes_per_second(usage.written_bytes, disk_interval),
-            });
-            let entry = grouped_disks.entry(id.clone()).or_insert_with(|| DiskInfo {
-                id: id.clone(),
-                name: id.clone(),
-                model: read_disk_model(&id),
-                mount_point: mount_point.clone(),
-                mount_points: Vec::new(),
-                total_space: 0.0,
-                available_space: 0.0,
-                is_virtual: id.starts_with("zram") || mount_point == "[SWAP]",
-                read_bytes_per_sec: Some(0.0),
-                written_bytes_per_sec: Some(0.0),
-            });
-            if !mount_point.is_empty() && !entry.mount_points.contains(&mount_point) {
-                entry.mount_points.push(mount_point);
-            }
-            if count_capacity {
-                entry.total_space += total_space;
-                entry.available_space += available_space;
-                entry.read_bytes_per_sec = add_optional(
-                    entry.read_bytes_per_sec,
-                    bytes_per_second(usage.read_bytes, disk_interval),
-                );
-                entry.written_bytes_per_sec = add_optional(
-                    entry.written_bytes_per_sec,
-                    bytes_per_second(usage.written_bytes, disk_interval),
-                );
-            }
-        }
-        let storage_devices = grouped_disks.into_values().collect::<Vec<_>>();
-        self.last_disk_io_sample = Some(collected_at);
-
-        let mut processes_list = self
-            .system
-            .processes()
-            .values()
-            .map(|process| ProcessInfo {
-                name: process.name().to_string_lossy().to_string(),
-                memory: process.memory() as f64 / 1024.0 / 1024.0,
-                cpu_usage: process.cpu_usage(),
-            })
-            .collect::<Vec<ProcessInfo>>();
-
-        processes_list.sort_by(|a, b| b.memory.partial_cmp(&a.memory).unwrap_or(Ordering::Equal));
-
-        let load_average = System::load_average();
-
-        let cpu_frequency_hz = average_cpu_frequency_hz(&self.system);
         let temperatures = temperature_infos(&self.components);
+        let load_average = System::load_average();
+        let cpu_frequency_hz = average_cpu_frequency_hz(&self.system);
         let cpu_temperature_celsius = temperatures
             .iter()
             .filter(|sensor| {
@@ -253,17 +188,167 @@ impl SystemInfoCollector {
             used_ram: self.system.used_memory() as f64 / 1024.0 / 1024.0 / 1024.0,
             total_swap: self.system.total_swap() as f64 / 1024.0 / 1024.0 / 1024.0,
             used_swap: self.system.used_swap() as f64 / 1024.0 / 1024.0 / 1024.0,
-            processes: self.system.processes().len(),
+            processes: self.processes_list.len(),
             uptime: System::uptime(),
             load_average: (load_average.one, load_average.five, load_average.fifteen),
-            disks: legacy_disks,
-            storage_devices,
-            processes_list,
+            disks: self.cached_disks.clone(),
+            storage_devices: self.cached_storage_devices.clone(),
+            processes_list: self.processes_list.clone(),
             gpus: self.gpus.get().to_vec(),
             networks: NetworkInfo::get(&self.networks, network_interval),
             all_networks: NetworkInfo::get_all(&self.networks, network_interval),
             temperatures,
         }
+    }
+
+    fn refresh_disks_if_due(&mut self, collected_at: Instant) {
+        let inventory_due = refresh_due(
+            self.last_disk_inventory_refresh,
+            collected_at,
+            DISK_INVENTORY_REFRESH_INTERVAL,
+        );
+        let io_due = refresh_due(
+            self.last_disk_io_sample,
+            collected_at,
+            DISK_IO_REFRESH_INTERVAL,
+        );
+        if !inventory_due && !io_due {
+            return;
+        }
+
+        if inventory_due {
+            self.disks.refresh(true);
+            self.last_disk_inventory_refresh = Some(collected_at);
+        } else {
+            for disk in self.disks.list_mut() {
+                disk.refresh();
+            }
+        }
+
+        let disk_interval = self
+            .last_disk_io_sample
+            .map(|previous| collected_at.saturating_duration_since(previous));
+        let mut legacy_disks = Vec::new();
+        let mut grouped_disks = BTreeMap::<String, DiskInfo>::new();
+        let raw_disk_names = self
+            .disks
+            .iter()
+            .map(|disk| disk.name().to_string_lossy().to_string())
+            .collect::<BTreeSet<_>>();
+        let partitioned_devices = raw_disk_names
+            .iter()
+            .filter_map(|name| {
+                let id = physical_disk_id(name);
+                (id != *name).then_some(id)
+            })
+            .collect::<BTreeSet<_>>();
+        let current_disk_ids = raw_disk_names
+            .iter()
+            .map(|name| physical_disk_id(name))
+            .collect::<BTreeSet<_>>();
+        self.disk_models
+            .retain(|id, _| current_disk_ids.contains(id));
+        for id in &current_disk_ids {
+            let _ = self.cached_disk_model(id, collected_at);
+        }
+        let mut seen_partition_names = BTreeSet::new();
+        for disk in self.disks.iter() {
+            let raw_name = disk.name().to_string_lossy().to_string();
+            let id = physical_disk_id(&raw_name);
+            let count_capacity = should_count_storage_sample(
+                &mut seen_partition_names,
+                &raw_name,
+                &id,
+                partitioned_devices.contains(&id),
+            );
+            let mount_point = disk.mount_point().to_string_lossy().to_string();
+            let total_space = disk.total_space() as f64 / 1024.0 / 1024.0 / 1024.0;
+            let available_space = disk.available_space() as f64 / 1024.0 / 1024.0 / 1024.0;
+            let usage = disk.usage();
+            let model = self
+                .disk_models
+                .get(&id)
+                .and_then(|entry| entry.model.clone());
+            legacy_disks.push(DiskInfo {
+                id: id.clone(),
+                name: raw_name,
+                model: model.clone(),
+                mount_point: mount_point.clone(),
+                mount_points: (!mount_point.is_empty())
+                    .then_some(vec![mount_point.clone()])
+                    .unwrap_or_default(),
+                total_space,
+                available_space,
+                is_virtual: id.starts_with("zram") || mount_point == "[SWAP]",
+                read_bytes_per_sec: bytes_per_second(usage.read_bytes, disk_interval),
+                written_bytes_per_sec: bytes_per_second(usage.written_bytes, disk_interval),
+            });
+            let entry = grouped_disks.entry(id.clone()).or_insert_with(|| DiskInfo {
+                id: id.clone(),
+                name: id.clone(),
+                model,
+                mount_point: mount_point.clone(),
+                mount_points: Vec::new(),
+                total_space: 0.0,
+                available_space: 0.0,
+                is_virtual: id.starts_with("zram") || mount_point == "[SWAP]",
+                read_bytes_per_sec: Some(0.0),
+                written_bytes_per_sec: Some(0.0),
+            });
+            if !mount_point.is_empty() && !entry.mount_points.contains(&mount_point) {
+                entry.mount_points.push(mount_point);
+            }
+            if count_capacity {
+                entry.total_space += total_space;
+                entry.available_space += available_space;
+                entry.read_bytes_per_sec = add_optional(
+                    entry.read_bytes_per_sec,
+                    bytes_per_second(usage.read_bytes, disk_interval),
+                );
+                entry.written_bytes_per_sec = add_optional(
+                    entry.written_bytes_per_sec,
+                    bytes_per_second(usage.written_bytes, disk_interval),
+                );
+            }
+        }
+        self.cached_disks = legacy_disks;
+        self.cached_storage_devices = grouped_disks.into_values().collect::<Vec<_>>();
+        self.last_disk_io_sample = Some(collected_at);
+    }
+
+    fn refresh_processes(&mut self, collected_at: Instant) {
+        let mut processes = self
+            .system
+            .processes()
+            .values()
+            .map(|process| ProcessInfo {
+                name: process.name().to_string_lossy().to_string(),
+                memory: process.memory() as f64 / 1024.0 / 1024.0,
+                cpu_usage: process.cpu_usage(),
+            })
+            .collect::<Vec<ProcessInfo>>();
+        sort_processes_for_dashboard(&mut processes);
+        self.processes_list = processes;
+        self.last_process_refresh = Some(collected_at);
+    }
+
+    fn cached_disk_model(&mut self, id: &str, collected_at: Instant) -> Option<String> {
+        let should_refresh = self.disk_models.get(id).is_none_or(|entry| {
+            collected_at.saturating_duration_since(entry.refreshed_at)
+                >= DISK_METADATA_REFRESH_INTERVAL
+        });
+        if should_refresh {
+            self.disk_models.insert(
+                id.to_owned(),
+                DiskModelCacheEntry {
+                    model: read_disk_model(id),
+                    refreshed_at: collected_at,
+                },
+            );
+        }
+        self.disk_models
+            .get(id)
+            .and_then(|entry| entry.model.clone())
     }
 }
 
@@ -271,7 +356,33 @@ fn system_refresh_kind() -> RefreshKind {
     RefreshKind::nothing()
         .with_cpu(CpuRefreshKind::nothing().with_cpu_usage().with_frequency())
         .with_memory(MemoryRefreshKind::everything())
-        .with_processes(ProcessRefreshKind::nothing().with_cpu().with_memory())
+}
+
+fn process_refresh_kind() -> ProcessRefreshKind {
+    ProcessRefreshKind::nothing().with_cpu().with_memory()
+}
+
+fn refresh_due(last_refresh: Option<Instant>, now: Instant, interval: Duration) -> bool {
+    last_refresh.is_none_or(|previous| now.saturating_duration_since(previous) >= interval)
+}
+
+fn sort_processes_for_dashboard(processes: &mut [ProcessInfo]) {
+    let top_count = TOP_PROCESS_COUNT.min(processes.len());
+    if top_count == 0 {
+        return;
+    }
+
+    // Keep every process available to search while only fully ordering the rows shown by the UI.
+    processes.select_nth_unstable_by(top_count - 1, compare_processes);
+    processes[..top_count].sort_unstable_by(compare_processes);
+}
+
+fn compare_processes(left: &ProcessInfo, right: &ProcessInfo) -> Ordering {
+    right
+        .memory
+        .partial_cmp(&left.memory)
+        .unwrap_or(Ordering::Equal)
+        .then_with(|| left.name.cmp(&right.name))
 }
 
 fn average_cpu_frequency_hz(system: &System) -> Option<f64> {
@@ -434,8 +545,8 @@ mod tests {
     use std::collections::BTreeSet;
 
     use super::{
-        human_temperature_label, physical_disk_id, should_count_storage_sample,
-        temperature_priority,
+        ProcessInfo, human_temperature_label, physical_disk_id, should_count_storage_sample,
+        sort_processes_for_dashboard, temperature_priority,
     };
 
     #[test]
@@ -469,5 +580,51 @@ mod tests {
         assert_eq!(human_temperature_label("Composite"), "NVMe");
         assert!(temperature_priority("CPU Package") < temperature_priority("AMD GPU"));
         assert!(temperature_priority("AMD GPU") < temperature_priority("NVMe"));
+    }
+
+    #[test]
+    fn keeps_all_processes_but_orders_only_the_dashboard_top_k() {
+        let mut processes = vec![
+            ProcessInfo {
+                name: "small".to_owned(),
+                memory: 1.0,
+                cpu_usage: 0.0,
+            },
+            ProcessInfo {
+                name: "largest".to_owned(),
+                memory: 6.0,
+                cpu_usage: 0.0,
+            },
+            ProcessInfo {
+                name: "second".to_owned(),
+                memory: 5.0,
+                cpu_usage: 0.0,
+            },
+            ProcessInfo {
+                name: "third".to_owned(),
+                memory: 4.0,
+                cpu_usage: 0.0,
+            },
+            ProcessInfo {
+                name: "fourth".to_owned(),
+                memory: 3.0,
+                cpu_usage: 0.0,
+            },
+            ProcessInfo {
+                name: "fifth".to_owned(),
+                memory: 2.0,
+                cpu_usage: 0.0,
+            },
+        ];
+
+        sort_processes_for_dashboard(&mut processes);
+
+        assert_eq!(processes.len(), 6);
+        let top_names = processes[..5]
+            .iter()
+            .map(|process| process.name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(top_names, ["largest", "second", "third", "fourth", "fifth"]);
+        assert!(processes.iter().any(|process| process.name == "small"));
     }
 }

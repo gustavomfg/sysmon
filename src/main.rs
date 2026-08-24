@@ -16,7 +16,10 @@ mod widget;
 
 use std::{
     io,
-    sync::mpsc::{self, Receiver, Sender, TryRecvError},
+    sync::{
+        Arc, Mutex,
+        mpsc::{self, Receiver, Sender},
+    },
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
@@ -43,6 +46,16 @@ struct TerminalGuard;
 enum CollectorCommand {
     SetInterval(Duration),
     Stop,
+}
+
+struct SnapshotSlot {
+    latest: Arc<Mutex<Option<SystemInfo>>>,
+}
+
+impl SnapshotSlot {
+    fn take(&self) -> Option<SystemInfo> {
+        self.latest.lock().ok()?.take()
+    }
 }
 
 struct CollectorWorker {
@@ -192,15 +205,9 @@ fn run_app(
     loop {
         let now = Instant::now();
         let mut received_snapshot = false;
-        loop {
-            match snapshots.try_recv() {
-                Ok(info) => {
-                    app.update(info);
-                    received_snapshot = true;
-                }
-                Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Disconnected) => break,
-            }
+        if let Some(info) = snapshots.take() {
+            app.update(info);
+            received_snapshot = true;
         }
         if received_snapshot {
             render_pending = true;
@@ -262,15 +269,23 @@ fn run_app(
 fn spawn_collector(
     mut collector: SystemInfoCollector,
     interval: Duration,
-) -> (Receiver<SystemInfo>, CollectorWorker) {
-    let (snapshot_sender, snapshot_receiver) = mpsc::channel();
+) -> (SnapshotSlot, CollectorWorker) {
+    let latest_snapshot = Arc::new(Mutex::new(None));
+    let collector_snapshot = Arc::clone(&latest_snapshot);
     let (command_sender, command_receiver) = mpsc::channel();
     let handle = thread::spawn(move || {
-        collection_loop(&mut collector, snapshot_sender, command_receiver, interval);
+        collection_loop(
+            &mut collector,
+            collector_snapshot,
+            command_receiver,
+            interval,
+        );
     });
 
     (
-        snapshot_receiver,
+        SnapshotSlot {
+            latest: latest_snapshot,
+        },
         CollectorWorker {
             commands: command_sender,
             handle: Some(handle),
@@ -280,7 +295,7 @@ fn spawn_collector(
 
 fn collection_loop(
     collector: &mut SystemInfoCollector,
-    snapshots: Sender<SystemInfo>,
+    latest_snapshot: Arc<Mutex<Option<SystemInfo>>>,
     commands: Receiver<CollectorCommand>,
     initial_interval: Duration,
 ) {
@@ -298,9 +313,10 @@ fn collection_loop(
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 let collected_at = Instant::now();
                 let snapshot = collector.collect(collected_at);
-                if snapshots.send(snapshot).is_err() {
+                let Ok(mut latest_snapshot) = latest_snapshot.lock() else {
                     break;
-                }
+                };
+                *latest_snapshot = Some(snapshot);
                 next_collection = collected_at + interval;
             }
         }
