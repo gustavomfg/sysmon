@@ -1,14 +1,19 @@
 use std::time::{Duration, Instant};
 
-use super::HardwareInventory;
+use crate::system::info::SystemInfo;
+
 use super::chart::{ChartError, TimeSample, TimeSeries};
 use super::metrics::{
     CpuMetricModel, GpuMetricInput, GpuMetricModel, MemoryMetricInput, MemoryMetricModel,
     MetricModelError, MetricReading, NetworkMetricInput, NetworkMetricModel, StorageMetricInput,
     StorageMetricModel,
 };
-use super::visual::{MetricAvailability, MetricUnit};
+use super::visual::MetricUnit;
 use super::{CpuLiveHistory, CpuLiveSample};
+use super::{
+    GpuDevice, HardwareId, HardwareInventory, HardwareKind, MetricAvailability, NetworkInterface,
+    StorageDevice, TemperatureSensor,
+};
 
 /// Two minutes of one-second samples keeps the metric models' medium window
 /// close to the requested sixty-second visual history.
@@ -45,6 +50,127 @@ pub struct LiveSnapshot {
     pub upload_bytes_per_sec: Option<f64>,
     pub storage: Option<LiveStorageSnapshot>,
     pub hardware: HardwareInventory,
+}
+
+impl LiveSnapshot {
+    pub fn from_system_info(snapshot: &SystemInfo) -> Self {
+        let gpus = snapshot
+            .gpus
+            .iter()
+            .filter_map(|gpu| {
+                Some(GpuDevice {
+                    id: HardwareId::new(HardwareKind::Gpu, gpu.id.clone())?,
+                    name: gpu.name.clone(),
+                    utilization_percent: gpu
+                        .usage_percent
+                        .or_else(|| parse_percent(&gpu.usage))
+                        .and_then(valid_percent),
+                    vram_used_bytes: finite_non_negative(gpu.vram_used_bytes),
+                    vram_total_bytes: finite_non_negative(gpu.vram_total_bytes),
+                    temperature_celsius: finite_non_negative(gpu.temperature_celsius),
+                    frequency_hz: finite_non_negative(gpu.frequency_hz),
+                    power_watts: finite_non_negative(gpu.power_watts),
+                    availability: MetricAvailability::Available,
+                })
+            })
+            .collect::<Vec<_>>();
+        let storages = snapshot
+            .storage_devices
+            .iter()
+            .filter(|disk| !disk.is_virtual)
+            .filter_map(|disk| {
+                Some(StorageDevice {
+                    id: HardwareId::new(HardwareKind::Storage, disk.id.clone())?,
+                    name: disk.name.clone(),
+                    model: disk.model.clone(),
+                    mount_points: disk.mount_points.clone(),
+                    used_bytes: finite_non_negative(Some(
+                        (disk.total_space - disk.available_space).max(0.0) * GIBIBYTE,
+                    )),
+                    total_bytes: finite_non_negative(Some(disk.total_space.max(0.0) * GIBIBYTE)),
+                    read_bytes_per_sec: finite_non_negative(disk.read_bytes_per_sec),
+                    write_bytes_per_sec: finite_non_negative(disk.written_bytes_per_sec),
+                    latency_seconds: None,
+                    availability: MetricAvailability::Available,
+                    is_virtual: false,
+                })
+            })
+            .collect::<Vec<_>>();
+        let networks = snapshot
+            .all_networks
+            .iter()
+            .filter_map(|network| {
+                Some(NetworkInterface {
+                    id: HardwareId::new(HardwareKind::Network, network.id.clone())?,
+                    name: network.interface.clone(),
+                    download_bytes_per_sec: finite_non_negative(Some(
+                        network.received_per_sec * 1_000_000.0,
+                    )),
+                    upload_bytes_per_sec: finite_non_negative(Some(
+                        network.transmitted_per_sec * 1_000_000.0,
+                    )),
+                    availability: MetricAvailability::Available,
+                })
+            })
+            .collect::<Vec<_>>();
+        let temperatures = snapshot
+            .temperatures
+            .iter()
+            .filter_map(|sensor| {
+                Some(TemperatureSensor {
+                    id: HardwareId::new(HardwareKind::Temperature, sensor.id.clone())?,
+                    label: sensor.label.clone(),
+                    celsius: finite_non_negative(sensor.celsius),
+                    availability: MetricAvailability::Available,
+                })
+            })
+            .collect::<Vec<_>>();
+        let hardware = HardwareInventory::new(storages, gpus, networks, temperatures);
+        let gpu = hardware.gpus.first().map(|gpu| LiveGpuSnapshot {
+            utilization_percent: gpu.utilization_percent,
+            vram_used_bytes: finite_non_negative(gpu.vram_used_bytes),
+            vram_total_bytes: finite_non_negative(gpu.vram_total_bytes),
+            temperature_celsius: finite_non_negative(gpu.temperature_celsius),
+            frequency_hz: finite_non_negative(gpu.frequency_hz),
+            power_watts: finite_non_negative(gpu.power_watts),
+        });
+        let storage = hardware.storages.first().map(|disk| LiveStorageSnapshot {
+            used_bytes: disk.used_bytes,
+            total_bytes: disk.total_bytes,
+            read_bytes_per_sec: disk.read_bytes_per_sec,
+            write_bytes_per_sec: disk.write_bytes_per_sec,
+        });
+        let (download, upload) = snapshot
+            .all_networks
+            .iter()
+            .filter(|network| !is_loopback_interface(&network.interface))
+            .fold((0.0, 0.0), |(down, up), network| {
+                (
+                    down + network.received_per_sec * 1_000_000.0,
+                    up + network.transmitted_per_sec * 1_000_000.0,
+                )
+            });
+
+        Self {
+            cpu: CpuLiveSample {
+                utilization_percent: valid_percent(f64::from(snapshot.cpu_usage)),
+                frequency_hz: finite_non_negative(snapshot.cpu_frequency_hz),
+                temperature_celsius: finite_non_negative(snapshot.cpu_temperature_celsius),
+                cores: snapshot.cpu_physical_cores.unwrap_or(snapshot.cpu_cores),
+            },
+            memory_used_bytes: finite_non_negative(Some(snapshot.used_ram * GIBIBYTE)),
+            memory_available_bytes: finite_non_negative(Some(
+                (snapshot.total_ram - snapshot.used_ram).max(0.0) * GIBIBYTE,
+            )),
+            memory_total_bytes: finite_non_negative(Some(snapshot.total_ram * GIBIBYTE)),
+            memory_swap_bytes: finite_non_negative(Some(snapshot.used_swap * GIBIBYTE)),
+            gpu,
+            download_bytes_per_sec: Some(download),
+            upload_bytes_per_sec: Some(upload),
+            storage,
+            hardware,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -407,6 +533,23 @@ fn finite_percent(value: Option<f64>) -> Option<f64> {
 
 fn finite_non_negative(value: Option<f64>) -> Option<f64> {
     value.filter(|value| value.is_finite() && *value >= 0.0)
+}
+
+const GIBIBYTE: f64 = 1024.0 * 1024.0 * 1024.0;
+
+fn parse_percent(value: &str) -> Option<f64> {
+    value.trim_end_matches('%').trim().parse::<f64>().ok()
+}
+
+fn valid_percent(value: f64) -> Option<f64> {
+    value
+        .is_finite()
+        .then_some(value)
+        .filter(|value| (0.0..=100.0).contains(value))
+}
+
+fn is_loopback_interface(name: &str) -> bool {
+    name == "lo" || name.starts_with("lo:")
 }
 
 #[cfg(test)]

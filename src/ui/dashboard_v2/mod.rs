@@ -1,3 +1,5 @@
+#![allow(dead_code, unused_imports)]
+
 mod chart;
 mod engine;
 mod health;
@@ -31,8 +33,7 @@ pub use health::{
     ComponentHealth, HealthComponent, HealthEngine, HealthPolicy, HealthSeverity, HealthSignals,
     HealthSnapshot, SystemHealth,
 };
-#[allow(unused_imports)]
-pub(crate) use integration::{
+pub use integration::{
     DashboardProcessSummary, DashboardV2Content, DashboardV2RenderError, DashboardV2RenderSummary,
     DashboardV2Renderer, DashboardV2SystemContext,
 };
@@ -91,3 +92,10 @@ pub use widget::{
 };
 #[allow(unused_imports)]
 pub use widgets::PrimaryWidget;
+
+pub use crate::pulse_v2::{
+    ColorRasterCell, ColorRasterFrame, CoordinateError, DimensionsError, FieldDimensions,
+    FieldError, InputError, LightingField, LightingSample, NormalizedPoint, NormalizedPulseInput,
+    PulseV2Engine, PulseV2Frame, PulseV2InputTransition, PulseV2Preset, PulseV2Rasterizer,
+    SemanticColorField, SemanticColorSample,
+};

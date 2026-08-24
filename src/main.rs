@@ -1,19 +1,3 @@
-mod action;
-mod animation;
-mod app;
-mod command_palette;
-mod config;
-mod export;
-mod focus;
-mod history;
-mod process_search;
-mod pulse;
-mod system;
-mod theme;
-mod timeline;
-mod ui;
-mod widget;
-
 use std::{
     io,
     sync::{
@@ -24,9 +8,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-use action::Action;
-use app::AppState;
-
 use crossterm::{
     cursor::Show,
     event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
@@ -36,7 +17,7 @@ use crossterm::{
 
 use ratatui::{Terminal, backend::CrosstermBackend};
 
-use system::info::{SystemInfo, SystemInfoCollector};
+use sysmon::{SystemInfo, SystemInfoCollector, ui::dashboard::DashboardApp};
 
 const COLLECTOR_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(750);
 const COLLECTOR_SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(5);
@@ -46,16 +27,15 @@ const SNAPSHOT_POLL_INTERVAL: Duration = Duration::from_millis(50);
 struct TerminalGuard;
 
 enum CollectorCommand {
-    SetInterval(Duration),
     Stop,
 }
 
 struct SnapshotSlot {
-    latest: Arc<Mutex<Option<SystemInfo>>>,
+    latest: Arc<Mutex<Option<(Instant, SystemInfo)>>>,
 }
 
 impl SnapshotSlot {
-    fn take(&self) -> Option<SystemInfo> {
+    fn take(&self) -> Option<(Instant, SystemInfo)> {
         self.latest.lock().ok()?.take()
     }
 }
@@ -63,12 +43,6 @@ impl SnapshotSlot {
 struct CollectorWorker {
     commands: Sender<CollectorCommand>,
     handle: Option<JoinHandle<()>>,
-}
-
-impl CollectorWorker {
-    fn set_interval(&self, interval: Duration) {
-        let _ = self.commands.send(CollectorCommand::SetInterval(interval));
-    }
 }
 
 impl Drop for CollectorWorker {
@@ -107,75 +81,17 @@ impl Drop for TerminalGuard {
     }
 }
 
-fn action_for_event(
-    event: Event,
-    palette_open: bool,
-    process_search_open: bool,
-    config_open: bool,
-    focus_active: bool,
-) -> Option<Action> {
+fn should_quit(event: Event) -> bool {
     let Event::Key(key) = event else {
-        return None;
+        return false;
     };
 
     if key.kind != KeyEventKind::Press {
-        return None;
+        return false;
     }
 
-    if palette_open {
-        return match key.code {
-            KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                Some(Action::ClosePalette)
-            }
-            KeyCode::Esc => Some(Action::ClosePalette),
-            KeyCode::Up => Some(Action::PaletteUp),
-            KeyCode::Down => Some(Action::PaletteDown),
-            KeyCode::Backspace => Some(Action::PaletteBackspace),
-            KeyCode::Enter => Some(Action::PaletteSubmit),
-            KeyCode::Char(character) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                Some(Action::PaletteCharacter(character))
-            }
-            _ => None,
-        };
-    }
-
-    if process_search_open {
-        return match key.code {
-            KeyCode::Esc => Some(Action::CloseProcessSearch),
-            KeyCode::Up => Some(Action::ProcessSearchUp),
-            KeyCode::Down => Some(Action::ProcessSearchDown),
-            KeyCode::Backspace => Some(Action::ProcessSearchBackspace),
-            KeyCode::Enter => Some(Action::ProcessSearchSubmit),
-            KeyCode::Char(character) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                Some(Action::ProcessSearchCharacter(character))
-            }
-            _ => None,
-        };
-    }
-
-    if config_open {
-        return match key.code {
-            KeyCode::Esc => Some(Action::CloseConfig),
-            KeyCode::Up => Some(Action::ConfigUp),
-            KeyCode::Down => Some(Action::ConfigDown),
-            KeyCode::Left => Some(Action::ConfigPrevious),
-            KeyCode::Right => Some(Action::ConfigNext),
-            KeyCode::Enter => Some(Action::ConfigToggle),
-            _ => None,
-        };
-    }
-
-    match key.code {
-        KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            Some(Action::OpenPalette)
-        }
-        KeyCode::Tab => Some(Action::FocusNext),
-        KeyCode::BackTab => Some(Action::FocusPrevious),
-        KeyCode::Esc if focus_active => Some(Action::ExitFocus),
-        KeyCode::Esc | KeyCode::Char('q') => Some(Action::Quit),
-        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => Some(Action::Quit),
-        _ => None,
-    }
+    matches!(key.code, KeyCode::Esc | KeyCode::Char('q'))
+        || (key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL))
 }
 
 fn main() -> io::Result<()> {
@@ -186,7 +102,7 @@ fn main() -> io::Result<()> {
     terminal.clear()?;
 
     let collector = SystemInfoCollector::new();
-    let mut app = AppState::new();
+    let mut app = DashboardApp::new();
 
     run_app(&mut terminal, collector, &mut app)
 }
@@ -194,28 +110,22 @@ fn main() -> io::Result<()> {
 fn run_app(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     collector: SystemInfoCollector,
-    app: &mut AppState,
+    app: &mut DashboardApp,
 ) -> io::Result<()> {
-    let (snapshots, collector_worker) = spawn_collector(collector, app.refresh_interval());
+    let (snapshots, _collector_worker) = spawn_collector(collector, app.refresh_interval());
     let mut last_render = Instant::now() - RENDER_INTERVAL;
     let mut last_animation_update = Instant::now();
     let mut render_pending = true;
-    let mut requested_collection_interval = app.refresh_interval();
 
     loop {
         let now = Instant::now();
         let mut received_snapshot = false;
-        if let Some(info) = snapshots.take() {
-            app.update(info);
+        if let Some((collected_at, info)) = snapshots.take() {
+            app.update(info, collected_at);
             received_snapshot = true;
         }
         if received_snapshot {
             render_pending = true;
-        }
-
-        if app.refresh_interval() != requested_collection_interval {
-            requested_collection_interval = app.refresh_interval();
-            collector_worker.set_interval(requested_collection_interval);
         }
 
         let animation_delta = now.saturating_duration_since(last_animation_update);
@@ -226,9 +136,7 @@ fn run_app(
 
         let render_due = last_render.elapsed() >= RENDER_INTERVAL;
         if render_pending && (received_snapshot || render_due || !app.animations_active()) {
-            terminal.draw(|frame| {
-                ui::dashboard::draw_app(frame, app);
-            })?;
+            terminal.draw(|frame| app.draw(frame))?;
             last_render = now;
             render_pending = false;
         }
@@ -245,17 +153,8 @@ fn run_app(
 
         if event::poll(timeout)? {
             loop {
-                if let Some(action) = action_for_event(
-                    event::read()?,
-                    app.palette().is_open(),
-                    app.process_search().is_open(),
-                    app.config().is_open(),
-                    app.focus_active(),
-                ) {
-                    if app.dispatch(action) {
-                        return Ok(());
-                    }
-                    render_pending = true;
+                if should_quit(event::read()?) {
+                    return Ok(());
                 }
 
                 if !event::poll(Duration::ZERO)? {
@@ -295,20 +194,16 @@ fn spawn_collector(
 
 fn collection_loop(
     collector: &mut SystemInfoCollector,
-    latest_snapshot: Arc<Mutex<Option<SystemInfo>>>,
+    latest_snapshot: Arc<Mutex<Option<(Instant, SystemInfo)>>>,
     commands: Receiver<CollectorCommand>,
     initial_interval: Duration,
 ) {
-    let mut interval = initial_interval;
+    let interval = initial_interval;
     let mut next_collection = Instant::now();
 
     loop {
         let wait = next_collection.saturating_duration_since(Instant::now());
         match commands.recv_timeout(wait) {
-            Ok(CollectorCommand::SetInterval(new_interval)) => {
-                interval = new_interval;
-                next_collection = Instant::now();
-            }
             Ok(CollectorCommand::Stop) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 let collected_at = Instant::now();
@@ -316,7 +211,7 @@ fn collection_loop(
                 let Ok(mut latest_snapshot) = latest_snapshot.lock() else {
                     break;
                 };
-                *latest_snapshot = Some(snapshot);
+                *latest_snapshot = Some((collected_at, snapshot));
                 next_collection = collected_at + interval;
             }
         }

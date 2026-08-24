@@ -1,39 +1,3 @@
-#[allow(dead_code)]
-#[path = "../ui/dashboard_v2/mod.rs"]
-pub mod dashboard_v2;
-
-#[path = "../system/mod.rs"]
-#[allow(dead_code)]
-mod system;
-
-#[path = "../ui/widgets/pulse_v2/mod.rs"]
-pub mod pulse_v2;
-
-#[allow(unused_imports)]
-mod ui {
-    pub use crate::dashboard_v2;
-
-    pub mod widgets {
-        pub use crate::pulse_v2;
-    }
-}
-
-#[allow(dead_code)]
-#[path = "../theme/mod.rs"]
-mod theme;
-
-mod pulse {
-    #[derive(Debug, Clone, Copy, Default, PartialEq)]
-    pub struct PulseInput {
-        pub cpu: f32,
-        pub memory: f32,
-        pub gpu: Option<f32>,
-        pub network: f32,
-        pub load: f32,
-        pub volatility: f32,
-    }
-}
-
 use std::{
     io,
     sync::mpsc::{self, Receiver, Sender},
@@ -46,17 +10,15 @@ use crossterm::{
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
+use dashboard_v2::NormalizedPulseInput;
 use dashboard_v2::{
-    CpuLiveSample, CpuMetricInput, DashboardContext, DashboardPreset, DashboardProcessSummary,
-    DashboardState, DashboardV2Content, DashboardV2Renderer, DashboardV2SystemContext, GpuDevice,
-    GpuMetricInput, HardwareId, HardwareInventory, HardwareKind, HealthComponent, HealthEngine,
-    HealthSignals, HealthSnapshot, LiveGpuSnapshot, LiveMetricsHistory, LiveSnapshot,
-    LiveStorageSnapshot, MemoryMetricInput, MetricAvailability, MetricReading, MetricUnit,
-    NetworkInterface, NetworkMetricInput, PulseBehavior, PulseBehaviorEngine, StorageDevice,
-    StorageMetricInput, TemperatureSensor, TerminalRenderer, TimeSample, TimeSeries, WidgetContext,
-    WidgetRenderer,
+    CpuMetricInput, DashboardContext, DashboardPreset, DashboardState, DashboardV2Content,
+    DashboardV2Renderer, DashboardV2SystemContext, GpuMetricInput, HealthComponent, HealthEngine,
+    HealthSignals, HealthSnapshot, LiveMetricsHistory, LiveSnapshot, MemoryMetricInput,
+    MetricAvailability, MetricReading, MetricUnit, NetworkMetricInput, PulseBehavior,
+    PulseBehaviorEngine, StorageMetricInput, TerminalRenderer, TimeSample, TimeSeries,
+    WidgetContext, WidgetRenderer,
 };
-use pulse_v2::NormalizedPulseInput;
 use ratatui::{
     Terminal,
     backend::CrosstermBackend,
@@ -64,8 +26,11 @@ use ratatui::{
     style::Style,
     widgets::{Block, Borders},
 };
-use system::info::{SystemInfo, SystemInfoCollector};
-use theme::Theme;
+use sysmon::{
+    system::info::{SystemInfo, SystemInfoCollector},
+    theme::Theme,
+    ui::dashboard_v2,
+};
 
 const FRAME_INTERVAL: Duration = Duration::from_millis(33);
 const LIVE_COLLECTION_INTERVAL: Duration = Duration::from_secs(1);
@@ -422,7 +387,7 @@ fn run_viewer(stdout: &mut io::Stdout) -> io::Result<()> {
                         0,
                         0,
                         "Resize terminal or choose a smaller preset",
-                        Style::default().fg(theme.text),
+                        Style::default(),
                     );
                 }
             }
@@ -452,7 +417,7 @@ fn render_health_debug(
     scenario: Scenario,
     health: dashboard_v2::SystemHealth,
     behavior: PulseBehavior,
-    theme: &Theme,
+    _theme: &Theme,
 ) {
     let area = frame.area();
     if area.width == 0 || area.height == 0 {
@@ -469,7 +434,7 @@ fn render_health_debug(
         area.y,
         line,
         usize::from(area.width),
-        Style::default().fg(theme.text_muted),
+        Style::default(),
     );
 }
 
@@ -509,7 +474,7 @@ fn render_cpu_preview(
             0,
             0,
             "Resize terminal to inspect the CPU preview",
-            Style::default().fg(theme.text),
+            Style::default(),
         );
         return;
     }
@@ -527,7 +492,7 @@ fn render_cpu_preview(
             "CPU SIGNAL · {} · D cycles",
             state.cpu_signal_preview.label()
         ),
-        Style::default().fg(theme.text_muted),
+        Style::default(),
     );
     let inner = Rect::new(
         outer.x + 1,
@@ -538,8 +503,8 @@ fn render_cpu_preview(
     frame.render_widget(
         Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(theme.border))
-            .style(Style::default().bg(theme.surface)),
+            .border_style(Style::default())
+            .style(Style::default()),
         outer,
     );
 
@@ -745,34 +710,7 @@ fn scenario_health_snapshot(state: ViewerState) -> HealthSnapshot {
 }
 
 fn system_context_from_system(snapshot: &SystemInfo) -> DashboardV2SystemContext {
-    let mut processes = snapshot
-        .processes_list
-        .iter()
-        .map(|process| DashboardProcessSummary {
-            name: process.name.clone(),
-            cpu_percent: process.cpu_usage,
-            memory_bytes: if process.memory.is_finite() && process.memory >= 0.0 {
-                (process.memory * 1024.0 * 1024.0) as u64
-            } else {
-                0
-            },
-        })
-        .collect::<Vec<_>>();
-    processes.sort_unstable_by(|left, right| {
-        right
-            .cpu_percent
-            .total_cmp(&left.cpu_percent)
-            .then_with(|| right.memory_bytes.cmp(&left.memory_bytes))
-            .then_with(|| left.name.cmp(&right.name))
-    });
-
-    DashboardV2SystemContext {
-        physical_cores: snapshot.cpu_physical_cores,
-        logical_threads: Some(snapshot.cpu_logical_threads.max(snapshot.cpu_cores)),
-        total_memory_gib: Some(snapshot.total_ram).filter(|value| value.is_finite()),
-        uptime_seconds: Some(snapshot.uptime),
-        processes,
-    }
+    DashboardV2SystemContext::from_system_info(snapshot)
 }
 
 fn compose_live_cpu(
@@ -840,147 +778,8 @@ fn dashboard_state_for_models(models: &dashboard_v2::LiveMetricModels) -> Dashbo
     }
 }
 
-fn cpu_live_sample_from_snapshot(snapshot: &SystemInfo) -> CpuLiveSample {
-    CpuLiveSample {
-        utilization_percent: valid_percent(f64::from(snapshot.cpu_usage)),
-        frequency_hz: valid_non_negative(snapshot.cpu_frequency_hz),
-        temperature_celsius: valid_non_negative(snapshot.cpu_temperature_celsius),
-        cores: snapshot.cpu_physical_cores.unwrap_or(snapshot.cpu_cores),
-    }
-}
-
 fn live_snapshot_from_system(snapshot: &SystemInfo) -> LiveSnapshot {
-    let gpus = snapshot
-        .gpus
-        .iter()
-        .filter_map(|gpu| {
-            Some(GpuDevice {
-                id: HardwareId::new(HardwareKind::Gpu, gpu.id.clone())?,
-                name: gpu.name.clone(),
-                utilization_percent: gpu
-                    .usage_percent
-                    .or_else(|| parse_percent(&gpu.usage))
-                    .and_then(valid_percent),
-                vram_used_bytes: valid_non_negative(gpu.vram_used_bytes),
-                vram_total_bytes: valid_non_negative(gpu.vram_total_bytes),
-                temperature_celsius: valid_non_negative(gpu.temperature_celsius),
-                frequency_hz: valid_non_negative(gpu.frequency_hz),
-                power_watts: valid_non_negative(gpu.power_watts),
-                availability: MetricAvailability::Available,
-            })
-        })
-        .collect::<Vec<_>>();
-    let storages = snapshot
-        .storage_devices
-        .iter()
-        .filter(|disk| !disk.is_virtual)
-        .filter_map(|disk| {
-            Some(StorageDevice {
-                id: HardwareId::new(HardwareKind::Storage, disk.id.clone())?,
-                name: disk.name.clone(),
-                model: disk.model.clone(),
-                mount_points: disk.mount_points.clone(),
-                used_bytes: valid_non_negative(Some(
-                    (disk.total_space - disk.available_space).max(0.0) * GIBIBYTE,
-                )),
-                total_bytes: valid_non_negative(Some(disk.total_space.max(0.0) * GIBIBYTE)),
-                read_bytes_per_sec: valid_non_negative(disk.read_bytes_per_sec),
-                write_bytes_per_sec: valid_non_negative(disk.written_bytes_per_sec),
-                latency_seconds: None,
-                availability: MetricAvailability::Available,
-                is_virtual: false,
-            })
-        })
-        .collect::<Vec<_>>();
-    let networks = snapshot
-        .all_networks
-        .iter()
-        .filter_map(|network| {
-            Some(NetworkInterface {
-                id: HardwareId::new(HardwareKind::Network, network.id.clone())?,
-                name: network.interface.clone(),
-                download_bytes_per_sec: valid_non_negative(Some(
-                    network.received_per_sec * 1_000_000.0,
-                )),
-                upload_bytes_per_sec: valid_non_negative(Some(
-                    network.transmitted_per_sec * 1_000_000.0,
-                )),
-                availability: MetricAvailability::Available,
-            })
-        })
-        .collect::<Vec<_>>();
-    let temperatures = snapshot
-        .temperatures
-        .iter()
-        .filter_map(|sensor| {
-            Some(TemperatureSensor {
-                id: HardwareId::new(HardwareKind::Temperature, sensor.id.clone())?,
-                label: sensor.label.clone(),
-                celsius: valid_non_negative(sensor.celsius),
-                availability: MetricAvailability::Available,
-            })
-        })
-        .collect::<Vec<_>>();
-    let hardware = HardwareInventory::new(storages, gpus, networks, temperatures);
-    let gpu = hardware.gpus.first().map(|gpu| LiveGpuSnapshot {
-        utilization_percent: gpu.utilization_percent,
-        vram_used_bytes: valid_non_negative(gpu.vram_used_bytes),
-        vram_total_bytes: valid_non_negative(gpu.vram_total_bytes),
-        temperature_celsius: valid_non_negative(gpu.temperature_celsius),
-        frequency_hz: valid_non_negative(gpu.frequency_hz),
-        power_watts: valid_non_negative(gpu.power_watts),
-    });
-    let storage = hardware.storages.first().map(|disk| LiveStorageSnapshot {
-        used_bytes: disk.used_bytes,
-        total_bytes: disk.total_bytes,
-        read_bytes_per_sec: disk.read_bytes_per_sec,
-        write_bytes_per_sec: disk.write_bytes_per_sec,
-    });
-    let (download, upload) = snapshot
-        .all_networks
-        .iter()
-        .filter(|network| !is_loopback_interface(&network.interface))
-        .fold((0.0, 0.0), |(down, up), network| {
-            (
-                down + network.received_per_sec * 1_000_000.0,
-                up + network.transmitted_per_sec * 1_000_000.0,
-            )
-        });
-    LiveSnapshot {
-        cpu: cpu_live_sample_from_snapshot(snapshot),
-        memory_used_bytes: valid_non_negative(Some(snapshot.used_ram * GIBIBYTE)),
-        memory_available_bytes: valid_non_negative(Some(
-            (snapshot.total_ram - snapshot.used_ram).max(0.0) * GIBIBYTE,
-        )),
-        memory_total_bytes: valid_non_negative(Some(snapshot.total_ram * GIBIBYTE)),
-        memory_swap_bytes: valid_non_negative(Some(snapshot.used_swap * GIBIBYTE)),
-        gpu,
-        download_bytes_per_sec: Some(download),
-        upload_bytes_per_sec: Some(upload),
-        storage,
-        hardware,
-    }
-}
-
-const GIBIBYTE: f64 = 1024.0 * 1024.0 * 1024.0;
-
-fn is_loopback_interface(name: &str) -> bool {
-    name == "lo" || name.starts_with("lo:")
-}
-
-fn parse_percent(value: &str) -> Option<f64> {
-    value.trim_end_matches('%').trim().parse::<f64>().ok()
-}
-
-fn valid_percent(value: f64) -> Option<f64> {
-    value
-        .is_finite()
-        .then_some(value)
-        .filter(|value| (0.0..=100.0).contains(value))
-}
-
-fn valid_non_negative(value: Option<f64>) -> Option<f64> {
-    value.filter(|value| value.is_finite() && *value >= 0.0)
+    LiveSnapshot::from_system_info(snapshot)
 }
 
 fn compose_cpu(
@@ -1469,7 +1268,7 @@ mod tests {
     #[test]
     fn live_adapter_keeps_multiple_physical_storage_devices() {
         let disks = vec![
-            system::info::DiskInfo {
+            sysmon::system::info::DiskInfo {
                 id: "sda".to_owned(),
                 name: "sda".to_owned(),
                 model: Some("SATA SSD".to_owned()),
@@ -1481,7 +1280,7 @@ mod tests {
                 read_bytes_per_sec: Some(0.0),
                 written_bytes_per_sec: Some(0.0),
             },
-            system::info::DiskInfo {
+            sysmon::system::info::DiskInfo {
                 id: "nvme0n1".to_owned(),
                 name: "nvme0n1".to_owned(),
                 model: Some("NVMe SSD".to_owned()),
@@ -1530,7 +1329,7 @@ mod tests {
     #[test]
     fn live_standard_composition_keeps_both_storage_devices_visible() {
         let disks = vec![
-            system::info::DiskInfo {
+            sysmon::system::info::DiskInfo {
                 id: "sda".to_owned(),
                 name: "sda".to_owned(),
                 model: Some("KINGSTON SA400S37480G".to_owned()),
@@ -1542,7 +1341,7 @@ mod tests {
                 read_bytes_per_sec: Some(0.0),
                 written_bytes_per_sec: Some(0.0),
             },
-            system::info::DiskInfo {
+            sysmon::system::info::DiskInfo {
                 id: "nvme0n1".to_owned(),
                 name: "nvme0n1".to_owned(),
                 model: Some("KINGSTON SNV2S1000G".to_owned()),

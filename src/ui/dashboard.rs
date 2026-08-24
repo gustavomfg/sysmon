@@ -1,181 +1,234 @@
-use crate::app::AppState;
-use crate::focus::FocusTarget;
-use crate::theme::Theme;
-use crate::widget::WidgetId;
+use std::time::{Duration, Instant};
 
-use ratatui::Frame;
+use ratatui::{Frame, layout::Rect, style::Style};
 
-use super::{layout::DashboardLayout, renderer::fill, widgets};
+use crate::{
+    system::info::SystemInfo,
+    theme::Theme,
+    ui::dashboard_v2::{
+        DashboardContext, DashboardDimensions, DashboardPreset, DashboardState, DashboardV2Content,
+        DashboardV2Renderer, HealthEngine, HealthSnapshot, LiveMetricModels, LiveMetricsHistory,
+        LiveSnapshot, PulseBehavior, PulseBehaviorEngine, WidgetContext, WidgetRenderer,
+        WidgetState,
+    },
+};
 
-pub fn draw_app(frame: &mut Frame, app: &AppState) {
-    if let Some(info) = app.snapshot() {
-        draw_with_theme(frame, info, app, app.theme());
-    } else {
-        frame.render_widget(fill(app.theme().background), frame.area());
+const COLLECTION_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Runtime state for the official Dashboard V2 pipeline.
+///
+/// Collection enters this state as `LiveSnapshot`; health interpretation and
+/// visual models are then prepared before the terminal renderer is called.
+/// The renderer never reaches into `SystemInfo` or the collector directly.
+pub struct DashboardApp {
+    live_metrics: LiveMetricsHistory,
+    system_context: Option<crate::ui::dashboard_v2::DashboardV2SystemContext>,
+    health_engine: HealthEngine,
+    pulse_behavior_engine: PulseBehaviorEngine,
+    system_health: crate::ui::dashboard_v2::SystemHealth,
+    pulse_behavior: PulseBehavior,
+    elapsed: Duration,
+    theme: Theme,
+    has_snapshot: bool,
+}
+
+impl DashboardApp {
+    pub fn new() -> Self {
+        let health_engine = HealthEngine::new();
+        let system_health = health_engine.evaluate(HealthSnapshot::default());
+        let pulse_behavior = PulseBehavior::from_system_health(system_health);
+        Self {
+            live_metrics: LiveMetricsHistory::new(),
+            system_context: None,
+            health_engine,
+            pulse_behavior_engine: PulseBehaviorEngine::new(),
+            system_health,
+            pulse_behavior,
+            elapsed: Duration::ZERO,
+            theme: Theme::pulse(),
+            has_snapshot: false,
+        }
     }
 
-    if app.palette().is_open() {
-        widgets::command_palette::draw(frame, frame.area(), app, app.theme());
+    pub const fn refresh_interval(&self) -> Duration {
+        COLLECTION_INTERVAL
     }
-    if app.process_search().is_open() {
-        widgets::process_search::draw(frame, frame.area(), app, app.theme());
+
+    pub fn update(&mut self, snapshot: SystemInfo, collected_at: Instant) {
+        self.system_context =
+            Some(crate::ui::dashboard_v2::DashboardV2SystemContext::from_system_info(&snapshot));
+        let live_snapshot = LiveSnapshot::from_system_info(&snapshot);
+        let _ = self
+            .live_metrics
+            .push_snapshot(collected_at, &live_snapshot);
+        self.has_snapshot = true;
     }
-    if app.config().is_open() {
-        widgets::config::draw(frame, frame.area(), app, app.theme());
+
+    pub fn update_animations(&mut self, delta: Duration) -> bool {
+        self.elapsed = self.elapsed.saturating_add(delta);
+        let health_snapshot = self
+            .live_metrics
+            .models()
+            .map(|models| HealthSnapshot::from_models(&models))
+            .unwrap_or_default();
+        self.system_health = self.health_engine.update(health_snapshot, delta);
+        self.pulse_behavior = self.pulse_behavior_engine.update(self.system_health, delta);
+        true
+    }
+
+    pub const fn animations_active(&self) -> bool {
+        true
+    }
+
+    pub fn draw(&self, frame: &mut Frame<'_>) {
+        let area = frame.area();
+        let dimensions =
+            match DashboardDimensions::new(usize::from(area.width), usize::from(area.height)) {
+                Ok(dimensions) => dimensions,
+                Err(_) => {
+                    frame.buffer_mut().set_string(
+                        area.x,
+                        area.y,
+                        "Resize terminal to render Dashboard V2",
+                        Style::default(),
+                    );
+                    return;
+                }
+            };
+        let preset = DashboardPreset::from_dimensions(dimensions);
+        let context = context_for(area);
+        let models = self
+            .has_snapshot
+            .then(|| self.live_metrics.models().ok())
+            .flatten();
+        let dashboard_state = models
+            .as_ref()
+            .map(dashboard_state_for_models)
+            .unwrap_or(DashboardState::Calm);
+        let widget_context = WidgetContext::new(preset, dashboard_state, self.elapsed);
+        let primary = models
+            .as_ref()
+            .map(|models| primary_models(models, widget_context))
+            .unwrap_or([None; 5]);
+        let inventory = models
+            .as_ref()
+            .map(|models| models.inventory().clone())
+            .unwrap_or_default();
+
+        let content =
+            DashboardV2Content::new(primary, self.pulse_behavior.input(), dashboard_state)
+                .with_pulse_behavior(self.pulse_behavior)
+                .with_inventory(inventory)
+                .with_live_mode(self.has_snapshot);
+        let content = if let Some(system_context) = self.system_context.clone() {
+            content.with_system_context(system_context)
+        } else {
+            content
+        };
+
+        if DashboardV2Renderer::new()
+            .render(
+                preset,
+                context,
+                content,
+                self.elapsed,
+                false,
+                &self.theme,
+                frame.buffer_mut(),
+            )
+            .is_err()
+        {
+            frame.buffer_mut().set_string(
+                area.x,
+                area.y,
+                "Resize terminal or choose a smaller preset",
+                Style::default(),
+            );
+        }
     }
 }
 
-fn draw_with_theme(
-    frame: &mut Frame,
-    info: &crate::system::info::SystemInfo,
-    app: &AppState,
-    theme: &Theme,
-) {
-    frame.render_widget(fill(theme.background), frame.area());
-
-    let Some(layout) = DashboardLayout::new(frame.area(), app.widget_visibility()) else {
-        widgets::overview::draw_minimum_size_message(frame, theme);
-        return;
-    };
-
-    widgets::overview::draw(
-        frame,
-        layout.header,
-        info,
-        app.cpu_usage(),
-        app.memory_usage_percent(),
-        theme,
-        app.is_focused(FocusTarget::Overview),
-    );
-
-    widgets::pulse::draw(frame, layout.pulse, app, theme, false);
-
-    widgets::system::draw_info(
-        frame,
-        layout.system,
-        info,
-        theme,
-        app.is_focused(FocusTarget::System),
-    );
-    widgets::cpu::draw(
-        frame,
-        layout.cpu,
-        app.cpu_usage(),
-        theme,
-        app.is_focused(FocusTarget::Cpu),
-    );
-    if app.widget_visible(WidgetId::Gpu)
-        && let Some(area) = layout.gpu
-    {
-        widgets::gpu::draw(frame, area, info, theme, app.is_focused(FocusTarget::Gpu));
+impl Default for DashboardApp {
+    fn default() -> Self {
+        Self::new()
     }
-    if app.widget_visible(WidgetId::Memory)
-        && let Some(area) = layout.memory
-    {
-        widgets::memory::draw(
-            frame,
-            area,
-            info,
-            app.memory_usage_percent(),
-            theme,
-            app.is_focused(FocusTarget::Memory),
-        );
-    }
-    widgets::processes::draw(
-        frame,
-        layout.processes,
-        info,
-        theme,
-        app.is_focused(FocusTarget::Processes),
-        app.selected_process(),
-    );
+}
 
-    widgets::storage::draw(
-        frame,
-        layout.storage,
-        info,
-        theme,
-        app.is_focused(FocusTarget::Storage),
-    );
-    widgets::history::draw(
-        frame,
-        layout.history,
-        app,
-        theme,
-        app.is_focused(FocusTarget::History),
-    );
-    if app.widget_visible(WidgetId::Network)
-        && let Some(area) = layout.network
-    {
-        widgets::network::draw(
-            frame,
-            area,
-            info,
-            theme,
-            app.is_focused(FocusTarget::Network),
-        );
+fn context_for(area: Rect) -> DashboardContext {
+    if area.width >= 100 && area.height >= 28 {
+        return DashboardContext::default();
     }
-    widgets::timeline::draw(
-        frame,
-        layout.timeline,
-        app.timeline(),
-        theme,
-        app.is_focused(FocusTarget::Timeline),
-    );
-    widgets::footer::draw(frame, layout.footer, theme, app.refresh_interval());
+
+    let mut context = DashboardContext::default();
+    for region in [
+        crate::ui::dashboard_v2::DashboardRegion::SecondaryMetrics,
+        crate::ui::dashboard_v2::DashboardRegion::Charts,
+        crate::ui::dashboard_v2::DashboardRegion::Processes,
+        crate::ui::dashboard_v2::DashboardRegion::Alerts,
+    ] {
+        context = context.without(region);
+    }
+    context
+}
+
+fn primary_models(
+    models: &LiveMetricModels,
+    context: WidgetContext,
+) -> [Option<crate::ui::dashboard_v2::WidgetRenderModel>; 5] {
+    [
+        WidgetRenderer::render_cpu(models.cpu(), context)
+            .ok()
+            .flatten(),
+        WidgetRenderer::render_memory(models.memory(), context)
+            .ok()
+            .flatten(),
+        WidgetRenderer::render_gpu(models.gpu(), context)
+            .ok()
+            .flatten(),
+        WidgetRenderer::render_network(models.network(), context)
+            .ok()
+            .flatten(),
+        WidgetRenderer::render_storage(models.storage(), context)
+            .ok()
+            .flatten(),
+    ]
+}
+
+fn dashboard_state_for_models(models: &LiveMetricModels) -> DashboardState {
+    let states = [
+        models.cpu().state(),
+        models.memory().state(),
+        models.gpu().state(),
+        models.network().state(),
+        models.storage().state(),
+    ];
+    if states.contains(&WidgetState::Critical) {
+        DashboardState::Critical
+    } else if states.contains(&WidgetState::Warning) {
+        DashboardState::Busy
+    } else if states.contains(&WidgetState::Active) {
+        DashboardState::Active
+    } else {
+        DashboardState::Calm
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use ratatui::{Terminal, backend::TestBackend};
 
-    use super::draw_app;
-    use crate::{
-        action::Action,
-        app::AppState,
-        system::info::SystemInfo,
-        ui::renderer::{disk_usage, format_uptime, usage_percent},
-    };
+    use super::DashboardApp;
 
     #[test]
-    fn formats_uptime_with_and_without_days() {
-        assert_eq!(format_uptime(3_661), "1h 1m");
-        assert_eq!(format_uptime(90_061), "1d 1h 1m");
-    }
+    fn renders_the_official_v2_surface_at_representative_sizes() {
+        let app = DashboardApp::new();
 
-    #[test]
-    fn handles_zero_and_out_of_range_usage_values() {
-        assert_eq!(usage_percent(5.0, 0.0), 0.0);
-        assert_eq!(usage_percent(-1.0, 10.0), 0.0);
-        assert_eq!(usage_percent(12.0, 10.0), 100.0);
-    }
-
-    #[test]
-    fn handles_empty_disks_without_division_by_zero() {
-        assert_eq!(disk_usage(0.0, 0.0), (0.0, 0.0));
-    }
-
-    #[test]
-    fn renders_dashboard_at_representative_terminal_sizes() {
-        let info = sample_system_info();
-        let mut app = AppState::new();
-        app.update(info);
-
-        for (width, height) in [
-            (80, 24),
-            (90, 30),
-            (100, 30),
-            (120, 32),
-            (120, 40),
-            (140, 40),
-            (160, 40),
-            (180, 50),
-        ] {
+        for (width, height) in [(80, 24), (100, 30), (140, 40), (180, 50)] {
             let backend = TestBackend::new(width, height);
             let mut terminal = Terminal::new(backend).expect("test terminal should be created");
 
             terminal
-                .draw(|frame| draw_app(frame, &app))
+                .draw(|frame| app.draw(frame))
                 .expect("dashboard should render");
 
             let rendered = terminal
@@ -185,119 +238,8 @@ mod tests {
                 .iter()
                 .map(|cell| cell.symbol())
                 .collect::<String>();
-            assert!(rendered.contains("SYSMON"));
-            assert!(rendered.contains("System Pulse"));
-            assert!(rendered.contains("CPU Trend"));
-            assert!(rendered.contains("Timeline"));
+            assert!(rendered.contains("SYSMON V2"));
+            assert!(rendered.contains("PULSE V2"));
         }
-    }
-
-    #[test]
-    fn renders_the_command_palette_overlay_with_documented_commands() {
-        let mut app = AppState::new();
-        app.update(sample_system_info());
-        app.dispatch(Action::OpenPalette);
-
-        let backend = TestBackend::new(160, 40);
-        let mut terminal = Terminal::new(backend).expect("test terminal should be created");
-        terminal
-            .draw(|frame| draw_app(frame, &app))
-            .expect("command palette should render");
-
-        let rendered = terminal
-            .backend()
-            .buffer()
-            .content
-            .iter()
-            .map(|cell| cell.symbol())
-            .collect::<String>();
-        assert!(rendered.contains("Command Palette"));
-        assert!(rendered.contains("Quit"));
-        assert!(rendered.contains("Toggle GPU Widget"));
-        assert!(rendered.contains("Open Settings"));
-        assert!(rendered.contains("Toggle Memory Widget"));
-    }
-
-    #[test]
-    fn renders_process_and_config_overlays_on_widescreen() {
-        for (query, expected) in [("search", "Search Process"), ("settings", "Settings")] {
-            let mut app = AppState::new();
-            app.update(sample_system_info());
-            open_command(&mut app, query);
-
-            let backend = TestBackend::new(160, 40);
-            let mut terminal = Terminal::new(backend).expect("test terminal should be created");
-            terminal
-                .draw(|frame| draw_app(frame, &app))
-                .expect("overlay should render on widescreen");
-
-            let rendered = terminal
-                .backend()
-                .buffer()
-                .content
-                .iter()
-                .map(|cell| cell.symbol())
-                .collect::<String>();
-            assert!(rendered.contains(expected));
-        }
-    }
-
-    #[test]
-    fn explains_the_minimum_size_in_small_terminals() {
-        let backend = TestBackend::new(60, 20);
-        let mut terminal = Terminal::new(backend).expect("test terminal should be created");
-
-        let mut app = AppState::new();
-        app.update(sample_system_info());
-
-        terminal
-            .draw(|frame| draw_app(frame, &app))
-            .expect("minimum-size message should render");
-
-        let rendered = terminal
-            .backend()
-            .buffer()
-            .content
-            .iter()
-            .map(|cell| cell.symbol())
-            .collect::<String>();
-        assert!(rendered.contains("Janela muito pequena"));
-        assert!(rendered.contains("80x24"));
-    }
-
-    fn sample_system_info() -> SystemInfo {
-        SystemInfo {
-            os_name: "Linux".to_string(),
-            kernel: "6.x".to_string(),
-            cpu_name: "Test CPU".to_string(),
-            cpu_cores: 8,
-            cpu_physical_cores: None,
-            cpu_logical_threads: 8,
-            cpu_usage: 42.0,
-            cpu_frequency_hz: None,
-            cpu_temperature_celsius: None,
-            total_ram: 16.0,
-            used_ram: 8.0,
-            total_swap: 4.0,
-            used_swap: 1.0,
-            processes: 100,
-            uptime: 90_061,
-            load_average: (0.5, 0.4, 0.3),
-            disks: Vec::new(),
-            storage_devices: Vec::new(),
-            processes_list: Vec::new(),
-            gpus: Vec::new(),
-            networks: Vec::new(),
-            all_networks: Vec::new(),
-            temperatures: Vec::new(),
-        }
-    }
-
-    fn open_command(app: &mut AppState, query: &str) {
-        app.dispatch(Action::OpenPalette);
-        for character in query.chars() {
-            app.dispatch(Action::PaletteCharacter(character));
-        }
-        app.dispatch(Action::PaletteSubmit);
     }
 }

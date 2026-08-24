@@ -7,7 +7,7 @@
 
 use std::{fmt, time::Duration};
 
-use crate::ui::widgets::pulse_v2::NormalizedPulseInput;
+use crate::pulse_v2::NormalizedPulseInput;
 
 use super::{
     HardwareInventory, LiveMetricModels, MetricValue, PulseBehavior,

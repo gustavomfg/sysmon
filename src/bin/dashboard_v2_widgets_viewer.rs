@@ -1,34 +1,3 @@
-#[allow(dead_code)]
-#[path = "../ui/dashboard_v2/mod.rs"]
-pub mod dashboard_v2;
-
-#[allow(unused_imports)]
-mod ui {
-    pub use crate::dashboard_v2;
-
-    pub mod widgets {
-        pub use crate::pulse_v2;
-    }
-}
-#[allow(dead_code)]
-#[path = "../theme/mod.rs"]
-mod theme;
-
-#[path = "../ui/widgets/pulse_v2/mod.rs"]
-pub mod pulse_v2;
-
-mod pulse {
-    #[derive(Debug, Clone, Copy, Default, PartialEq)]
-    pub struct PulseInput {
-        pub cpu: f32,
-        pub memory: f32,
-        pub gpu: Option<f32>,
-        pub network: f32,
-        pub load: f32,
-        pub volatility: f32,
-    }
-}
-
 use std::{
     io,
     time::{Duration, Instant},
@@ -53,7 +22,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::Paragraph,
 };
-use theme::Theme;
+use sysmon::{theme::Theme, ui::dashboard_v2};
 
 const FRAME_INTERVAL: Duration = Duration::from_millis(33);
 const HISTORY: usize = 12;
@@ -223,15 +192,9 @@ fn draw_frame(frame: &mut ratatui::Frame<'_>, state: ViewerState, theme: &Theme)
             Constraint::Length(1),
         ])
         .split(frame.area());
-    frame
-        .buffer_mut()
-        .set_style(areas[0], Style::default().bg(theme.background));
-    frame
-        .buffer_mut()
-        .set_style(areas[1], Style::default().bg(theme.background));
-    frame
-        .buffer_mut()
-        .set_style(areas[2], Style::default().bg(theme.background));
+    frame.buffer_mut().set_style(areas[0], Style::default());
+    frame.buffer_mut().set_style(areas[1], Style::default());
+    frame.buffer_mut().set_style(areas[2], Style::default());
 
     let selected = state
         .selected
@@ -240,7 +203,7 @@ fn draw_frame(frame: &mut ratatui::Frame<'_>, state: ViewerState, theme: &Theme)
         Paragraph::new(Line::from(vec![
             Span::styled(
                 "Dashboard V2 Widgets  ",
-                Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
+                Style::default().add_modifier(Modifier::BOLD),
             ),
             Span::styled(
                 format!(
@@ -254,10 +217,10 @@ fn draw_frame(frame: &mut ratatui::Frame<'_>, state: ViewerState, theme: &Theme)
                         ""
                     }
                 ),
-                Style::default().fg(theme.text_muted),
+                Style::default(),
             ),
         ]))
-        .style(Style::default().bg(theme.background)),
+        .style(Style::default()),
         areas[0],
     );
 
@@ -271,7 +234,7 @@ fn draw_frame(frame: &mut ratatui::Frame<'_>, state: ViewerState, theme: &Theme)
         Paragraph::new(
             "1 CPU  2 Memory  3 GPU  4 Network  5 Storage  A all  P preset  S state  G GPU  R reduced motion  Q quit",
         )
-        .style(Style::default().fg(theme.text_muted).bg(theme.background)),
+            .style(Style::default()),
         areas[2],
     );
 }

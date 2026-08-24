@@ -9,6 +9,10 @@ license = "MIT"
 keywords = ["monitor", "system", "terminal", "tui"]
 categories = ["command-line-utilities"]
 
+[lib]
+name = "sysmon"
+path = "src/lib.rs"
+
 [dependencies]
 crossterm = { version = "0.29.0", default-features = false, features = ["events"] }
 ratatui = { version = "0.30.2", default-features = false, features = ["crossterm_0_29"] }

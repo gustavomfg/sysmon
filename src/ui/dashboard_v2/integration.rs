@@ -9,11 +9,12 @@ use ratatui::{
 };
 
 use crate::{
-    theme::Theme,
-    ui::widgets::pulse_v2::{
+    pulse_v2::{
         ColorRasterFrame, FieldDimensions, FieldError, NormalizedPulseInput, PulseV2Engine,
         PulseV2Preset, PulseV2Rasterizer, SemanticColorField,
     },
+    system::info::SystemInfo,
+    theme::Theme,
 };
 
 use super::{
@@ -31,19 +32,52 @@ const HEADER_TITLE: &str = "SYSMON V2";
 const HEADER_CENTER: &str = "SYSTEM MONITOR";
 
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct DashboardProcessSummary {
-    pub(crate) name: String,
-    pub(crate) cpu_percent: f32,
-    pub(crate) memory_bytes: u64,
+pub struct DashboardProcessSummary {
+    pub name: String,
+    pub cpu_percent: f32,
+    pub memory_bytes: u64,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
-pub(crate) struct DashboardV2SystemContext {
-    pub(crate) physical_cores: Option<usize>,
-    pub(crate) logical_threads: Option<usize>,
-    pub(crate) total_memory_gib: Option<f64>,
-    pub(crate) uptime_seconds: Option<u64>,
-    pub(crate) processes: Vec<DashboardProcessSummary>,
+pub struct DashboardV2SystemContext {
+    pub physical_cores: Option<usize>,
+    pub logical_threads: Option<usize>,
+    pub total_memory_gib: Option<f64>,
+    pub uptime_seconds: Option<u64>,
+    pub processes: Vec<DashboardProcessSummary>,
+}
+
+impl DashboardV2SystemContext {
+    pub fn from_system_info(snapshot: &SystemInfo) -> Self {
+        let mut processes = snapshot
+            .processes_list
+            .iter()
+            .map(|process| DashboardProcessSummary {
+                name: process.name.clone(),
+                cpu_percent: process.cpu_usage,
+                memory_bytes: if process.memory.is_finite() && process.memory >= 0.0 {
+                    (process.memory * 1024.0 * 1024.0) as u64
+                } else {
+                    0
+                },
+            })
+            .collect::<Vec<_>>();
+        processes.sort_unstable_by(|left, right| {
+            right
+                .cpu_percent
+                .total_cmp(&left.cpu_percent)
+                .then_with(|| right.memory_bytes.cmp(&left.memory_bytes))
+                .then_with(|| left.name.cmp(&right.name))
+        });
+
+        Self {
+            physical_cores: snapshot.cpu_physical_cores,
+            logical_threads: Some(snapshot.cpu_logical_threads.max(snapshot.cpu_cores)),
+            total_memory_gib: Some(snapshot.total_ram).filter(|value| value.is_finite()),
+            uptime_seconds: Some(snapshot.uptime),
+            processes,
+        }
+    }
 }
 
 /// All semantic inputs needed by the V2 dashboard compositor.
@@ -51,7 +85,7 @@ pub(crate) struct DashboardV2SystemContext {
 /// The compositor deliberately accepts prepared widget models. It never reaches
 /// into collectors, snapshots, or the V1 application state.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct DashboardV2Content {
+pub struct DashboardV2Content {
     primary: [Option<WidgetRenderModel>; PRIMARY_COUNT],
     pulse_input: NormalizedPulseInput,
     pulse_behavior: Option<PulseBehavior>,
@@ -62,7 +96,7 @@ pub(crate) struct DashboardV2Content {
 }
 
 impl DashboardV2Content {
-    pub(crate) fn new(
+    pub fn new(
         primary: [Option<WidgetRenderModel>; PRIMARY_COUNT],
         pulse_input: NormalizedPulseInput,
         state: DashboardState,
@@ -78,57 +112,57 @@ impl DashboardV2Content {
         }
     }
 
-    pub(crate) fn primary(&self) -> [Option<WidgetRenderModel>; PRIMARY_COUNT] {
+    pub fn primary(&self) -> [Option<WidgetRenderModel>; PRIMARY_COUNT] {
         self.primary
     }
 
-    pub(crate) fn pulse_input(&self) -> NormalizedPulseInput {
+    pub fn pulse_input(&self) -> NormalizedPulseInput {
         self.pulse_input
     }
 
-    pub(crate) fn with_pulse_behavior(mut self, behavior: PulseBehavior) -> Self {
+    pub fn with_pulse_behavior(mut self, behavior: PulseBehavior) -> Self {
         self.pulse_behavior = Some(behavior);
         self
     }
 
-    pub(crate) fn pulse_behavior(&self) -> Option<PulseBehavior> {
+    pub fn pulse_behavior(&self) -> Option<PulseBehavior> {
         self.pulse_behavior
     }
 
-    pub(crate) fn state(&self) -> DashboardState {
+    pub fn state(&self) -> DashboardState {
         self.state
     }
 
-    pub(crate) fn with_inventory(mut self, inventory: super::HardwareInventory) -> Self {
+    pub fn with_inventory(mut self, inventory: super::HardwareInventory) -> Self {
         self.inventory = inventory;
         self
     }
 
-    pub(crate) fn inventory(&self) -> &super::HardwareInventory {
+    pub fn inventory(&self) -> &super::HardwareInventory {
         &self.inventory
     }
 
-    pub(crate) fn with_system_context(mut self, context: DashboardV2SystemContext) -> Self {
+    pub fn with_system_context(mut self, context: DashboardV2SystemContext) -> Self {
         self.system_context = Some(context);
         self
     }
 
-    pub(crate) fn system_context(&self) -> Option<&DashboardV2SystemContext> {
+    pub fn system_context(&self) -> Option<&DashboardV2SystemContext> {
         self.system_context.as_ref()
     }
 
-    pub(crate) fn with_live_mode(mut self, live_mode: bool) -> Self {
+    pub fn with_live_mode(mut self, live_mode: bool) -> Self {
         self.live_mode = live_mode;
         self
     }
 
-    pub(crate) const fn live_mode(&self) -> bool {
+    pub const fn live_mode(&self) -> bool {
         self.live_mode
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum DashboardV2RenderError {
+pub enum DashboardV2RenderError {
     Dashboard(DashboardError),
     Terminal(TerminalRenderError),
     Pulse(FieldError),
@@ -154,7 +188,7 @@ impl From<FieldError> for DashboardV2RenderError {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct DashboardV2RenderSummary {
+pub struct DashboardV2RenderSummary {
     frame: DashboardFrame,
     rendered_primary: [Option<DashboardWidgetId>; PRIMARY_COUNT],
     primary_len: usize,
@@ -162,35 +196,35 @@ pub(crate) struct DashboardV2RenderSummary {
 }
 
 impl DashboardV2RenderSummary {
-    pub(crate) const fn frame(self) -> DashboardFrame {
+    pub const fn frame(self) -> DashboardFrame {
         self.frame
     }
 
-    pub(crate) fn rendered_primary(self) -> impl Iterator<Item = DashboardWidgetId> {
+    pub fn rendered_primary(self) -> impl Iterator<Item = DashboardWidgetId> {
         self.rendered_primary
             .into_iter()
             .take(self.primary_len)
             .flatten()
     }
 
-    pub(crate) const fn pulse_rendered(self) -> bool {
+    pub const fn pulse_rendered(self) -> bool {
         self.pulse_rendered
     }
 }
 
-/// Orchestrates the already existing V2 layout, widget and Pulse pipelines.
+/// Orchestrates the official V2 layout, widget and Pulse pipelines.
 ///
-/// This is an adapter for a future application frontend, not a replacement for
-/// the current dashboard renderer.
+/// The application frontend supplies prepared visual models and the renderer
+/// owns only terminal composition.
 #[derive(Debug, Clone, Copy, Default)]
-pub(crate) struct DashboardV2Renderer {
+pub struct DashboardV2Renderer {
     dashboard: DashboardEngine,
     pulse: PulseV2Engine,
     widgets: TerminalRenderer,
 }
 
 impl DashboardV2Renderer {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             dashboard: DashboardEngine::new(),
             pulse: PulseV2Engine::new(),
@@ -199,7 +233,7 @@ impl DashboardV2Renderer {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn render(
+    pub fn render(
         self,
         preset: DashboardPreset,
         context: DashboardContext,

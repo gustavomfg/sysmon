@@ -1,22 +1,3 @@
-#[path = "../ui/widgets/pulse_v2/mod.rs"]
-mod pulse_v2;
-
-#[allow(dead_code)]
-#[path = "../theme/mod.rs"]
-mod theme;
-
-mod pulse {
-    #[derive(Debug, Clone, Copy, Default, PartialEq)]
-    pub struct PulseInput {
-        pub cpu: f32,
-        pub memory: f32,
-        pub gpu: Option<f32>,
-        pub network: f32,
-        pub load: f32,
-        pub volatility: f32,
-    }
-}
-
 use std::io::{self, Write as IoWrite};
 use std::time::{Duration, Instant};
 
@@ -31,7 +12,7 @@ use crossterm::{
     },
 };
 use ratatui::style::Color as RatatuiColor;
-use theme::Theme;
+use sysmon::{theme::Theme, ui::dashboard_v2 as pulse_v2};
 
 use pulse_v2::{
     ColorRasterFrame, FieldDimensions, NormalizedPulseInput, PulseV2Engine, PulseV2InputTransition,
