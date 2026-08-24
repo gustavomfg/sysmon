@@ -1,6 +1,11 @@
+use std::{
+    cell::RefCell,
+    time::{Duration, Instant},
+};
+
 use crate::{
     app::AppState,
-    pulse::{PulseHealth, PulseModel},
+    pulse::{PulseHealth, PulseInput, PulseModel},
     theme::Theme,
     ui::renderer::panel,
 };
@@ -39,6 +44,8 @@ const RETURN_LAYER_BASE: usize = FLOW_LAYERS * 2;
 const AMBIENT_DUST_LAYER: usize = FLOW_LAYERS * 3;
 const AMBIENT_TRACER_LAYER: usize = AMBIENT_DUST_LAYER + 1;
 const AMBIENT_GLINT_LAYER: usize = AMBIENT_DUST_LAYER + 2;
+const PULSE_FIELD_BUDGET: Duration = Duration::from_millis(12);
+const PULSE_FIELD_RECOVERY_BUDGET: Duration = Duration::from_millis(6);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PulsePreset {
@@ -110,6 +117,34 @@ impl PulsePreset {
             },
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LayoutKey {
+    width: usize,
+    height: usize,
+    braille: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct PulseStateKey {
+    input: PulseInput,
+    reduced_motion: bool,
+    render_revision: u64,
+    render_time: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct FieldCacheKey {
+    layout: LayoutKey,
+    preset: PulsePreset,
+    state: PulseStateKey,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct RasterCacheKey {
+    field: FieldCacheKey,
+    theme: Theme,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -439,6 +474,104 @@ impl FieldFrame {
             self.samples.clone_from(&next);
         }
     }
+}
+
+struct PulseRenderCache {
+    layout: Option<LayoutKey>,
+    selected_preset: Option<PulsePreset>,
+    last_adaptation_revision: Option<u64>,
+    field_key: Option<FieldCacheKey>,
+    field: Option<FieldFrame>,
+    raster_key: Option<RasterCacheKey>,
+    raster: Option<Vec<Line<'static>>>,
+    last_field_cost: Duration,
+}
+
+impl PulseRenderCache {
+    const fn new() -> Self {
+        Self {
+            layout: None,
+            selected_preset: None,
+            last_adaptation_revision: None,
+            field_key: None,
+            field: None,
+            raster_key: None,
+            raster: None,
+            last_field_cost: Duration::ZERO,
+        }
+    }
+
+    fn ensure_field(&mut self, width: usize, height: usize, braille: bool, pulse: &PulseModel) {
+        let layout = LayoutKey {
+            width,
+            height,
+            braille,
+        };
+        let area_width = width.saturating_div(2).max(1);
+        let area_height = if braille {
+            height.saturating_div(4).max(1)
+        } else {
+            height.saturating_div(2).max(1)
+        };
+        let base_preset = preset_for(area_width, area_height);
+        let state = PulseStateKey {
+            input: pulse.input(),
+            reduced_motion: pulse.reduced_motion(),
+            render_revision: pulse.render_revision(),
+            render_time: pulse.render_time_seconds().to_bits(),
+        };
+        if self.layout != Some(layout) {
+            self.layout = Some(layout);
+            self.selected_preset = Some(base_preset);
+            self.last_adaptation_revision = Some(state.render_revision);
+            self.last_field_cost = Duration::ZERO;
+            self.field_key = None;
+            self.field = None;
+            self.raster_key = None;
+            self.raster = None;
+        } else if self.last_adaptation_revision != Some(state.render_revision) {
+            self.last_adaptation_revision = Some(state.render_revision);
+            let selected_preset = self.selected_preset.unwrap_or(base_preset);
+            self.selected_preset = Some(adaptive_preset(
+                selected_preset,
+                base_preset,
+                self.last_field_cost,
+            ));
+        } else if self.selected_preset.is_none() {
+            self.selected_preset = Some(base_preset);
+        }
+
+        let preset = self.selected_preset.unwrap_or(base_preset);
+        let key = FieldCacheKey {
+            layout,
+            preset,
+            state,
+        };
+        if self.field_key == Some(key) {
+            return;
+        }
+
+        let started = Instant::now();
+        let field = build_field(
+            width,
+            height,
+            braille,
+            preset,
+            pulse.health(),
+            animation_time(pulse),
+            pulse,
+        );
+        self.last_field_cost = started.elapsed();
+        self.field_key = Some(key);
+        self.field = Some(field);
+        self.raster_key = None;
+        self.raster = None;
+    }
+}
+
+thread_local! {
+    static PULSE_RENDER_CACHE: RefCell<PulseRenderCache> =
+        const { RefCell::new(PulseRenderCache::new()) };
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -873,72 +1006,79 @@ fn uses_braille(area: Rect) -> bool {
 fn braille_lines(area: Rect, pulse: &PulseModel, theme: &Theme) -> Vec<Line<'static>> {
     let width = usize::from(area.width.saturating_sub(2)).max(1);
     let height = usize::from(area.height.saturating_sub(2)).max(1);
-    let field = field_for_area(width, height, true, pulse);
+    let grid_width = width.saturating_mul(2).max(1);
+    let grid_height = height.saturating_mul(4).max(1);
     let health = pulse.health();
-    let lighting = field.lighting_range();
+    cached_raster(grid_width, grid_height, true, pulse, *theme, |field| {
+        let lighting = field.lighting_range();
 
-    (0..height)
-        .map(|cell_y| {
-            let mut spans = Vec::with_capacity(width);
-            for cell_x in 0..width {
-                let mut mask = 0_u8;
-                let mut strongest = EnergySample::default();
+        (0..height)
+            .map(|cell_y| {
+                let mut spans = Vec::with_capacity(width);
+                for cell_x in 0..width {
+                    let mut mask = 0_u8;
+                    let mut strongest = EnergySample::default();
 
-                for (dot_x, dot_y, bit) in BRAILLE_DOTS {
-                    let x = cell_x * 2 + usize::from(dot_x);
-                    let y = cell_y * 4 + usize::from(dot_y);
-                    let sample = field.sample(x, y);
-                    if sample.energy > FIELD_THRESHOLD {
-                        mask |= 1 << bit;
+                    for (dot_x, dot_y, bit) in BRAILLE_DOTS {
+                        let x = cell_x * 2 + usize::from(dot_x);
+                        let y = cell_y * 4 + usize::from(dot_y);
+                        let sample = field.sample(x, y);
+                        if sample.energy > FIELD_THRESHOLD {
+                            mask |= 1 << bit;
+                        }
+                        if sample.energy > strongest.energy {
+                            strongest = sample;
+                        }
                     }
-                    if sample.energy > strongest.energy {
-                        strongest = sample;
-                    }
+
+                    let symbol = char::from_u32(0x2800 + u32::from(mask)).unwrap_or(' ');
+                    spans.push(Span::styled(
+                        symbol.to_string(),
+                        sample_style(theme, health, strongest, lighting, mask.count_ones()),
+                    ));
                 }
-
-                let symbol = char::from_u32(0x2800 + u32::from(mask)).unwrap_or(' ');
-                spans.push(Span::styled(
-                    symbol.to_string(),
-                    sample_style(theme, health, strongest, lighting, mask.count_ones()),
-                ));
-            }
-            Line::from(spans)
-        })
-        .collect()
+                Line::from(spans)
+            })
+            .collect()
+    })
 }
 
 fn unicode_lines(area: Rect, pulse: &PulseModel, theme: &Theme) -> Vec<Line<'static>> {
     let width = usize::from(area.width.saturating_sub(2)).max(1);
     let height = usize::from(area.height.saturating_sub(2)).max(1);
-    let field = field_for_area(width, height, false, pulse);
+    let grid_width = width.saturating_mul(2).max(1);
+    let grid_height = height.saturating_mul(2).max(1);
     let health = pulse.health();
-    let lighting = field.lighting_range();
+    cached_raster(grid_width, grid_height, false, pulse, *theme, |field| {
+        let lighting = field.lighting_range();
 
-    (0..height)
-        .map(|cell_y| {
-            let spans = (0..width)
-                .map(|cell_x| {
-                    let sample = field.sample(cell_x * 2 + 1, cell_y * 2 + 1);
-                    let symbol = unicode_symbol(sample, lighting);
-                    Span::styled(
-                        symbol.to_string(),
-                        sample_style(theme, health, sample, lighting, 1),
-                    )
-                })
-                .collect::<Vec<_>>();
-            Line::from(spans)
-        })
-        .collect()
+        (0..height)
+            .map(|cell_y| {
+                let spans = (0..width)
+                    .map(|cell_x| {
+                        let sample = field.sample(cell_x * 2 + 1, cell_y * 2 + 1);
+                        let symbol = unicode_symbol(sample, lighting);
+                        Span::styled(
+                            symbol.to_string(),
+                            sample_style(theme, health, sample, lighting, 1),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                Line::from(spans)
+            })
+            .collect()
+    })
 }
 
 fn animation_time(pulse: &PulseModel) -> f32 {
     if pulse.reduced_motion() {
         0.0
     } else {
-        pulse.time_seconds()
+        pulse.render_time_seconds()
     }
 }
 
+#[cfg(test)]
 fn field_for_area(width: usize, height: usize, braille: bool, pulse: &PulseModel) -> FieldFrame {
     let grid_width = width.saturating_mul(2);
     let grid_height = if braille {
@@ -946,16 +1086,67 @@ fn field_for_area(width: usize, height: usize, braille: bool, pulse: &PulseModel
     } else {
         height.saturating_mul(2)
     };
-    let preset = preset_for(width, height);
-    build_field(
+    with_cached_field(
         grid_width.max(1),
         grid_height.max(1),
         braille,
-        preset,
-        pulse.health(),
-        animation_time(pulse),
         pulse,
+        |field| field.clone(),
     )
+}
+
+#[cfg(test)]
+fn with_cached_field<T>(
+    width: usize,
+    height: usize,
+    braille: bool,
+    pulse: &PulseModel,
+    render: impl FnOnce(&FieldFrame) -> T,
+) -> T {
+    PULSE_RENDER_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        cache.ensure_field(width, height, braille, pulse);
+        render(
+            cache
+                .field
+                .as_ref()
+                .expect("pulse field cache must contain the ensured field"),
+        )
+    })
+}
+
+fn cached_raster(
+    width: usize,
+    height: usize,
+    braille: bool,
+    pulse: &PulseModel,
+    theme: Theme,
+    render: impl FnOnce(&FieldFrame) -> Vec<Line<'static>>,
+) -> Vec<Line<'static>> {
+    PULSE_RENDER_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        cache.ensure_field(width, height, braille, pulse);
+        let Some(field_key) = cache.field_key else {
+            return Vec::new();
+        };
+        let raster_key = RasterCacheKey {
+            field: field_key,
+            theme,
+        };
+        if cache.raster_key == Some(raster_key) {
+            return cache.raster.clone().unwrap_or_default();
+        }
+
+        let lines = render(
+            cache
+                .field
+                .as_ref()
+                .expect("pulse field cache must contain the ensured field"),
+        );
+        cache.raster_key = Some(raster_key);
+        cache.raster = Some(lines.clone());
+        lines
+    })
 }
 
 fn core_state(time: f32, health: PulseHealth, pulse: &PulseModel) -> CoreState {
@@ -995,6 +1186,38 @@ fn preset_for(width: usize, height: usize) -> PulsePreset {
         PulsePreset::Widescreen
     } else {
         PulsePreset::Standard
+    }
+}
+
+fn adaptive_preset(
+    selected: PulsePreset,
+    base: PulsePreset,
+    last_field_cost: Duration,
+) -> PulsePreset {
+    if last_field_cost > PULSE_FIELD_BUDGET {
+        preset_at_rank(preset_rank(selected).saturating_sub(1))
+    } else if last_field_cost <= PULSE_FIELD_RECOVERY_BUDGET {
+        preset_at_rank((preset_rank(selected) + 1).min(preset_rank(base)))
+    } else {
+        selected
+    }
+}
+
+fn preset_rank(preset: PulsePreset) -> u8 {
+    match preset {
+        PulsePreset::Compact => 0,
+        PulsePreset::Standard => 1,
+        PulsePreset::Widescreen => 2,
+        PulsePreset::LargeWidescreen => 3,
+    }
+}
+
+fn preset_at_rank(rank: u8) -> PulsePreset {
+    match rank {
+        0 => PulsePreset::Compact,
+        1 => PulsePreset::Standard,
+        2 => PulsePreset::Widescreen,
+        _ => PulsePreset::LargeWidescreen,
     }
 }
 

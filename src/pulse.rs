@@ -156,11 +156,15 @@ pub struct PulseModel {
     intensity: Tween,
     volatility: Tween,
     elapsed: Duration,
+    ambient_elapsed: Duration,
+    render_elapsed: Duration,
+    render_revision: u64,
     reduced_motion: bool,
     has_input: bool,
 }
 
 const PULSE_DURATION: Duration = Duration::from_millis(300);
+const AMBIENT_UPDATE_INTERVAL: Duration = Duration::from_millis(80);
 
 impl PulseModel {
     pub fn new(reduced_motion: bool) -> Self {
@@ -169,6 +173,9 @@ impl PulseModel {
             intensity: Tween::new(0.0, PULSE_DURATION, reduced_motion),
             volatility: Tween::new(0.0, PULSE_DURATION, reduced_motion),
             elapsed: Duration::ZERO,
+            ambient_elapsed: Duration::ZERO,
+            render_elapsed: Duration::ZERO,
+            render_revision: 0,
             reduced_motion,
             has_input: false,
         }
@@ -179,6 +186,7 @@ impl PulseModel {
     }
 
     pub fn set_input(&mut self, input: PulseInput) {
+        let input_changed = !self.has_input || self.input != input;
         let target_intensity = f64::from(input.intensity());
         let target_volatility = f64::from(input.volatility.clamp(0.0, 1.0));
         self.input = input;
@@ -193,12 +201,21 @@ impl PulseModel {
             self.volatility.snap_to(target_volatility);
             self.has_input = true;
         }
+
+        if input_changed {
+            self.mark_render_revision();
+        }
     }
 
     pub fn set_reduced_motion(&mut self, reduced_motion: bool) {
+        let changed = self.reduced_motion != reduced_motion;
         self.reduced_motion = reduced_motion;
         self.intensity.set_reduced_motion(reduced_motion);
         self.volatility.set_reduced_motion(reduced_motion);
+        self.ambient_elapsed = Duration::ZERO;
+        if changed {
+            self.mark_render_revision();
+        }
     }
 
     pub fn update(&mut self, delta: Duration) -> bool {
@@ -209,16 +226,29 @@ impl PulseModel {
         self.elapsed = self.elapsed.saturating_add(delta);
         let intensity_changed = self.intensity.update(delta);
         let volatility_changed = self.volatility.update(delta);
+        let ambient_changed = if self.reduced_motion || delta.is_zero() {
+            self.ambient_elapsed = Duration::ZERO;
+            false
+        } else {
+            self.ambient_elapsed = self.ambient_elapsed.saturating_add(delta);
+            if self.ambient_elapsed >= AMBIENT_UPDATE_INTERVAL {
+                self.ambient_elapsed = Duration::ZERO;
+                true
+            } else {
+                false
+            }
+        };
+        let changed = intensity_changed || volatility_changed || ambient_changed;
 
-        intensity_changed || volatility_changed || self.is_ambient_active(delta)
-    }
-
-    fn is_ambient_active(&self, delta: Duration) -> bool {
-        !self.reduced_motion && !delta.is_zero()
+        if changed {
+            self.render_elapsed = self.elapsed;
+            self.mark_render_revision();
+        }
+        changed
     }
 
     pub fn is_active(&self) -> bool {
-        self.has_input && (!self.reduced_motion || self.intensity.is_active())
+        self.has_input && (self.intensity.is_active() || self.volatility.is_active())
     }
 
     pub fn intensity(&self) -> f32 {
@@ -250,12 +280,26 @@ impl PulseModel {
         }
     }
 
+    #[allow(dead_code)]
     pub fn time_seconds(&self) -> f32 {
         self.elapsed.as_secs_f32()
     }
 
+    pub fn render_time_seconds(&self) -> f32 {
+        self.render_elapsed.as_secs_f32()
+    }
+
+    pub fn render_revision(&self) -> u64 {
+        self.render_revision
+    }
+
     pub fn reduced_motion(&self) -> bool {
         self.reduced_motion
+    }
+
+    fn mark_render_revision(&mut self) {
+        self.render_elapsed = self.elapsed;
+        self.render_revision = self.render_revision.wrapping_add(1);
     }
 }
 
@@ -379,7 +423,7 @@ mod tests {
         let first = animated.breath();
         animated.update(Duration::from_millis(100));
         assert_ne!(first, animated.breath());
-        assert!(animated.is_active());
+        assert!(!animated.is_active());
 
         let mut reduced = PulseModel::new(true);
         reduced.set_input(animated.input());
@@ -412,6 +456,24 @@ mod tests {
 
         assert!(pulse.intensity() > 0.0);
         assert!(pulse.volatility() > 0.0);
+    }
+
+    #[test]
+    fn ambient_updates_are_limited_to_the_pulse_cadence() {
+        let mut pulse = PulseModel::new(false);
+        pulse.set_input(PulseInput {
+            cpu: 0.8,
+            memory: 0.6,
+            gpu: None,
+            network: 0.2,
+            load: 0.5,
+            volatility: 0.1,
+        });
+
+        assert!(!pulse.update(Duration::from_millis(40)));
+        assert!(!pulse.update(Duration::from_millis(39)));
+        assert!(pulse.update(Duration::from_millis(1)));
+        assert!(!pulse.update(Duration::from_millis(40)));
     }
 
     fn snapshot(cpu_usage: f32, total_ram: f64, used_ram: f64) -> SystemInfo {

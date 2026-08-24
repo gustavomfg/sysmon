@@ -40,6 +40,8 @@ use system::info::{SystemInfo, SystemInfoCollector};
 
 const COLLECTOR_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(750);
 const COLLECTOR_SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(5);
+const RENDER_INTERVAL: Duration = Duration::from_millis(50);
+const SNAPSHOT_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 struct TerminalGuard;
 
@@ -195,9 +197,7 @@ fn run_app(
     app: &mut AppState,
 ) -> io::Result<()> {
     let (snapshots, collector_worker) = spawn_collector(collector, app.refresh_interval());
-    let render_interval = Duration::from_millis(33);
-    let snapshot_poll_interval = Duration::from_millis(50);
-    let mut last_render = Instant::now() - render_interval;
+    let mut last_render = Instant::now() - RENDER_INTERVAL;
     let mut last_animation_update = Instant::now();
     let mut render_pending = true;
     let mut requested_collection_interval = app.refresh_interval();
@@ -224,7 +224,7 @@ fn run_app(
             render_pending = true;
         }
 
-        let render_due = last_render.elapsed() >= render_interval;
+        let render_due = last_render.elapsed() >= RENDER_INTERVAL;
         if render_pending && (received_snapshot || render_due || !app.animations_active()) {
             terminal.draw(|frame| {
                 ui::dashboard::draw_app(frame, app);
@@ -233,10 +233,10 @@ fn run_app(
             render_pending = false;
         }
 
-        let until_render = render_interval
+        let until_render = RENDER_INTERVAL
             .checked_sub(last_render.elapsed())
             .unwrap_or(Duration::ZERO);
-        let until_snapshot_poll = snapshot_poll_interval;
+        let until_snapshot_poll = SNAPSHOT_POLL_INTERVAL;
         let timeout = if app.animations_active() || render_pending {
             until_snapshot_poll.min(until_render)
         } else {
