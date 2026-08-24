@@ -1,8 +1,12 @@
 use std::{
     collections::BTreeMap,
-    process::Command,
+    process::{Child, Command, Stdio},
+    thread,
     time::{Duration, Instant},
 };
+
+const NVIDIA_SMI_TIMEOUT: Duration = Duration::from_millis(500);
+const NVIDIA_SMI_POLL_INTERVAL: Duration = Duration::from_millis(5);
 
 #[derive(Clone)]
 pub struct GpuInfo {
@@ -46,7 +50,9 @@ impl GpuCollector {
             .is_none_or(|last_refresh| last_refresh.elapsed() >= self.refresh_interval);
 
         if should_refresh {
-            self.cached = GpuInfo::get_all();
+            if let Some(gpus) = GpuInfo::get_all() {
+                self.cached = gpus;
+            }
             self.last_refresh = Some(Instant::now());
         }
 
@@ -55,28 +61,26 @@ impl GpuCollector {
 }
 
 impl GpuInfo {
-    pub fn get_all() -> Vec<Self> {
-        let nvidia_gpus = Command::new("nvidia-smi")
-            .args([
-                "--query-gpu=name,temperature.gpu,utilization.gpu,memory.used,memory.total,clocks.current.graphics,power.draw",
-                "--format=csv,noheader,nounits",
-            ])
-            .output()
-            .ok()
-            .filter(|output| output.status.success())
-            .map(|output| Self::parse_output(&String::from_utf8_lossy(&output.stdout)))
-            .unwrap_or_default();
+    pub fn get_all() -> Option<Vec<Self>> {
+        let nvidia_gpus = query_nvidia_smi();
+        let drm_gpus = drm_gpu_infos();
+
+        if nvidia_gpus.is_none() && drm_gpus.is_empty() {
+            return None;
+        }
+
+        let nvidia_gpus = nvidia_gpus.unwrap_or_default();
         let has_nvidia_metrics = nvidia_gpus
             .iter()
             .any(|gpu| gpu.name.to_ascii_lowercase().contains("nvidia"));
         let mut gpus = nvidia_gpus;
         gpus.extend(
-            drm_gpu_infos()
+            drm_gpus
                 .into_iter()
                 .filter(|gpu| !has_nvidia_metrics || !gpu.name.starts_with("NVIDIA")),
         );
         assign_stable_gpu_ids(&mut gpus);
-        gpus
+        Some(gpus)
     }
 
     fn parse_output(output: &str) -> Vec<Self> {
@@ -147,6 +151,47 @@ impl GpuInfo {
             power_watts: None,
         })
     }
+}
+
+fn query_nvidia_smi() -> Option<Vec<GpuInfo>> {
+    let mut child = Command::new("nvidia-smi")
+        .args([
+            "--query-gpu=name,temperature.gpu,utilization.gpu,memory.used,memory.total,clocks.current.graphics,power.draw",
+            "--format=csv,noheader,nounits",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+
+    let deadline = Instant::now() + NVIDIA_SMI_TIMEOUT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                if !status.success() {
+                    return None;
+                }
+
+                let output = child.wait_with_output().ok()?;
+                return Some(GpuInfo::parse_output(&String::from_utf8_lossy(
+                    &output.stdout,
+                )));
+            }
+            Ok(None) if Instant::now() < deadline => {
+                thread::sleep(NVIDIA_SMI_POLL_INTERVAL);
+            }
+            Ok(None) | Err(_) => {
+                stop_child(&mut child);
+                return None;
+            }
+        }
+    }
+}
+
+fn stop_child(child: &mut Child) {
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 fn drm_gpu_infos() -> Vec<GpuInfo> {

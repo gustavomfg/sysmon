@@ -35,6 +35,9 @@ use ratatui::{Terminal, backend::CrosstermBackend};
 
 use system::info::{SystemInfo, SystemInfoCollector};
 
+const COLLECTOR_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(750);
+const COLLECTOR_SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(5);
+
 struct TerminalGuard;
 
 enum CollectorCommand {
@@ -57,7 +60,14 @@ impl Drop for CollectorWorker {
     fn drop(&mut self) {
         let _ = self.commands.send(CollectorCommand::Stop);
         if let Some(handle) = self.handle.take() {
-            let _ = handle.join();
+            let deadline = Instant::now() + COLLECTOR_SHUTDOWN_TIMEOUT;
+            while !handle.is_finished() && Instant::now() < deadline {
+                thread::sleep(COLLECTOR_SHUTDOWN_POLL_INTERVAL);
+            }
+
+            if handle.is_finished() {
+                let _ = handle.join();
+            }
         }
     }
 }
