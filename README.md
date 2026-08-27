@@ -28,6 +28,7 @@ Um monitor de sistema no terminal feito em Rust, com interface TUI leve, atualiz
 - Dashboard TUI usando `ratatui` e `crossterm`.
 - Uso geral de CPU com histórico visual.
 - Informações de sistema: OS, kernel, uptime, cores, load average e quantidade de processos.
+- Contexto operacional ao vivo com hostname, memória disponível, idade da amostra e identidade dos processos.
 - RAM e swap usados/totais com barra de progresso.
 - Top 5 processos por uso de memória, exibindo também CPU por processo.
 - Discos montados com espaço usado/total.
@@ -94,6 +95,8 @@ sysmon
 | `Ctrl+P` | Abrir a command palette |
 | `/` ou `Ctrl+F` | Buscar processos |
 | `Tab` / `Shift+Tab` | Alternar o foco entre widgets |
+| `j` / `k` ou `↑` / `↓` | Navegar entre widgets |
+| `e` | Expandir/recolher o widget focado |
 
 Na command palette, use as setas para navegar, `Enter` para executar e `Esc` para fechar. A opção `Settings` permite trocar o tema, reduzir o movimento e ajustar o intervalo de atualização.
 
