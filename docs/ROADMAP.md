@@ -126,4 +126,4 @@ Projects the continuous internal representation into Braille or Unicode cells.
 
 ### Integration
 
-Connects the Pulse V2 renderer to the dashboard while preserving compatibility with Pulse V1 until the experimental implementation becomes the default.
+Connects the Pulse renderer to the dashboard as the default visualization pipeline.

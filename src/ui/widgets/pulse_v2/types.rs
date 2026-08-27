@@ -1,5 +1,3 @@
-use crate::pulse::PulseInput;
-
 pub const MAX_FIELD_DIMENSION: usize = 4_096;
 pub const MAX_FIELD_SAMPLES: usize = 1_048_576;
 
@@ -218,19 +216,6 @@ impl PulseV2InputTransition {
     }
 }
 
-impl From<PulseInput> for NormalizedPulseInput {
-    fn from(input: PulseInput) -> Self {
-        Self {
-            cpu: sanitize_normalized(input.cpu),
-            memory: sanitize_normalized(input.memory),
-            gpu: input.gpu.map(sanitize_normalized),
-            network: sanitize_normalized(input.network),
-            load: sanitize_normalized(input.load),
-            volatility: sanitize_normalized(input.volatility),
-        }
-    }
-}
-
 fn validate_normalized(value: f32) -> Result<(), InputError> {
     if !value.is_finite() {
         return Err(InputError::NonFinite);
@@ -239,14 +224,6 @@ fn validate_normalized(value: f32) -> Result<(), InputError> {
         return Err(InputError::OutOfRange);
     }
     Ok(())
-}
-
-fn sanitize_normalized(value: f32) -> f32 {
-    if value.is_finite() {
-        value.clamp(0.0, 1.0)
-    } else {
-        0.0
-    }
 }
 
 fn lerp(from: f32, target: f32, amount: f32) -> f32 {

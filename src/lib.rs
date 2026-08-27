@@ -7,7 +7,6 @@ mod export;
 mod focus;
 mod history;
 mod process_search;
-pub mod pulse;
 #[path = "ui/widgets/pulse_v2/mod.rs"]
 pub mod pulse_v2;
 #[allow(clippy::new_without_default)]

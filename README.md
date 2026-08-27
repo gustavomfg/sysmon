@@ -59,7 +59,7 @@ Execute em modo desenvolvimento:
 cargo run
 ```
 
-Esse é o único comando de execução necessário. Os binários `*_viewer` em `src/bin` são ferramentas de desenvolvimento para testar visualizações isoladas.
+Esse é o único comando de execução e inicia o dashboard atual do SysMon.
 
 Ou gere o binário otimizado:
 

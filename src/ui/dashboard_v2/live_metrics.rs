@@ -37,7 +37,7 @@ impl From<MetricModelError> for LiveMetricsError {
     }
 }
 
-/// Collector-independent input produced by the viewer's snapshot adapter.
+/// Collector-independent input produced by the runtime snapshot adapter.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LiveSnapshot {
     pub cpu: CpuLiveSample,

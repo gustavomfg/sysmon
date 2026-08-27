@@ -11,7 +11,6 @@ use crate::{
     focus::{FocusState, FocusTarget},
     history::{History, Metric},
     process_search::ProcessSearchState,
-    pulse::{PulseInput, PulseModel},
     system::info::SystemInfo,
     theme::{Theme, ThemeKind},
     timeline::Timeline,
@@ -25,7 +24,6 @@ pub struct AppState {
     theme_kind: ThemeKind,
     cpu_tween: Tween,
     memory_tween: Tween,
-    pulse: PulseModel,
     reduced_motion: bool,
     refresh_interval: Duration,
     widgets: WidgetVisibility,
@@ -55,7 +53,6 @@ impl AppState {
             theme_kind: ThemeKind::Pulse,
             cpu_tween: Tween::new(0.0, ANIMATION_DURATION, reduced_motion),
             memory_tween: Tween::new(0.0, ANIMATION_DURATION, reduced_motion),
-            pulse: PulseModel::new(reduced_motion),
             reduced_motion,
             refresh_interval: DEFAULT_REFRESH_INTERVAL,
             widgets: WidgetVisibility::default(),
@@ -74,7 +71,6 @@ impl AppState {
 
     pub fn update(&mut self, snapshot: SystemInfo) {
         let first_snapshot = self.snapshot.is_none();
-        let pulse_input = PulseInput::from_snapshots(&snapshot, self.snapshot.as_ref());
         let cpu_usage = snapshot.cpu_usage.clamp(0.0, 100.0) as f64;
         let memory_usage = memory_usage_percent(snapshot.used_ram, snapshot.total_ram);
 
@@ -92,8 +88,6 @@ impl AppState {
             self.memory_tween
                 .set_target_clamped(memory_usage, 0.0, 100.0);
         }
-
-        self.pulse.set_input(pulse_input);
 
         self.snapshot = Some(snapshot);
     }
@@ -137,20 +131,15 @@ impl AppState {
         self.memory_tween.current()
     }
 
-    pub fn pulse(&self) -> &PulseModel {
-        &self.pulse
-    }
-
     pub fn update_animations(&mut self, delta: Duration) -> bool {
         let cpu_changed = self.cpu_tween.update(delta);
         let memory_changed = self.memory_tween.update(delta);
-        let pulse_changed = self.pulse.update(delta);
 
-        cpu_changed || memory_changed || pulse_changed
+        cpu_changed || memory_changed
     }
 
     pub fn animations_active(&self) -> bool {
-        self.cpu_tween.is_active() || self.memory_tween.is_active() || self.pulse.is_active()
+        self.cpu_tween.is_active() || self.memory_tween.is_active()
     }
 
     pub fn palette(&self) -> &CommandPaletteState {
@@ -443,7 +432,6 @@ impl AppState {
         self.reduced_motion = reduced_motion;
         self.cpu_tween.set_reduced_motion(reduced_motion);
         self.memory_tween.set_reduced_motion(reduced_motion);
-        self.pulse.set_reduced_motion(reduced_motion);
         self.timeline.record(format!(
             "Reduced motion {}",
             if reduced_motion {
@@ -684,13 +672,12 @@ mod tests {
     }
 
     #[test]
-    fn advances_pulse_while_metric_tweens_are_active() {
+    fn advances_metric_tweens_after_a_new_sample() {
         let mut app = AppState::new();
         app.update(snapshot(10.0));
         app.update(snapshot(90.0));
 
         assert!(app.update_animations(std::time::Duration::from_millis(100)));
-        assert!(app.pulse().time_seconds() >= 0.099);
     }
 
     fn run_command(app: &mut AppState, query: &str) {

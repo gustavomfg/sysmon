@@ -1,5 +1,5 @@
-//! Pulse V2's terminal-independent energy, organic-motion and presentation
-//! pipeline. Pulse V1 remains separately available to the existing dashboard.
+//! SysMon's terminal-independent energy, organic-motion and presentation
+//! pipeline for the active Pulse visualization.
 
 // V2 is intentionally registered before integration. Its public contracts are
 // exercised by this module's pure tests and will be consumed by later phases.
@@ -39,8 +39,6 @@ pub use types::{
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
-
-    use crate::pulse::PulseInput;
 
     use super::{
         FieldDimensions, FieldGradient, FlowField, FlowSample, LightingField, NoiseField,
@@ -131,7 +129,7 @@ mod tests {
     }
 
     #[test]
-    fn normalized_contracts_reject_invalid_values_and_sanitize_v1_input() {
+    fn normalized_contract_rejects_invalid_values() {
         let point = NormalizedPoint::try_new(0.5, 0.5).unwrap();
         assert_eq!((point.x(), point.y()), (0.5, 0.5));
         assert!(NormalizedPoint::try_new(-0.1, 0.5).is_err());
@@ -139,24 +137,14 @@ mod tests {
 
         assert!(NormalizedPulseInput::try_new(0.0, 1.0, None, 0.5, 0.25, 0.0).is_ok());
         assert!(NormalizedPulseInput::try_new(1.1, 0.0, None, 0.0, 0.0, 0.0).is_err());
-
-        let input = NormalizedPulseInput::from(PulseInput {
-            cpu: f32::NAN,
-            memory: 1.5,
-            gpu: Some(-0.5),
-            network: 0.5,
-            load: f32::INFINITY,
-            volatility: 0.2,
-        });
-        assert_eq!(input.cpu(), 0.0);
-        assert_eq!(input.memory(), 1.0);
-        assert_eq!(input.gpu(), Some(0.0));
-        assert_eq!(input.load(), 0.0);
+        assert!(NormalizedPulseInput::try_new(f32::NAN, 0.0, None, 0.0, 0.0, 0.0).is_err());
+        assert!(NormalizedPulseInput::try_new(0.0, 0.0, Some(-0.5), 0.0, 0.0, 0.0).is_err());
+        assert!(NormalizedPulseInput::try_new(0.0, 0.0, None, 0.0, f32::INFINITY, 0.0).is_err());
     }
 
     #[test]
     fn empty_engine_frames_are_valid_and_deterministic() {
-        let input = NormalizedPulseInput::from(PulseInput::default());
+        let input = NormalizedPulseInput::default();
         let dimensions = FieldDimensions::new(80, 20).unwrap();
         let engine = PulseV2Engine::new();
 

@@ -1,20 +1,17 @@
-# Pulse V2 — Energy Field Renderer
+# Pulse — Energy Field Renderer
 
 ## 1. Status
 
-Experimental.
+Implemented.
 
-Pulse V2 is developed independently from the current Pulse renderer.
-
-The existing Pulse V1 remains the stable implementation and must continue working throughout the experiment.
-
-Pulse V2 must not replace V1 until it produces a clearly superior visual result and satisfies all performance, responsiveness, accessibility, and stability requirements defined in this document.
+This document describes the active Pulse renderer used by the default dashboard.
+The energy-field pipeline is the single supported Pulse implementation.
 
 ---
 
 ## 2. Vision
 
-Pulse V2 represents the state of the computer as an emergent computational phenomenon.
+Pulse represents the state of the computer as an emergent computational phenomenon.
 
 It must not look like:
 
@@ -38,9 +35,7 @@ The Pulse should communicate the general condition of the machine before the use
 
 ## 3. Core Principle
 
-Pulse V1 primarily reveals energy by depositing along advected paths.
-
-Pulse V2 reverses that relationship.
+The energy field is the primary representation.
 
 The energy field becomes the primary representation.
 
@@ -69,7 +64,7 @@ Braille / Unicode Rasterization
 
 ## 4. Design Principles
 
-Pulse V2 is built around a small set of immutable architectural principles.
+Pulse is built around a small set of immutable architectural principles.
 
 ### Emergence
 
@@ -113,7 +108,7 @@ The renderer must remain lightweight enough for continuous animation.
 
 ## 5. Architecture
 
-Pulse V2 is organized as a pipeline of independent stages.
+Pulse is organized as a pipeline of independent stages.
 
 Each stage transforms the previous representation into a richer description of the phenomenon.
 
@@ -188,7 +183,7 @@ Instead, it organizes energy.
 
 Regions of high coherence naturally become visible after transport and lighting.
 
-This inversion is one of the defining characteristics of Pulse V2.
+This inversion is one of the defining characteristics of Pulse.
 
 The renderer should never answer:
 
@@ -306,7 +301,7 @@ Only its behavior changes.
 
 ## 13. Success Criteria
 
-Pulse V2 is considered successful only if:
+The current Pulse implementation is successful when:
 
 - the phenomenon no longer resembles animated lines;
 - visible structures emerge naturally from the energy field;

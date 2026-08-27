@@ -147,7 +147,7 @@ the objective metric models unchanged.
 instability into continuous rate, energy, tension, turbulence, density and
 recovery parameters. Its small attack/release controller keeps the Pulse
 alive at idle, responsive under activity and slower to relax after pressure.
-Within the existing Pulse V2 field contract, activity primarily changes
+Within the active Pulse field contract, activity primarily changes
 cadence, source reorganization and energy, while pressure and thermal pressure
 primarily change intensity, compression and recovery. A busy but healthy
 workload can therefore look energetic without looking distressed.

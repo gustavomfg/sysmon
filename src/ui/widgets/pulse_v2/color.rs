@@ -212,7 +212,6 @@ mod tests {
 
     use super::super::{FieldDimensions, NormalizedPulseInput, PulseV2Engine, PulseV2Preset};
     use super::{SemanticColorField, system_stress};
-    use crate::pulse::PulseInput;
     use crate::theme::Theme;
 
     fn input(cpu: f32, memory: f32, gpu: Option<f32>, load: f32) -> NormalizedPulseInput {
@@ -448,15 +447,7 @@ mod tests {
     #[test]
     fn theme_tokens_are_the_only_color_sources() {
         let theme = Theme::pulse();
-        let input = PulseInput {
-            cpu: 0.0,
-            memory: 0.0,
-            gpu: None,
-            network: 0.0,
-            load: 0.0,
-            volatility: 0.0,
-        };
-        let normalized = NormalizedPulseInput::from(input);
+        let normalized = NormalizedPulseInput::default();
         let frame = generated(normalized, true);
         let colors =
             SemanticColorField::from_lighting(frame.lighting(), normalized, &theme).unwrap();

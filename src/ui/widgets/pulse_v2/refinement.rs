@@ -407,17 +407,10 @@ mod tests {
 
     use super::super::NoiseField;
     use super::*;
-    use crate::pulse::PulseInput;
 
     fn input() -> super::super::NormalizedPulseInput {
-        super::super::NormalizedPulseInput::from(PulseInput {
-            cpu: 0.42,
-            memory: 0.48,
-            gpu: Some(0.30),
-            network: 0.18,
-            load: 0.35,
-            volatility: 0.08,
-        })
+        super::super::NormalizedPulseInput::try_new(0.42, 0.48, Some(0.30), 0.18, 0.35, 0.08)
+            .unwrap()
     }
 
     fn generated(seconds: f32, reduced_motion: bool) -> super::super::PulseV2Frame {
