@@ -634,11 +634,13 @@ mod tests {
         let mut snapshot = snapshot(42.0);
         snapshot.processes_list = vec![
             ProcessInfo {
+                pid: 101,
                 name: "shell".to_string(),
                 memory: 10.0,
                 cpu_usage: 1.0,
             },
             ProcessInfo {
+                pid: 202,
                 name: "editor".to_string(),
                 memory: 20.0,
                 cpu_usage: 2.0,
@@ -701,6 +703,7 @@ mod tests {
 
     fn snapshot(cpu_usage: f32) -> SystemInfo {
         SystemInfo {
+            host_name: "test-host".to_string(),
             os_name: "Test OS".to_string(),
             kernel: "test".to_string(),
             cpu_name: "Test CPU".to_string(),

@@ -154,6 +154,7 @@ mod tests {
 
     fn sample_snapshot() -> SystemInfo {
         SystemInfo {
+            host_name: "test-host".to_string(),
             os_name: "Test OS".to_string(),
             kernel: "test".to_string(),
             cpu_name: "Test CPU".to_string(),
@@ -185,6 +186,7 @@ mod tests {
             }],
             storage_devices: Vec::new(),
             processes_list: vec![ProcessInfo {
+                pid: 42,
                 name: "test".to_string(),
                 memory: 1.0,
                 cpu_usage: 2.0,

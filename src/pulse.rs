@@ -478,6 +478,7 @@ mod tests {
 
     fn snapshot(cpu_usage: f32, total_ram: f64, used_ram: f64) -> SystemInfo {
         SystemInfo {
+            host_name: "test-host".to_string(),
             os_name: "Test".to_string(),
             kernel: "Test".to_string(),
             cpu_name: "Test".to_string(),

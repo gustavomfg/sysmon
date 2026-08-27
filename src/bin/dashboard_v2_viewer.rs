@@ -1211,6 +1211,7 @@ mod tests {
     #[test]
     fn live_mode_uses_snapshot_cpu_fields_without_touching_demo_widgets() {
         let snapshot = SystemInfo {
+            host_name: "test-host".to_owned(),
             os_name: "Linux".to_owned(),
             kernel: "test".to_owned(),
             cpu_name: "CPU".to_owned(),
@@ -1321,6 +1322,7 @@ mod tests {
             },
         ];
         let snapshot = SystemInfo {
+            host_name: "test-host".to_owned(),
             os_name: "Linux".to_owned(),
             kernel: "test".to_owned(),
             cpu_name: "CPU".to_owned(),
@@ -1383,6 +1385,7 @@ mod tests {
             },
         ];
         let snapshot = SystemInfo {
+            host_name: "test-host".to_owned(),
             os_name: "Linux".to_owned(),
             kernel: "test".to_owned(),
             cpu_name: "CPU".to_owned(),
@@ -1434,8 +1437,8 @@ mod tests {
         assert!(text.contains("nvme0n1"));
         assert!(text.contains("447.1 GB"));
         assert!(text.contains("931.5 GB"));
-        assert!(text.contains("6 physical"));
-        assert!(text.contains("no live events"));
+        assert!(text.contains("6C / 12T"));
+        assert!(text.contains("no recent events"));
         assert!(text.contains("no live processes"));
         assert!(!text.contains("browser"));
         assert!(!text.contains("compiler"));

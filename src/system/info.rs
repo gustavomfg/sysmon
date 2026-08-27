@@ -68,6 +68,7 @@ pub struct TemperatureInfo {
 
 #[derive(Debug, Clone)]
 pub struct ProcessInfo {
+    pub pid: u32,
     pub name: String,
     pub memory: f64,
     pub cpu_usage: f32,
@@ -75,6 +76,7 @@ pub struct ProcessInfo {
 
 #[derive(Debug, Clone)]
 pub struct SystemInfo {
+    pub host_name: String,
     pub os_name: String,
     pub kernel: String,
     pub cpu_name: String,
@@ -173,6 +175,7 @@ impl SystemInfoCollector {
             .max_by(f64::total_cmp);
 
         SystemInfo {
+            host_name: System::host_name().unwrap_or_else(|| "localhost".to_string()),
             os_name: System::name().unwrap_or("Desconhecido".to_string()),
             kernel: System::kernel_version().unwrap_or("Desconhecido".to_string()),
             cpu_name: self
@@ -326,6 +329,7 @@ impl SystemInfoCollector {
             .processes()
             .values()
             .map(|process| ProcessInfo {
+                pid: process.pid().as_u32(),
                 name: process.name().to_string_lossy().to_string(),
                 memory: process.memory() as f64 / 1024.0 / 1024.0,
                 cpu_usage: process.cpu_usage(),
@@ -590,31 +594,37 @@ mod tests {
     fn keeps_all_processes_but_orders_only_the_dashboard_top_k() {
         let mut processes = vec![
             ProcessInfo {
+                pid: 1,
                 name: "small".to_owned(),
                 memory: 1.0,
                 cpu_usage: 0.0,
             },
             ProcessInfo {
+                pid: 2,
                 name: "largest".to_owned(),
                 memory: 6.0,
                 cpu_usage: 0.0,
             },
             ProcessInfo {
+                pid: 3,
                 name: "second".to_owned(),
                 memory: 5.0,
                 cpu_usage: 0.0,
             },
             ProcessInfo {
+                pid: 4,
                 name: "third".to_owned(),
                 memory: 4.0,
                 cpu_usage: 0.0,
             },
             ProcessInfo {
+                pid: 5,
                 name: "fourth".to_owned(),
                 memory: 3.0,
                 cpu_usage: 0.0,
             },
             ProcessInfo {
+                pid: 6,
                 name: "fifth".to_owned(),
                 memory: 2.0,
                 cpu_usage: 0.0,
