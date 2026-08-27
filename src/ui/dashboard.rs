@@ -44,6 +44,8 @@ pub struct DashboardApp {
     renderer: DashboardV2Renderer,
     last_error: Option<LiveMetricsError>,
     has_snapshot: bool,
+    last_collected_at: Option<Instant>,
+    expanded_widget: Option<crate::ui::dashboard_v2::DashboardWidgetId>,
 }
 
 impl DashboardApp {
@@ -64,6 +66,8 @@ impl DashboardApp {
             renderer: DashboardV2Renderer::new(),
             last_error: None,
             has_snapshot: false,
+            last_collected_at: None,
+            expanded_widget: None,
         }
     }
 
@@ -81,6 +85,7 @@ impl DashboardApp {
 
     pub fn update(&mut self, snapshot: SystemInfo, collected_at: Instant) {
         self.ui.update(snapshot.clone());
+        self.last_collected_at = Some(collected_at);
         self.system_context =
             Some(crate::ui::dashboard_v2::DashboardV2SystemContext::from_system_info(&snapshot));
         let live_snapshot = LiveSnapshot::from_system_info(&snapshot);
@@ -133,7 +138,7 @@ impl DashboardApp {
                 }
             };
         let preset = DashboardPreset::from_dimensions(dimensions);
-        let context = context_for(area);
+        let context = context_for(area, self.expanded_widget);
         let dashboard_state = self
             .models
             .as_ref()
@@ -156,13 +161,26 @@ impl DashboardApp {
             .map(|models| models.inventory().clone())
             .unwrap_or_default();
 
+        let sample_age = self
+            .last_collected_at
+            .map(|collected_at| Instant::now().saturating_duration_since(collected_at));
+        let data_stale = self.last_error.is_some()
+            || sample_age.is_some_and(|age| {
+                age > self
+                    .refresh_interval()
+                    .checked_mul(3)
+                    .unwrap_or(Duration::MAX)
+            });
         let content =
             DashboardV2Content::new(primary, self.pulse_behavior.input(), dashboard_state)
                 .with_pulse_behavior(self.pulse_behavior)
                 .with_inventory(inventory)
                 .with_live_mode(self.has_snapshot)
                 .with_focused_widget(focused_widget)
-                .with_data_stale(self.last_error.is_some());
+                .with_expanded_widget(self.expanded_widget)
+                .with_data_stale(data_stale)
+                .with_sample_age(sample_age)
+                .with_recent_events(self.ui.timeline().events().to_vec());
         let content = if let Some(system_context) = self.system_context.clone() {
             content.with_system_context(system_context)
         } else {
@@ -213,6 +231,7 @@ impl DashboardApp {
         }
 
         match key.code {
+            KeyCode::Esc if self.expanded_widget.take().is_some() => {}
             KeyCode::Esc if self.ui.focus_active() => {
                 self.ui.dispatch(Action::ExitFocus);
             }
@@ -232,9 +251,24 @@ impl DashboardApp {
                         Action::FocusNext
                     });
             }
+            KeyCode::Char('e') => self.toggle_expanded(),
+            KeyCode::Char('j') | KeyCode::Down => {
+                self.ui.dispatch(Action::FocusNext);
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                self.ui.dispatch(Action::FocusPrevious);
+            }
             _ => {}
         }
         false
+    }
+
+    fn toggle_expanded(&mut self) {
+        let focused = focused_widget(&self.ui);
+        self.expanded_widget = match (self.expanded_widget, focused) {
+            (Some(current), Some(next)) if current == next => None,
+            (_, next) => next,
+        };
     }
 
     fn open_command(&mut self, query: &str) {
@@ -339,7 +373,49 @@ impl Default for DashboardApp {
     }
 }
 
-fn context_for(area: Rect) -> DashboardContext {
+fn context_for(
+    area: Rect,
+    expanded_widget: Option<crate::ui::dashboard_v2::DashboardWidgetId>,
+) -> DashboardContext {
+    if let Some(widget) = expanded_widget {
+        let mut context = DashboardContext::default();
+        for region in [
+            crate::ui::dashboard_v2::DashboardRegion::Pulse,
+            crate::ui::dashboard_v2::DashboardRegion::PrimaryMetrics,
+            crate::ui::dashboard_v2::DashboardRegion::SecondaryMetrics,
+            crate::ui::dashboard_v2::DashboardRegion::Charts,
+            crate::ui::dashboard_v2::DashboardRegion::Processes,
+            crate::ui::dashboard_v2::DashboardRegion::Alerts,
+        ] {
+            context = context.without(region);
+        }
+        let region = match widget {
+            crate::ui::dashboard_v2::DashboardWidgetId::Pulse => {
+                crate::ui::dashboard_v2::DashboardRegion::Pulse
+            }
+            crate::ui::dashboard_v2::DashboardWidgetId::SystemSummary => {
+                crate::ui::dashboard_v2::DashboardRegion::SecondaryMetrics
+            }
+            crate::ui::dashboard_v2::DashboardWidgetId::Cpu
+            | crate::ui::dashboard_v2::DashboardWidgetId::Memory
+            | crate::ui::dashboard_v2::DashboardWidgetId::Gpu
+            | crate::ui::dashboard_v2::DashboardWidgetId::Network
+            | crate::ui::dashboard_v2::DashboardWidgetId::Storage => {
+                crate::ui::dashboard_v2::DashboardRegion::PrimaryMetrics
+            }
+            crate::ui::dashboard_v2::DashboardWidgetId::History => {
+                crate::ui::dashboard_v2::DashboardRegion::Charts
+            }
+            crate::ui::dashboard_v2::DashboardWidgetId::Processes => {
+                crate::ui::dashboard_v2::DashboardRegion::Processes
+            }
+            crate::ui::dashboard_v2::DashboardWidgetId::Alerts => {
+                crate::ui::dashboard_v2::DashboardRegion::Alerts
+            }
+        };
+        return context.with(region);
+    }
+
     if area.width >= 100 && area.height >= 28 {
         return DashboardContext::default();
     }
@@ -384,6 +460,14 @@ fn focused_widget(ui: &AppState) -> Option<crate::ui::dashboard_v2::DashboardWid
         (
             FocusTarget::Cpu,
             crate::ui::dashboard_v2::DashboardWidgetId::Cpu,
+        ),
+        (
+            FocusTarget::Overview,
+            crate::ui::dashboard_v2::DashboardWidgetId::Pulse,
+        ),
+        (
+            FocusTarget::System,
+            crate::ui::dashboard_v2::DashboardWidgetId::SystemSummary,
         ),
         (
             FocusTarget::Memory,
@@ -594,7 +678,7 @@ fn render_process_search(frame: &mut Frame<'_>, theme: &Theme, ui: &AppState) {
     } else {
         results
             .iter()
-            .map(|process| ListItem::new(process.name.as_str()))
+            .map(|process| ListItem::new(format!("{:>5}  {}", process.pid, process.name)))
             .collect()
     };
     let mut state = ListState::default();
@@ -632,7 +716,7 @@ mod tests {
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     use ratatui::{Terminal, backend::TestBackend};
 
-    use super::DashboardApp;
+    use super::{DashboardApp, focused_widget};
 
     #[test]
     fn renders_a_terminal_native_surface_at_representative_sizes() {
@@ -687,5 +771,33 @@ mod tests {
         ))));
         assert!(!app.handle_event(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE,))));
         assert!(app.handle_event(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE,))));
+    }
+
+    #[test]
+    fn terminal_focus_can_expand_a_widget_and_step_back_cleanly() {
+        let mut app = DashboardApp::new();
+        assert_eq!(focused_widget(&app.ui), None);
+
+        assert!(!app.handle_event(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE,))));
+        assert_eq!(
+            focused_widget(&app.ui),
+            Some(crate::ui::dashboard_v2::DashboardWidgetId::Pulse)
+        );
+
+        assert!(!app.handle_event(Event::Key(KeyEvent::new(
+            KeyCode::Char('e'),
+            KeyModifiers::NONE,
+        ))));
+        assert_eq!(
+            app.expanded_widget,
+            Some(crate::ui::dashboard_v2::DashboardWidgetId::Pulse)
+        );
+
+        assert!(!app.handle_event(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE,))));
+        assert_eq!(app.expanded_widget, None);
+        assert!(app.ui.focus_active());
+
+        assert!(!app.handle_event(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE,))));
+        assert!(!app.ui.focus_active());
     }
 }

@@ -33,6 +33,7 @@ const HEADER_CENTER: &str = "SYSTEM MONITOR";
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct DashboardProcessSummary {
+    pub pid: u32,
     pub name: String,
     pub cpu_percent: f32,
     pub memory_bytes: u64,
@@ -40,10 +41,16 @@ pub struct DashboardProcessSummary {
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct DashboardV2SystemContext {
+    pub host_name: Option<String>,
+    pub os_name: Option<String>,
+    pub kernel: Option<String>,
     pub physical_cores: Option<usize>,
     pub logical_threads: Option<usize>,
     pub total_memory_gib: Option<f64>,
+    pub available_memory_gib: Option<f64>,
     pub uptime_seconds: Option<u64>,
+    pub load_average: Option<(f64, f64, f64)>,
+    pub process_count: Option<usize>,
     pub processes: Vec<DashboardProcessSummary>,
 }
 
@@ -53,6 +60,7 @@ impl DashboardV2SystemContext {
             .processes_list
             .iter()
             .map(|process| DashboardProcessSummary {
+                pid: process.pid,
                 name: process.name.clone(),
                 cpu_percent: process.cpu_usage,
                 memory_bytes: if process.memory.is_finite() && process.memory >= 0.0 {
@@ -71,10 +79,17 @@ impl DashboardV2SystemContext {
         });
 
         Self {
+            host_name: (!snapshot.host_name.is_empty()).then(|| snapshot.host_name.clone()),
+            os_name: (!snapshot.os_name.is_empty()).then(|| snapshot.os_name.clone()),
+            kernel: (!snapshot.kernel.is_empty()).then(|| snapshot.kernel.clone()),
             physical_cores: snapshot.cpu_physical_cores,
             logical_threads: Some(snapshot.cpu_logical_threads.max(snapshot.cpu_cores)),
             total_memory_gib: Some(snapshot.total_ram).filter(|value| value.is_finite()),
+            available_memory_gib: Some(snapshot.available_ram)
+                .filter(|value| value.is_finite() && *value >= 0.0),
             uptime_seconds: Some(snapshot.uptime),
+            load_average: Some(snapshot.load_average),
+            process_count: Some(snapshot.processes),
             processes,
         }
     }
@@ -94,7 +109,10 @@ pub struct DashboardV2Content {
     system_context: Option<DashboardV2SystemContext>,
     live_mode: bool,
     focused_widget: Option<DashboardWidgetId>,
+    expanded_widget: Option<DashboardWidgetId>,
     data_stale: bool,
+    sample_age: Option<Duration>,
+    recent_events: Vec<String>,
 }
 
 impl DashboardV2Content {
@@ -112,7 +130,10 @@ impl DashboardV2Content {
             system_context: None,
             live_mode: false,
             focused_widget: None,
+            expanded_widget: None,
             data_stale: false,
+            sample_age: None,
+            recent_events: Vec::new(),
         }
     }
 
@@ -173,6 +194,15 @@ impl DashboardV2Content {
         self.focused_widget
     }
 
+    pub fn with_expanded_widget(mut self, expanded_widget: Option<DashboardWidgetId>) -> Self {
+        self.expanded_widget = expanded_widget;
+        self
+    }
+
+    pub const fn expanded_widget(&self) -> Option<DashboardWidgetId> {
+        self.expanded_widget
+    }
+
     pub const fn with_data_stale(mut self, data_stale: bool) -> Self {
         self.data_stale = data_stale;
         self
@@ -180,6 +210,24 @@ impl DashboardV2Content {
 
     pub const fn data_stale(&self) -> bool {
         self.data_stale
+    }
+
+    pub const fn with_sample_age(mut self, sample_age: Option<Duration>) -> Self {
+        self.sample_age = sample_age;
+        self
+    }
+
+    pub const fn sample_age(&self) -> Option<Duration> {
+        self.sample_age
+    }
+
+    pub fn with_recent_events(mut self, recent_events: Vec<String>) -> Self {
+        self.recent_events = recent_events;
+        self
+    }
+
+    pub fn recent_events(&self) -> &[String] {
+        &self.recent_events
     }
 }
 
@@ -338,6 +386,7 @@ impl DashboardV2Renderer {
                 to_rect(section.bounds(), area)?,
                 preset,
                 content.primary(),
+                content.expanded_widget(),
                 theme,
                 buffer,
                 &mut rendered_primary,
@@ -352,6 +401,7 @@ impl DashboardV2Renderer {
                 content.inventory(),
                 content.system_context(),
                 content.live_mode(),
+                content.recent_events(),
                 theme,
                 buffer,
             );
@@ -397,6 +447,7 @@ impl DashboardV2Renderer {
         area: Rect,
         preset: DashboardPreset,
         models: [Option<WidgetRenderModel>; PRIMARY_COUNT],
+        expanded_widget: Option<DashboardWidgetId>,
         theme: &Theme,
         buffer: &mut Buffer,
         rendered: &mut [Option<DashboardWidgetId>; PRIMARY_COUNT],
@@ -415,7 +466,7 @@ impl DashboardV2Renderer {
             draw_panel_frame(area, theme.border, theme.surface, buffer);
         }
         let panel = if framed { inset(area, 1, 1) } else { area };
-        let visible = visible_primary(preset, panel);
+        let visible = visible_primary(preset, panel, expanded_widget);
         let active_count = visible
             .iter()
             .filter(|index| **index != usize::MAX && models[**index].is_some())
@@ -584,13 +635,20 @@ fn pulse_theme(theme: &Theme) -> Theme {
     pulse
 }
 
-fn visible_primary(preset: DashboardPreset, area: Rect) -> [usize; PRIMARY_COUNT] {
+fn visible_primary(
+    preset: DashboardPreset,
+    area: Rect,
+    expanded_widget: Option<DashboardWidgetId>,
+) -> [usize; PRIMARY_COUNT] {
     let order = match preset {
         DashboardPreset::Compact => [0, 1, 2, 3, 4],
         DashboardPreset::Standard
         | DashboardPreset::Widescreen
         | DashboardPreset::LargeWidescreen => [0, 1, 2, 3, 4],
     };
+    if let Some(index) = expanded_widget.and_then(primary_index) {
+        return [index, usize::MAX, usize::MAX, usize::MAX, usize::MAX];
+    }
     let columns = if area.width >= 40 { 2 } else { 1 };
     let rows = usize::from(area.height) / 3;
     let mut capacity = rows.saturating_mul(columns).min(PRIMARY_COUNT);
@@ -605,6 +663,17 @@ fn visible_primary(preset: DashboardPreset, area: Rect) -> [usize; PRIMARY_COUNT
         *slot = index;
     }
     visible
+}
+
+const fn primary_index(widget: DashboardWidgetId) -> Option<usize> {
+    match widget {
+        DashboardWidgetId::Cpu => Some(0),
+        DashboardWidgetId::Memory => Some(1),
+        DashboardWidgetId::Gpu => Some(2),
+        DashboardWidgetId::Network => Some(3),
+        DashboardWidgetId::Storage => Some(4),
+        _ => None,
+    }
 }
 
 fn split_primary_area(area: Rect, count: usize) -> [Rect; PRIMARY_COUNT] {
@@ -744,11 +813,22 @@ fn render_header(
         .focused_widget()
         .map(widget_label)
         .map_or_else(String::new, |label| format!("  ·  FOCUS {label}"));
+    let status = match content.sample_age() {
+        Some(age) if live => format!("{status} {}", format_sample_age(age)),
+        _ => status.to_owned(),
+    };
     let right = format!("{}  ·  {status}{focus}", preset_label(preset));
     let center = if live || preview {
-        HEADER_CENTER
+        content
+            .system_context()
+            .and_then(|context| context.host_name.as_deref())
+            .filter(|host| !host.is_empty())
+            .map_or_else(
+                || HEADER_CENTER.to_owned(),
+                |host| format!("{HEADER_CENTER}  ·  {host}"),
+            )
     } else {
-        "waiting for first sample"
+        "waiting for first sample".to_owned()
     };
     buffer.set_stringn(
         area.x,
@@ -757,20 +837,31 @@ fn render_header(
         usize::from(area.width),
         Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
     );
-    let center_width = u16::try_from(center.chars().count()).unwrap_or(area.width);
-    if center_width <= area.width {
+    let right_width = u16::try_from(right.chars().count())
+        .unwrap_or(area.width)
+        .min(area.width);
+    let right_x = area.right().saturating_sub(right_width);
+    let left_end = area
+        .x
+        .saturating_add(u16::try_from(HEADER_TITLE.chars().count()).unwrap_or(area.width));
+    let center_width = u16::try_from(center.chars().count())
+        .unwrap_or(area.width)
+        .min(area.width);
+    let center_x = area.x.saturating_add((area.width - center_width) / 2);
+    let center_fits = center_x >= left_end.saturating_add(2)
+        && center_x.saturating_add(center_width).saturating_add(2) <= right_x;
+    if center_fits {
         buffer.set_stringn(
-            area.x.saturating_add((area.width - center_width) / 2),
+            center_x,
             area.y,
             center,
             usize::from(center_width),
             Style::default().fg(theme.text),
         );
     }
-    let right_width = u16::try_from(right.chars().count()).unwrap_or(area.width);
-    if right_width <= area.width {
+    if right_width > 0 {
         buffer.set_stringn(
-            area.right().saturating_sub(right_width),
+            right_x,
             area.y,
             right,
             usize::from(right_width),
@@ -805,7 +896,7 @@ fn render_footer(
         "motion: live"
     };
     let text = format!(
-        "{}  ·  {}  Ctrl+P commands  Tab focus  / search  Esc close  Q quit",
+        "{}  ·  {}  Tab/jk focus  e expand  / search  Ctrl+P commands  Esc back  Q quit",
         preset_label(preset),
         motion,
     );
@@ -818,12 +909,14 @@ fn render_footer(
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_auxiliary(
     region: DashboardRegion,
     area: Rect,
     inventory: &super::HardwareInventory,
     system_context: Option<&DashboardV2SystemContext>,
     live_mode: bool,
+    recent_events: &[String],
     theme: &Theme,
     buffer: &mut Buffer,
 ) {
@@ -846,7 +939,7 @@ fn render_auxiliary(
         DashboardRegion::Processes => {
             render_processes(content, system_context, live_mode, theme, buffer)
         }
-        DashboardRegion::Alerts => render_events(content, system_context, live_mode, theme, buffer),
+        DashboardRegion::Alerts => render_events(content, recent_events, live_mode, theme, buffer),
         _ => {}
     }
 }
@@ -903,7 +996,7 @@ fn render_diagnostics_panel(
             ),
             _ => render_events(
                 region,
-                dashboard.system_context(),
+                dashboard.recent_events(),
                 dashboard.live_mode(),
                 theme,
                 buffer,
@@ -1034,54 +1127,81 @@ fn render_system_context(
     theme: &Theme,
     buffer: &mut Buffer,
 ) {
-    panel_heading(area, "SYSTEM CONTEXT", theme.info, theme, buffer);
+    panel_heading(area, "SYSTEM", theme.info, theme, buffer);
     let has_live_context = system_context.is_some_and(|context| {
-        context.physical_cores.is_some()
+        context.host_name.is_some()
+            || context.os_name.is_some()
+            || context.kernel.is_some()
+            || context.physical_cores.is_some()
             || context.logical_threads.is_some()
             || context.total_memory_gib.is_some()
+            || context.available_memory_gib.is_some()
             || context.uptime_seconds.is_some()
+            || context.load_average.is_some()
+            || context.process_count.is_some()
             || !context.processes.is_empty()
     });
     if let Some(context) = system_context.filter(|_| !live_mode || has_live_context) {
-        let cores = context
-            .physical_cores
-            .map_or_else(|| "—".to_owned(), |value| value.to_string());
-        let threads = context
-            .logical_threads
-            .map_or_else(|| "—".to_owned(), |value| value.to_string());
-        let memory = context
-            .total_memory_gib
-            .map_or_else(|| "—".to_owned(), |value| format!("{value:.1} GB memory"));
+        let host = context.host_name.as_deref().unwrap_or("—");
+        let os = context.os_name.as_deref().unwrap_or("—");
+        let kernel = context.kernel.as_deref().unwrap_or("—");
+        let cpu = match (context.physical_cores, context.logical_threads) {
+            (Some(physical), Some(logical)) => format!("{physical}C / {logical}T"),
+            (Some(physical), None) => format!("{physical}C"),
+            (None, Some(logical)) => format!("{logical}T"),
+            _ => "—".to_owned(),
+        };
+        let memory = match (context.available_memory_gib, context.total_memory_gib) {
+            (Some(available), Some(total)) => format!("{available:.1} / {total:.1} GiB"),
+            (Some(available), None) => format!("{available:.1} GiB free"),
+            (None, Some(total)) => format!("{total:.1} GiB total"),
+            _ => "—".to_owned(),
+        };
         let uptime = context
             .uptime_seconds
             .map_or_else(|| "—".to_owned(), format_uptime);
-        let rows = [
-            (format!("{cores} physical"), format!("{threads} logical")),
-            (
-                format!("{} RAM", memory.trim_end_matches(" memory")),
-                format!("{uptime} uptime"),
-            ),
-            (
-                format!("{} processes", context.processes.len()),
-                "Pulse online".to_owned(),
-            ),
-        ];
-        if area.width >= 30 && area.height >= 6 {
-            for (index, (left, right)) in rows.into_iter().enumerate() {
-                write_context_pair(area, 2 + index as u16, &left, &right, theme, buffer);
+        let load = context.load_average.map_or_else(
+            || "—".to_owned(),
+            |(one, five, fifteen)| format!("{one:.2} {five:.2} {fifteen:.2}"),
+        );
+        let processes = context
+            .process_count
+            .unwrap_or(context.processes.len())
+            .to_string();
+
+        if area.width >= 34 && area.height >= 6 {
+            let rows = [
+                (("HOST", host), ("UP", uptime.as_str())),
+                (("CPU", cpu.as_str()), ("LOAD", load.as_str())),
+                (("RAM", memory.as_str()), ("PROC", processes.as_str())),
+                (("OS", os), ("KERNEL", kernel)),
+            ];
+            for (index, ((left_label, left), (right_label, right))) in rows.into_iter().enumerate()
+            {
+                write_context_pair(
+                    area,
+                    2 + index as u16,
+                    left_label,
+                    left,
+                    right_label,
+                    right,
+                    theme,
+                    buffer,
+                );
             }
         } else {
             let compact = [
-                format!("{} cores · {} threads", cores, threads),
-                format!("{} · {} uptime", memory, uptime),
-                format!("{} processes · Pulse online", context.processes.len()),
+                format!("HOST {host} · {os}"),
+                format!("CPU {cpu} · LOAD {load}"),
+                format!("RAM {memory} · UP {uptime}"),
+                format!("PROC {processes} · KERNEL {kernel}"),
             ];
             for (index, row) in compact.into_iter().enumerate() {
                 write_rich_panel_row(area, 2 + index as u16, &row, theme, buffer);
             }
         }
     } else if live_mode {
-        write_panel_row(area, 2, "not connected", theme.text_muted, theme, buffer);
+        write_panel_row(area, 2, "no system sample", theme.text_muted, theme, buffer);
     } else {
         write_panel_row(
             area,
@@ -1094,10 +1214,13 @@ fn render_system_context(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn write_context_pair(
     area: Rect,
     row: u16,
+    left_label: &str,
     left: &str,
+    right_label: &str,
     right: &str,
     theme: &Theme,
     buffer: &mut Buffer,
@@ -1108,24 +1231,46 @@ fn write_context_pair(
     let gap = 2_u16.min(area.width.saturating_sub(2));
     let column_width = area.width.saturating_sub(gap) / 2;
     let y = area.y.saturating_add(row);
-    let style = context_label_style(theme);
-    let value_style = context_value_style(theme);
-    write_rich_text(
+    write_context_cell(
         Rect::new(area.x, y, column_width, 1),
+        left_label,
         left,
-        style,
-        value_style,
         theme,
         buffer,
     );
     let right_x = area.x.saturating_add(column_width).saturating_add(gap);
-    write_rich_text(
+    write_context_cell(
         Rect::new(right_x, y, area.right().saturating_sub(right_x), 1),
+        right_label,
         right,
-        style,
-        value_style,
         theme,
         buffer,
+    );
+}
+
+fn write_context_cell(area: Rect, label: &str, value: &str, theme: &Theme, buffer: &mut Buffer) {
+    if area.width < 2 || area.height == 0 {
+        return;
+    }
+    let label_width = u16::try_from(label.chars().count())
+        .unwrap_or(area.width)
+        .min(area.width.saturating_sub(1));
+    write_truncated(
+        buffer,
+        area.x,
+        area.y,
+        label,
+        label_width,
+        context_label_style(theme),
+    );
+    let value_x = area.x.saturating_add(label_width).saturating_add(1);
+    write_truncated(
+        buffer,
+        value_x,
+        area.y,
+        value,
+        area.right().saturating_sub(value_x),
+        context_value_style(theme),
     );
 }
 
@@ -1358,6 +1503,7 @@ fn render_processes(
             render_process_row(
                 area,
                 3 + index as u16,
+                process.pid,
                 &process.name,
                 process.cpu_percent,
                 process.memory_bytes,
@@ -1382,15 +1528,24 @@ fn render_processes(
 }
 
 fn render_process_columns_header(area: Rect, theme: &Theme, buffer: &mut Buffer) {
+    let pid_width = 7_u16.min(area.width);
     let memory_width = 10_u16.min(area.width);
-    let cpu_width = 8_u16.min(area.width.saturating_sub(memory_width));
+    let cpu_width = 8_u16.min(area.width.saturating_sub(pid_width + memory_width));
     let cpu_x = area.right().saturating_sub(memory_width + cpu_width);
     let memory_x = area.right().saturating_sub(memory_width);
     buffer.set_stringn(
         area.x,
         area.y.saturating_add(2),
-        "PROCESS",
-        usize::from(cpu_x.saturating_sub(area.x)),
+        "PID",
+        usize::from(pid_width),
+        Style::default().fg(theme.text_muted).bg(theme.surface),
+    );
+    let command_x = area.x.saturating_add(pid_width);
+    buffer.set_stringn(
+        command_x,
+        area.y.saturating_add(2),
+        "COMMAND",
+        usize::from(cpu_x.saturating_sub(command_x)),
         Style::default().fg(theme.text_muted).bg(theme.surface),
     );
     buffer.set_stringn(
@@ -1409,9 +1564,11 @@ fn render_process_columns_header(area: Rect, theme: &Theme, buffer: &mut Buffer)
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_process_row(
     area: Rect,
     row: u16,
+    pid: u32,
     name: &str,
     cpu_percent: f32,
     memory_bytes: u64,
@@ -1421,17 +1578,26 @@ fn render_process_row(
     if row >= area.height {
         return;
     }
+    let pid_width = 7_u16.min(area.width);
     let memory_width = 10_u16.min(area.width);
-    let cpu_width = 8_u16.min(area.width.saturating_sub(memory_width));
+    let cpu_width = 8_u16.min(area.width.saturating_sub(pid_width + memory_width));
     let cpu_x = area.right().saturating_sub(memory_width + cpu_width);
     let memory_x = area.right().saturating_sub(memory_width);
+    let command_x = area.x.saturating_add(pid_width);
     let y = area.y.saturating_add(row);
-    write_truncated(
-        buffer,
+    buffer.set_stringn(
         area.x,
         y,
+        format!("{pid:>5}"),
+        usize::from(pid_width),
+        context_value_style(theme),
+    );
+    write_truncated(
+        buffer,
+        command_x,
+        y,
         name,
-        cpu_x.saturating_sub(area.x).saturating_sub(1),
+        cpu_x.saturating_sub(command_x).saturating_sub(1),
         Style::default().fg(theme.text).bg(theme.surface),
     );
     buffer.set_stringn(
@@ -1452,14 +1618,36 @@ fn render_process_row(
 
 fn render_events(
     area: Rect,
-    system_context: Option<&DashboardV2SystemContext>,
+    recent_events: &[String],
     live_mode: bool,
     theme: &Theme,
     buffer: &mut Buffer,
 ) {
     panel_heading(area, "RECENT EVENTS", theme.secondary, theme, buffer);
-    if live_mode || system_context.is_some() {
-        write_panel_row(area, 2, "no live events", theme.text_muted, theme, buffer);
+    if !recent_events.is_empty() {
+        let visible_rows = usize::from(area.height.saturating_sub(2));
+        for (index, event) in recent_events.iter().rev().take(visible_rows).enumerate() {
+            let prefix = if index == 0 { "› " } else { "  " };
+            let row = format!("{prefix}{event}");
+            write_truncated(
+                buffer,
+                area.x,
+                area.y.saturating_add(2 + index as u16),
+                &row,
+                area.width,
+                Style::default()
+                    .fg(if index == 0 {
+                        theme.text
+                    } else {
+                        theme.text_muted
+                    })
+                    .bg(theme.surface),
+            );
+        }
+        return;
+    }
+    if live_mode {
+        write_panel_row(area, 2, "no recent events", theme.text_muted, theme, buffer);
         return;
     }
     write_panel_row(
@@ -1482,6 +1670,21 @@ fn format_uptime(seconds: u64) -> String {
         format!("{hours}h {minutes:02}m")
     } else {
         format!("{minutes}m")
+    }
+}
+
+fn format_sample_age(age: Duration) -> String {
+    if age < Duration::from_secs(1) {
+        format!("{}ms", age.as_millis())
+    } else if age < Duration::from_secs(60) {
+        format!("{:.1}s", age.as_secs_f64())
+    } else {
+        let minutes = age.as_secs() / 60;
+        if minutes < 60 {
+            format!("{minutes}m")
+        } else {
+            format!("{}h {:02}m", minutes / 60, minutes % 60)
+        }
     }
 }
 
@@ -1819,6 +2022,16 @@ mod tests {
     }
 
     #[test]
+    fn expanded_primary_widget_owns_the_primary_slots() {
+        let visible = visible_primary(
+            DashboardPreset::Standard,
+            Rect::new(0, 0, 120, 30),
+            Some(DashboardWidgetId::Memory),
+        );
+        assert_eq!(visible, [1, usize::MAX, usize::MAX, usize::MAX, usize::MAX]);
+    }
+
+    #[test]
     fn an_explicit_large_preset_degrades_safely_in_a_small_terminal() {
         let mut buffer = Buffer::empty(Rect::new(0, 0, 80, 24));
         let content = DashboardV2Content::new([None; PRIMARY_COUNT], input(), DashboardState::Calm);
@@ -1872,7 +2085,7 @@ mod tests {
             )
             .unwrap();
         let text: String = buffer.content.iter().map(|cell| cell.symbol()).collect();
-        assert!(text.contains("SYSTEM CONTEXT"));
+        assert!(text.contains("SYSTEM"));
         assert!(text.contains("TEMPERATURES"));
         assert!(text.contains("TOP PROCESSES"));
         assert!(text.contains("RECENT EVENTS"));
@@ -1896,7 +2109,7 @@ mod tests {
     #[test]
     fn primary_column_degrades_lower_priority_cards_without_invalid_slots() {
         let area = Rect::new(0, 0, 48, 20);
-        let visible = visible_primary(DashboardPreset::Widescreen, area);
+        let visible = visible_primary(DashboardPreset::Widescreen, area, None);
         assert_eq!(visible, [0, 1, 2, usize::MAX, usize::MAX]);
 
         let slots = split_primary_area(area, 3);
@@ -1936,6 +2149,7 @@ mod tests {
                     body.width() as u16,
                     body.height() as u16,
                 ),
+                None,
             );
             let count = visible.iter().filter(|index| **index != usize::MAX).count();
             let expected_count = match height {
@@ -2005,10 +2219,59 @@ mod tests {
             .unwrap();
         let text: String = buffer.content.iter().map(|cell| cell.symbol()).collect();
         assert!(text.contains("not connected"));
-        assert!(text.contains("no live events"));
+        assert!(text.contains("no recent events"));
         assert!(!text.contains("sysmon"));
         assert!(!text.contains("browser"));
         assert!(!text.contains("compiler"));
+    }
+
+    #[test]
+    fn live_context_renders_identity_freshness_and_process_identity() {
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 160, 40));
+        let context = DashboardV2SystemContext {
+            host_name: Some("workstation".to_owned()),
+            os_name: Some("Linux".to_owned()),
+            kernel: Some("6.12.1".to_owned()),
+            physical_cores: Some(8),
+            logical_threads: Some(16),
+            total_memory_gib: Some(31.0),
+            available_memory_gib: Some(18.5),
+            uptime_seconds: Some(3_661),
+            load_average: Some((0.42, 0.30, 0.20)),
+            process_count: Some(128),
+            processes: vec![DashboardProcessSummary {
+                pid: 42,
+                name: "sysmon".to_owned(),
+                cpu_percent: 2.5,
+                memory_bytes: 4 * 1024 * 1024,
+            }],
+        };
+        let content =
+            DashboardV2Content::new([None; PRIMARY_COUNT], input(), DashboardState::Active)
+                .with_system_context(context)
+                .with_live_mode(true)
+                .with_sample_age(Some(Duration::from_millis(420)))
+                .with_recent_events(vec!["SysMon started".to_owned()]);
+        DashboardV2Renderer::new()
+            .render(
+                DashboardPreset::Standard,
+                DashboardContext::default(),
+                content,
+                Duration::ZERO,
+                true,
+                &Theme::pulse(),
+                &mut buffer,
+            )
+            .unwrap();
+
+        let text: String = buffer.content.iter().map(|cell| cell.symbol()).collect();
+        assert!(text.contains("workstation"));
+        assert!(text.contains("8C / 16T"));
+        assert!(text.contains("0.42 0.30 0.20"));
+        assert!(text.contains("128"));
+        assert!(text.contains("42"));
+        assert!(text.contains("SysMon started"));
+        assert!(text.contains("LIVE 420ms"));
     }
 
     #[test]
@@ -2036,6 +2299,7 @@ mod tests {
         render_process_row(
             Rect::new(0, 1, 80, 12),
             1,
+            42,
             "sysmon",
             12.5,
             1024 * 1024,
