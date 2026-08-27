@@ -489,6 +489,7 @@ mod tests {
             cpu_temperature_celsius: None,
             total_ram,
             used_ram,
+            available_ram: (total_ram - used_ram).max(0.0),
             total_swap: 0.0,
             used_swap: 0.0,
             processes: 0,

@@ -2,6 +2,7 @@ use std::time::Duration;
 
 use sysinfo::Networks;
 
+#[derive(Debug, Clone)]
 pub struct NetworkInfo {
     pub id: String,
     pub interface: String,

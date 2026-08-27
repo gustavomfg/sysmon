@@ -8,7 +8,7 @@ use std::{
 const NVIDIA_SMI_TIMEOUT: Duration = Duration::from_millis(500);
 const NVIDIA_SMI_POLL_INTERVAL: Duration = Duration::from_millis(5);
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct GpuInfo {
     pub id: String,
     pub name: String,
@@ -50,9 +50,10 @@ impl GpuCollector {
             .is_none_or(|last_refresh| last_refresh.elapsed() >= self.refresh_interval);
 
         if should_refresh {
-            if let Some(gpus) = GpuInfo::get_all() {
-                self.cached = gpus;
-            }
+            // A failed probe must not make an old reading look current.  The
+            // next snapshot will expose the device as unavailable until a
+            // fresh probe succeeds.
+            self.cached = GpuInfo::get_all().unwrap_or_default();
             self.last_refresh = Some(Instant::now());
         }
 

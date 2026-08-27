@@ -76,9 +76,10 @@ fn snapshot_json(snapshot: &SystemInfo, timestamp: SystemTime) -> String {
         .join(",");
 
     format!(
-        "{{\n  \"timestamp\": {timestamp},\n  \"cpu\": {{\"usage_percent\": {}}},\n  \"memory\": {{\"used_gb\": {}, \"total_gb\": {}, \"used_swap_gb\": {}, \"total_swap_gb\": {}}},\n  \"disks\": [{disks}],\n  \"network\": [{networks}],\n  \"gpu\": [{gpus}]\n}}\n",
+        "{{\n  \"timestamp\": {timestamp},\n  \"cpu\": {{\"usage_percent\": {}}},\n  \"memory\": {{\"used_gb\": {}, \"available_gb\": {}, \"total_gb\": {}, \"used_swap_gb\": {}, \"total_swap_gb\": {}}},\n  \"disks\": [{disks}],\n  \"network\": [{networks}],\n  \"gpu\": [{gpus}]\n}}\n",
         json_number(f64::from(snapshot.cpu_usage)),
         json_number(snapshot.used_ram),
+        json_number(snapshot.available_ram),
         json_number(snapshot.total_ram),
         json_number(snapshot.used_swap),
         json_number(snapshot.total_swap),
@@ -164,6 +165,7 @@ mod tests {
             cpu_temperature_celsius: None,
             total_ram: 8.0,
             used_ram: 2.0,
+            available_ram: 6.0,
             total_swap: 2.0,
             used_swap: 0.5,
             processes: 1,

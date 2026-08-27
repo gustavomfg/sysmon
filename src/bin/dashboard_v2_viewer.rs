@@ -35,6 +35,7 @@ use sysmon::{
 const FRAME_INTERVAL: Duration = Duration::from_millis(33);
 const LIVE_COLLECTION_INTERVAL: Duration = Duration::from_secs(1);
 const HISTORY: usize = 12;
+const GIBIBYTE: f64 = 1024.0 * 1024.0 * 1024.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Scenario {
@@ -215,7 +216,7 @@ impl ViewerState {
             gpu_available: true,
             reduced_motion: false,
             paused: false,
-            live_metrics: false,
+            live_metrics: true,
             focused_cpu: false,
             cpu_only: false,
             health_debug: false,
@@ -306,7 +307,7 @@ fn run_viewer(stdout: &mut io::Stdout) -> io::Result<()> {
     let mut pulse_behavior_engine = PulseBehaviorEngine::new();
     let mut health_live_mode = false;
     let theme = Theme::pulse();
-    let renderer = DashboardV2Renderer::new();
+    let mut renderer = DashboardV2Renderer::new();
     let mut last_tick = Instant::now();
 
     loop {
@@ -897,25 +898,26 @@ fn cpu_model_with_history(
 
 fn memory_model(scenario: Scenario) -> dashboard_v2::MemoryMetricModel<HISTORY> {
     let (_, memory, _, _, _, _) = scenario.values();
-    dashboard_v2::MemoryMetricModel::from_input(
-        MemoryMetricInput::new(
-            non_negative(memory * 100.0),
-            non_negative((1.0 - memory) * 100.0),
-            non_negative(100.0),
-            non_negative(memory * 16.0),
-            non_negative(
-                if matches!(scenario, Scenario::Pressure | Scenario::Critical) {
-                    12.0
-                } else {
-                    0.0
-                },
-            ),
-            normalized(memory),
-            history(MetricUnit::Percent, &scaled_history(memory)),
-        )
-        .expect("deterministic memory fixture is valid"),
+    let total = 16.0 * GIBIBYTE;
+    let swap_total = 8.0 * GIBIBYTE;
+    let swap_fraction = if matches!(scenario, Scenario::Pressure | Scenario::Critical) {
+        0.12
+    } else {
+        0.0
+    };
+    let input = MemoryMetricInput::new(
+        non_negative(memory * total),
+        non_negative((1.0 - memory) * total),
+        non_negative(total),
+        non_negative(memory * 4.0 * GIBIBYTE),
+        non_negative(swap_fraction * swap_total),
+        normalized(memory),
+        history(MetricUnit::Percent, &scaled_history(memory)),
     )
-    .expect("deterministic memory model is valid")
+    .expect("deterministic memory fixture is valid")
+    .with_swap_total(non_negative(swap_total))
+    .expect("deterministic swap fixture is valid");
+    dashboard_v2::MemoryMetricModel::from_input(input).expect("deterministic memory model is valid")
 }
 
 fn gpu_model(scenario: Scenario, available: bool) -> dashboard_v2::GpuMetricModel<HISTORY> {
@@ -925,12 +927,12 @@ fn gpu_model(scenario: Scenario, available: bool) -> dashboard_v2::GpuMetricMode
         GpuMetricInput::new(
             if available { normalized(gpu) } else { absent() },
             if available {
-                non_negative(gpu * 80.0)
+                non_negative(gpu * 8.0 * GIBIBYTE)
             } else {
                 absent()
             },
             if available {
-                non_negative(100.0)
+                non_negative(8.0 * GIBIBYTE)
             } else {
                 absent()
             },
@@ -951,7 +953,7 @@ fn gpu_model(scenario: Scenario, available: bool) -> dashboard_v2::GpuMetricMode
                 absent()
             },
             if available {
-                non_negative(1_800.0)
+                non_negative(1.8e9)
             } else {
                 absent()
             },
@@ -971,13 +973,19 @@ fn network_model(scenario: Scenario) -> dashboard_v2::NetworkMetricModel<HISTORY
     let (_, _, _, network, _, _) = scenario.values();
     dashboard_v2::NetworkMetricModel::from_input(
         NetworkMetricInput::new(
-            non_negative(network * 80.0),
-            non_negative(network * 25.0),
-            non_negative(2_000.0),
-            non_negative(900.0),
-            non_negative(100.0),
-            history(MetricUnit::BytesPerSecond, &scaled_history(network)),
-            history(MetricUnit::BytesPerSecond, &scaled_history(network * 0.55)),
+            non_negative(network * 8_000_000.0),
+            non_negative(network * 2_500_000.0),
+            non_negative(2_000_000_000.0),
+            non_negative(900_000_000.0),
+            non_negative(100_000_000.0),
+            history(
+                MetricUnit::BytesPerSecond,
+                &scaled_rate_history(network * 8_000_000.0),
+            ),
+            history(
+                MetricUnit::BytesPerSecond,
+                &scaled_rate_history(network * 2_500_000.0 * 0.55),
+            ),
         )
         .expect("deterministic network fixture is valid"),
     )
@@ -986,11 +994,12 @@ fn network_model(scenario: Scenario) -> dashboard_v2::NetworkMetricModel<HISTORY
 
 fn storage_model(scenario: Scenario) -> dashboard_v2::StorageMetricModel<HISTORY> {
     let (_, _, _, _, occupancy, activity) = scenario.values();
+    let total = 1_000_000_000_000.0;
     let input = StorageMetricInput::new(
-        non_negative(occupancy * 1_000.0),
-        non_negative(1_000.0),
-        non_negative(activity * 120.0),
-        non_negative(activity * 60.0),
+        non_negative(occupancy * total),
+        non_negative(total),
+        non_negative(activity * 120_000_000.0),
+        non_negative(activity * 60_000_000.0),
         non_negative(match scenario {
             Scenario::Normal | Scenario::Recovery => 0.04,
             Scenario::Active
@@ -1005,8 +1014,14 @@ fn storage_model(scenario: Scenario) -> dashboard_v2::StorageMetricModel<HISTORY
         }),
         normalized(activity),
         history(MetricUnit::Percent, &scaled_history(occupancy)),
-        history(MetricUnit::BytesPerSecond, &scaled_history(activity * 0.8)),
-        history(MetricUnit::BytesPerSecond, &scaled_history(activity * 0.4)),
+        history(
+            MetricUnit::BytesPerSecond,
+            &scaled_rate_history(activity * 120_000_000.0),
+        ),
+        history(
+            MetricUnit::BytesPerSecond,
+            &scaled_rate_history(activity * 60_000_000.0),
+        ),
     )
     .expect("deterministic storage fixture is valid");
     dashboard_v2::StorageMetricModel::from_input(input)
@@ -1017,6 +1032,13 @@ fn scaled_history(value: f64) -> [f64; HISTORY] {
     std::array::from_fn(|index| {
         let phase = index as f64 / (HISTORY.saturating_sub(1).max(1) as f64);
         (value * (0.78 + phase * 0.22)).clamp(0.0, 1.0)
+    })
+}
+
+fn scaled_rate_history(value: f64) -> [f64; HISTORY] {
+    std::array::from_fn(|index| {
+        let phase = index as f64 / (HISTORY.saturating_sub(1).max(1) as f64);
+        value * (0.78 + phase * 0.22)
     })
 }
 
@@ -1070,6 +1092,7 @@ mod tests {
     #[test]
     fn viewer_fixture_covers_all_states_and_preserves_gpu_absence() {
         let mut state = ViewerState::new();
+        state.live_metrics = false;
         let live_metrics = LiveMetricsHistory::new();
         for scenario in Scenario::ALL {
             state.scenario = scenario;
@@ -1085,6 +1108,7 @@ mod tests {
     #[test]
     fn viewer_state_changes_are_deterministic_and_reduced_motion_is_preserved() {
         let mut state = ViewerState::new();
+        state.live_metrics = false;
         state.next_preset();
         assert_eq!(state.preset, DashboardPreset::Widescreen);
         state.scenario = state.scenario.next();
@@ -1156,6 +1180,7 @@ mod tests {
     #[test]
     fn cpu_preview_cycles_through_reference_sizes_without_changing_semantics() {
         let mut state = ViewerState::new();
+        state.live_metrics = false;
         assert_eq!(state.cpu_preview_size.dimensions(), (45, 12));
         handle_key(KeyCode::Char('c'), &mut state);
         handle_key(KeyCode::Char('v'), &mut state);
@@ -1197,6 +1222,7 @@ mod tests {
             cpu_temperature_celsius: Some(61.0),
             total_ram: 1.0,
             used_ram: 0.5,
+            available_ram: 0.5,
             total_swap: 0.0,
             used_swap: 0.0,
             processes: 0,
@@ -1245,7 +1271,8 @@ mod tests {
 
     #[test]
     fn dashboard_pulse_boundary_accepts_health_without_changing_instruments() {
-        let state = ViewerState::new();
+        let mut state = ViewerState::new();
+        state.live_metrics = false;
         let health = HealthEngine::new().evaluate(HealthSnapshot::default().with_component(
             HealthComponent::Memory,
             HealthSignals::new(None, Some(0.92), None, None),
@@ -1305,6 +1332,7 @@ mod tests {
             cpu_temperature_celsius: None,
             total_ram: 16.0,
             used_ram: 4.0,
+            available_ram: 12.0,
             total_swap: 0.0,
             used_swap: 0.0,
             processes: 0,
@@ -1366,6 +1394,7 @@ mod tests {
             cpu_temperature_celsius: None,
             total_ram: 16.0,
             used_ram: 4.0,
+            available_ram: 12.0,
             total_swap: 0.0,
             used_swap: 0.0,
             processes: 0,

@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use std::time::Duration;
 
 use crate::{
@@ -710,6 +712,7 @@ mod tests {
             cpu_temperature_celsius: None,
             total_ram: 1.0,
             used_ram: 0.5,
+            available_ram: 0.5,
             total_swap: 0.0,
             used_swap: 0.0,
             processes: 0,

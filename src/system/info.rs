@@ -59,6 +59,7 @@ pub struct DiskInfo {
     pub written_bytes_per_sec: Option<f64>,
 }
 
+#[derive(Debug, Clone)]
 pub struct TemperatureInfo {
     pub id: String,
     pub label: String,
@@ -72,6 +73,7 @@ pub struct ProcessInfo {
     pub cpu_usage: f32,
 }
 
+#[derive(Debug, Clone)]
 pub struct SystemInfo {
     pub os_name: String,
     pub kernel: String,
@@ -91,6 +93,7 @@ pub struct SystemInfo {
     pub cpu_temperature_celsius: Option<f64>,
     pub total_ram: f64,
     pub used_ram: f64,
+    pub available_ram: f64,
     pub total_swap: f64,
     pub used_swap: f64,
     pub processes: usize,
@@ -186,6 +189,7 @@ impl SystemInfoCollector {
             cpu_temperature_celsius,
             total_ram: self.system.total_memory() as f64 / 1024.0 / 1024.0 / 1024.0,
             used_ram: self.system.used_memory() as f64 / 1024.0 / 1024.0 / 1024.0,
+            available_ram: self.system.available_memory() as f64 / 1024.0 / 1024.0 / 1024.0,
             total_swap: self.system.total_swap() as f64 / 1024.0 / 1024.0 / 1024.0,
             used_swap: self.system.used_swap() as f64 / 1024.0 / 1024.0 / 1024.0,
             processes: self.processes_list.len(),

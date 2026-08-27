@@ -45,6 +45,7 @@ pub struct LiveSnapshot {
     pub memory_available_bytes: Option<f64>,
     pub memory_total_bytes: Option<f64>,
     pub memory_swap_bytes: Option<f64>,
+    pub memory_total_swap_bytes: Option<f64>,
     pub gpu: Option<LiveGpuSnapshot>,
     pub download_bytes_per_sec: Option<f64>,
     pub upload_bytes_per_sec: Option<f64>,
@@ -159,11 +160,10 @@ impl LiveSnapshot {
                 cores: snapshot.cpu_physical_cores.unwrap_or(snapshot.cpu_cores),
             },
             memory_used_bytes: finite_non_negative(Some(snapshot.used_ram * GIBIBYTE)),
-            memory_available_bytes: finite_non_negative(Some(
-                (snapshot.total_ram - snapshot.used_ram).max(0.0) * GIBIBYTE,
-            )),
+            memory_available_bytes: finite_non_negative(Some(snapshot.available_ram * GIBIBYTE)),
             memory_total_bytes: finite_non_negative(Some(snapshot.total_ram * GIBIBYTE)),
             memory_swap_bytes: finite_non_negative(Some(snapshot.used_swap * GIBIBYTE)),
+            memory_total_swap_bytes: finite_non_negative(Some(snapshot.total_swap * GIBIBYTE)),
             gpu,
             download_bytes_per_sec: Some(download),
             upload_bytes_per_sec: Some(upload),
@@ -197,6 +197,7 @@ struct MemorySample {
     available_bytes: Option<f64>,
     total_bytes: Option<f64>,
     swap_bytes: Option<f64>,
+    swap_total_bytes: Option<f64>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -296,6 +297,7 @@ impl LiveMetricsHistory {
                 available_bytes: None,
                 total_bytes: None,
                 swap_bytes: None,
+                swap_total_bytes: None,
             },
             gpu: GpuSample {
                 utilization_percent: None,
@@ -334,6 +336,7 @@ impl LiveMetricsHistory {
             available_bytes: finite_non_negative(snapshot.memory_available_bytes),
             total_bytes: finite_non_negative(snapshot.memory_total_bytes),
             swap_bytes: finite_non_negative(snapshot.memory_swap_bytes),
+            swap_total_bytes: finite_non_negative(snapshot.memory_total_swap_bytes),
         };
         push_normalized(
             &mut self.memory_history,
@@ -399,7 +402,7 @@ impl LiveMetricsHistory {
     }
 
     pub fn models(&self) -> Result<LiveMetricModels, LiveMetricsError> {
-        let memory = MemoryMetricModel::from_input(MemoryMetricInput::new(
+        let memory_input = MemoryMetricInput::new(
             non_negative(self.memory.used_bytes),
             non_negative(self.memory.available_bytes),
             non_negative(self.memory.total_bytes),
@@ -410,7 +413,9 @@ impl LiveMetricsHistory {
             // as pressure in the card.
             MetricReading::unavailable(),
             self.memory_history,
-        )?)?;
+        )?
+        .with_swap_total(non_negative(self.memory.swap_total_bytes))?;
+        let memory = MemoryMetricModel::from_input(memory_input)?;
         let gpu = GpuMetricModel::from_input(GpuMetricInput::new(
             normalized(self.gpu.utilization_percent.map(|value| value / 100.0)),
             non_negative(self.gpu.vram_used_bytes),
@@ -568,6 +573,7 @@ mod tests {
             memory_available_bytes: Some(9.2 * 1024.0 * 1024.0 * 1024.0),
             memory_total_bytes: Some(16.0 * 1024.0 * 1024.0 * 1024.0),
             memory_swap_bytes: Some(0.0),
+            memory_total_swap_bytes: Some(8.0 * 1024.0 * 1024.0 * 1024.0),
             gpu: None,
             download_bytes_per_sec: Some(0.0),
             upload_bytes_per_sec: Some(0.0),

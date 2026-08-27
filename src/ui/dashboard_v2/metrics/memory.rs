@@ -21,6 +21,7 @@ pub struct MemoryMetricInput<const HISTORY: usize> {
     total: MetricReading,
     cache: MetricReading,
     swap: MetricReading,
+    swap_total: MetricReading,
     pressure: MetricReading,
     history: TimeSeries<HISTORY>,
 }
@@ -68,9 +69,26 @@ impl<const HISTORY: usize> MemoryMetricInput<HISTORY> {
             total,
             cache,
             swap,
+            swap_total: MetricReading::unavailable(),
             pressure,
             history,
         })
+    }
+
+    pub fn with_swap_total(mut self, swap_total: MetricReading) -> Result<Self, MetricModelError> {
+        validate_non_negative_reading(swap_total)?;
+        if self.swap.is_usable()
+            && swap_total.is_usable()
+            && self
+                .swap
+                .value()
+                .zip(swap_total.value())
+                .is_some_and(|(used, total)| used > total + 1.0e-9)
+        {
+            return Err(MetricModelError::InvalidTotal);
+        }
+        self.swap_total = swap_total;
+        Ok(self)
     }
 }
 
@@ -87,6 +105,7 @@ pub struct MemoryMetricModel<const HISTORY: usize> {
     total: Option<MetricValue>,
     cache: Option<MetricValue>,
     swap: Option<MetricValue>,
+    swap_total: Option<MetricValue>,
     pressure: Option<MetricValue>,
 }
 
@@ -133,6 +152,11 @@ impl<const HISTORY: usize> MemoryMetricModel<HISTORY> {
             contextual_metric_value(input.cache, MetricUnit::Bytes, VisualPriority::Contextual);
         let swap =
             contextual_metric_value(input.swap, MetricUnit::Bytes, VisualPriority::Contextual);
+        let swap_total = contextual_metric_value(
+            input.swap_total,
+            MetricUnit::Bytes,
+            VisualPriority::Contextual,
+        );
         let pressure_value = usable_metric_value(
             input.pressure,
             MetricUnit::Percent,
@@ -178,6 +202,7 @@ impl<const HISTORY: usize> MemoryMetricModel<HISTORY> {
             total,
             cache,
             swap,
+            swap_total,
             pressure: pressure_value,
         })
     }
@@ -228,6 +253,10 @@ impl<const HISTORY: usize> MemoryMetricModel<HISTORY> {
 
     pub const fn swap(self) -> Option<MetricValue> {
         self.swap
+    }
+
+    pub const fn swap_total(self) -> Option<MetricValue> {
+        self.swap_total
     }
 
     pub const fn pressure(self) -> Option<MetricValue> {

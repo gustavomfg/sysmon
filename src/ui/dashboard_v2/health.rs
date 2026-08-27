@@ -179,7 +179,7 @@ impl HealthSnapshot {
         let memory_occupancy = fraction(memory_model.visual().primary());
         let swap_fraction = memory_model
             .swap()
-            .zip(memory_model.total())
+            .zip(memory_model.swap_total())
             .filter(|(_, total)| total.value() > 0.0)
             .map(|(swap, total)| (swap.value() / total.value()).clamp(0.0, 1.0) as f32);
         let memory_pressure = memory_occupancy.map(|value| {
