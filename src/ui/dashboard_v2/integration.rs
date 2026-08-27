@@ -5,7 +5,7 @@ use std::time::Duration;
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    style::{Modifier, Style},
+    style::{Color, Modifier, Style},
 };
 
 use crate::{
@@ -27,8 +27,8 @@ const PRIMARY_COUNT: usize = 5;
 const PRIMARY_CARD_GAP: u16 = 1;
 const PRIMARY_CPU_MINIMUM: u16 = 7;
 const PRIMARY_CARD_MINIMUMS: [u16; PRIMARY_COUNT] = [PRIMARY_CPU_MINIMUM, 4, 4, 4, 4];
-const PULSE_TITLE: &str = "PULSE V2";
-const HEADER_TITLE: &str = "SYSMON V2";
+const PULSE_TITLE: &str = "SYSTEM PULSE";
+const HEADER_TITLE: &str = "SYSMON";
 const HEADER_CENTER: &str = "SYSTEM MONITOR";
 
 #[derive(Debug, Clone, PartialEq)]
@@ -93,6 +93,8 @@ pub struct DashboardV2Content {
     inventory: super::HardwareInventory,
     system_context: Option<DashboardV2SystemContext>,
     live_mode: bool,
+    focused_widget: Option<DashboardWidgetId>,
+    data_stale: bool,
 }
 
 impl DashboardV2Content {
@@ -109,6 +111,8 @@ impl DashboardV2Content {
             inventory: super::HardwareInventory::default(),
             system_context: None,
             live_mode: false,
+            focused_widget: None,
+            data_stale: false,
         }
     }
 
@@ -158,6 +162,24 @@ impl DashboardV2Content {
 
     pub const fn live_mode(&self) -> bool {
         self.live_mode
+    }
+
+    pub fn with_focused_widget(mut self, focused_widget: Option<DashboardWidgetId>) -> Self {
+        self.focused_widget = focused_widget;
+        self
+    }
+
+    pub const fn focused_widget(&self) -> Option<DashboardWidgetId> {
+        self.focused_widget
+    }
+
+    pub const fn with_data_stale(mut self, data_stale: bool) -> Self {
+        self.data_stale = data_stale;
+        self
+    }
+
+    pub const fn data_stale(&self) -> bool {
+        self.data_stale
     }
 }
 
@@ -216,11 +238,22 @@ impl DashboardV2RenderSummary {
 ///
 /// The application frontend supplies prepared visual models and the renderer
 /// owns only terminal composition.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Default)]
 pub struct DashboardV2Renderer {
     dashboard: DashboardEngine,
     pulse: PulseV2Engine,
     widgets: TerminalRenderer,
+    pulse_cache: Option<PulseRasterCache>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct PulseRasterCache {
+    dimensions: FieldDimensions,
+    input: NormalizedPulseInput,
+    tick: u128,
+    reduced_motion: bool,
+    theme: Theme,
+    raster: ColorRasterFrame,
 }
 
 impl DashboardV2Renderer {
@@ -229,12 +262,13 @@ impl DashboardV2Renderer {
             dashboard: DashboardEngine::new(),
             pulse: PulseV2Engine::new(),
             widgets: TerminalRenderer::new(),
+            pulse_cache: None,
         }
     }
 
     #[allow(clippy::too_many_arguments)]
     pub fn render(
-        self,
+        &mut self,
         preset: DashboardPreset,
         context: DashboardContext,
         content: DashboardV2Content,
@@ -266,8 +300,7 @@ impl DashboardV2Renderer {
             render_header(
                 to_rect(section.bounds(), area)?,
                 preset,
-                content.state(),
-                content.live_mode(),
+                &content,
                 theme,
                 buffer,
             );
@@ -316,8 +349,6 @@ impl DashboardV2Renderer {
             render_auxiliary(
                 DashboardRegion::SecondaryMetrics,
                 to_rect(section.bounds(), area)?,
-                content.state(),
-                gpu_is_available(content.primary()),
                 content.inventory(),
                 content.system_context(),
                 content.live_mode(),
@@ -349,19 +380,7 @@ impl DashboardV2Renderer {
                 first.width,
                 last.bottom().saturating_sub(first.y),
             );
-            render_diagnostics_panel(
-                outer,
-                diagnostics[0],
-                diagnostics[1],
-                diagnostics[2],
-                content.state(),
-                gpu_is_available(content.primary()),
-                content.inventory(),
-                content.system_context(),
-                content.live_mode(),
-                theme,
-                buffer,
-            );
+            render_diagnostics_panel(outer, diagnostics, &content, theme, buffer);
         }
 
         Ok(DashboardV2RenderSummary {
@@ -374,7 +393,7 @@ impl DashboardV2Renderer {
 
     #[allow(clippy::too_many_arguments)]
     fn render_primary(
-        self,
+        &self,
         area: Rect,
         preset: DashboardPreset,
         models: [Option<WidgetRenderModel>; PRIMARY_COUNT],
@@ -443,7 +462,7 @@ impl DashboardV2Renderer {
     }
 
     fn render_pulse(
-        self,
+        &mut self,
         area: Rect,
         input: NormalizedPulseInput,
         elapsed: Duration,
@@ -478,6 +497,7 @@ impl DashboardV2Renderer {
             return Ok(false);
         }
 
+        let pulse_theme = pulse_theme(theme);
         let use_braille = raster_area.width >= 8 && raster_area.height >= 4;
         let field_width = if use_braille {
             usize::from(raster_area.width).checked_mul(2)
@@ -494,6 +514,23 @@ impl DashboardV2Renderer {
         };
         let dimensions = FieldDimensions::new(field_width, field_height)
             .map_err(|error| DashboardV2RenderError::Pulse(FieldError::Dimensions(error)))?;
+        let tick = if reduced_motion {
+            0
+        } else {
+            elapsed.as_millis() / 100
+        };
+        let cached = self.pulse_cache.as_ref().and_then(|cache| {
+            (cache.dimensions == dimensions
+                && cache.input == input
+                && cache.tick == tick
+                && cache.reduced_motion == reduced_motion
+                && cache.theme == pulse_theme)
+                .then_some(&cache.raster)
+        });
+        if let Some(raster) = cached {
+            draw_raster(raster_area, raster, theme, buffer);
+            return Ok(true);
+        }
         let pulse_preset = PulseV2Preset::from_dimensions(dimensions);
         let frame = self.pulse.generate_with_preset(
             dimensions,
@@ -502,15 +539,49 @@ impl DashboardV2Renderer {
             elapsed,
             reduced_motion,
         )?;
-        let colors = SemanticColorField::from_lighting(frame.lighting(), input, theme)?;
+        let colors = SemanticColorField::from_lighting(frame.lighting(), input, &pulse_theme)?;
         let raster = if use_braille {
             PulseV2Rasterizer::braille_colored(frame.lighting(), &colors)?
         } else {
             PulseV2Rasterizer::unicode_colored(frame.lighting(), &colors)?
         };
-        draw_raster(raster_area, &raster, theme, buffer);
+        self.pulse_cache = Some(PulseRasterCache {
+            dimensions,
+            input,
+            tick,
+            reduced_motion,
+            theme: pulse_theme,
+            raster,
+        });
+        let raster = &self
+            .pulse_cache
+            .as_ref()
+            .expect("pulse cache was just populated")
+            .raster;
+        draw_raster(raster_area, raster, theme, buffer);
         Ok(true)
     }
+}
+
+fn pulse_theme(theme: &Theme) -> Theme {
+    if *theme != Theme::pulse() {
+        return *theme;
+    }
+
+    // Keep the dashboard's terminal palette restrained while preserving the
+    // original Pulse identity in the central visualization: violet energy,
+    // cyan flow, and warm colors only for pressure.
+    let mut pulse = *theme;
+    pulse.primary = Color::Rgb(0xA8, 0x55, 0xF7);
+    pulse.secondary = Color::Rgb(0x22, 0xD3, 0xEE);
+    pulse.accent = Color::Rgb(0x7C, 0x3A, 0xED);
+    pulse.info = Color::Rgb(0x38, 0xBD, 0xF8);
+    pulse.warning = Color::Rgb(0xF5, 0x9E, 0x0B);
+    pulse.danger = Color::Rgb(0xEF, 0x44, 0x44);
+    pulse.pulse_low = Color::Rgb(0x6D, 0x28, 0xD9);
+    pulse.pulse_medium = Color::Rgb(0xA8, 0x55, 0xF7);
+    pulse.pulse_high = Color::Rgb(0x22, 0xD3, 0xEE);
+    pulse
 }
 
 fn visible_primary(preset: DashboardPreset, area: Rect) -> [usize; PRIMARY_COUNT] {
@@ -650,8 +721,7 @@ fn primary_stack_fits(total_height: u16, count: usize) -> bool {
 fn render_header(
     area: Rect,
     preset: DashboardPreset,
-    state: DashboardState,
-    live: bool,
+    content: &DashboardV2Content,
     theme: &Theme,
     buffer: &mut Buffer,
 ) {
@@ -659,10 +729,26 @@ fn render_header(
         return;
     }
     buffer.set_style(area, Style::default().bg(theme.background));
-    let right = if live {
-        format!("{}  ·  LIVE METRICS", preset_label(preset))
+    let live = content.live_mode();
+    let preview = !live && content.primary().iter().any(Option::is_some);
+    let status = if content.data_stale() {
+        "STALE"
+    } else if live {
+        "LIVE"
+    } else if preview {
+        "PREVIEW"
     } else {
-        format!("{}  ·  {}", preset_label(preset), state_label(state))
+        "WAITING"
+    };
+    let focus = content
+        .focused_widget()
+        .map(widget_label)
+        .map_or_else(String::new, |label| format!("  ·  FOCUS {label}"));
+    let right = format!("{}  ·  {status}{focus}", preset_label(preset));
+    let center = if live || preview {
+        HEADER_CENTER
+    } else {
+        "waiting for first sample"
     };
     buffer.set_stringn(
         area.x,
@@ -671,12 +757,12 @@ fn render_header(
         usize::from(area.width),
         Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
     );
-    let center_width = u16::try_from(HEADER_CENTER.chars().count()).unwrap_or(area.width);
+    let center_width = u16::try_from(center.chars().count()).unwrap_or(area.width);
     if center_width <= area.width {
         buffer.set_stringn(
             area.x.saturating_add((area.width - center_width) / 2),
             area.y,
-            HEADER_CENTER,
+            center,
             usize::from(center_width),
             Style::default().fg(theme.text),
         );
@@ -714,12 +800,12 @@ fn render_footer(
         return;
     }
     let motion = if reduced_motion {
-        "Reduced Motion"
+        "motion: reduced"
     } else {
-        "Live"
+        "motion: live"
     };
     let text = format!(
-        "{}  ·  {}                                      P preset  S state  G GPU  R motion  Q quit",
+        "{}  ·  {}  Ctrl+P commands  Tab focus  / search  Esc close  Q quit",
         preset_label(preset),
         motion,
     );
@@ -732,12 +818,9 @@ fn render_footer(
     );
 }
 
-#[allow(clippy::too_many_arguments)]
 fn render_auxiliary(
     region: DashboardRegion,
     area: Rect,
-    state: DashboardState,
-    gpu_available: bool,
     inventory: &super::HardwareInventory,
     system_context: Option<&DashboardV2SystemContext>,
     live_mode: bool,
@@ -757,36 +840,21 @@ fn render_auxiliary(
         DashboardRegion::SecondaryMetrics => {
             render_system_context(content, system_context, live_mode, theme, buffer)
         }
-        DashboardRegion::Charts => render_temperatures(
-            content,
-            state,
-            gpu_available,
-            inventory,
-            live_mode,
-            theme,
-            buffer,
-        ),
+        DashboardRegion::Charts => {
+            render_temperatures(content, inventory, live_mode, theme, buffer)
+        }
         DashboardRegion::Processes => {
-            render_processes(content, state, system_context, live_mode, theme, buffer)
+            render_processes(content, system_context, live_mode, theme, buffer)
         }
-        DashboardRegion::Alerts => {
-            render_events(content, state, system_context, live_mode, theme, buffer)
-        }
+        DashboardRegion::Alerts => render_events(content, system_context, live_mode, theme, buffer),
         _ => {}
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn render_diagnostics_panel(
     outer: Rect,
-    temperatures: Option<Rect>,
-    processes: Option<Rect>,
-    events: Option<Rect>,
-    state: DashboardState,
-    gpu_available: bool,
-    inventory: &super::HardwareInventory,
-    system_context: Option<&DashboardV2SystemContext>,
-    live_mode: bool,
+    diagnostics: [Option<Rect>; 3],
+    dashboard: &DashboardV2Content,
     theme: &Theme,
     buffer: &mut Buffer,
 ) {
@@ -802,13 +870,9 @@ fn render_diagnostics_panel(
 
     let regions = diagnostic_sections(
         outer,
-        [
-            temperatures.is_some(),
-            processes.is_some(),
-            events.is_some(),
-        ],
-        live_mode,
-        inventory.temperatures.len(),
+        diagnostics.map(|region| region.is_some()),
+        dashboard.live_mode(),
+        dashboard.inventory().temperatures.len(),
     );
     for (index, region) in regions.into_iter().enumerate() {
         let Some(region) = region else { continue };
@@ -825,15 +889,25 @@ fn render_diagnostics_panel(
         match index {
             0 => render_temperatures(
                 region,
-                state,
-                gpu_available,
-                inventory,
-                live_mode,
+                dashboard.inventory(),
+                dashboard.live_mode(),
                 theme,
                 buffer,
             ),
-            1 => render_processes(region, state, system_context, live_mode, theme, buffer),
-            _ => render_events(region, state, system_context, live_mode, theme, buffer),
+            1 => render_processes(
+                region,
+                dashboard.system_context(),
+                dashboard.live_mode(),
+                theme,
+                buffer,
+            ),
+            _ => render_events(
+                region,
+                dashboard.system_context(),
+                dashboard.live_mode(),
+                theme,
+                buffer,
+            ),
         }
     }
 }
@@ -1009,21 +1083,14 @@ fn render_system_context(
     } else if live_mode {
         write_panel_row(area, 2, "not connected", theme.text_muted, theme, buffer);
     } else {
-        let rows = [
-            ("8 physical", "16 logical"),
-            ("16 GB RAM", "3d 04h uptime"),
-            ("Pulse online", "history ready"),
-        ];
-        if area.width >= 30 && area.height >= 6 {
-            for (index, (left, right)) in rows.into_iter().enumerate() {
-                write_context_pair(area, 2 + index as u16, left, right, theme, buffer);
-            }
-        } else {
-            for (index, (left, right)) in rows.into_iter().enumerate() {
-                let row = format!("{left} · {right}");
-                write_rich_panel_row(area, 2 + index as u16, &row, theme, buffer);
-            }
-        }
+        write_panel_row(
+            area,
+            2,
+            "waiting for first sample",
+            theme.text_muted,
+            theme,
+            buffer,
+        );
     }
 }
 
@@ -1171,8 +1238,6 @@ fn is_status_value(token: &str) -> bool {
 
 fn render_temperatures(
     area: Rect,
-    state: DashboardState,
-    gpu_available: bool,
     inventory: &super::HardwareInventory,
     live: bool,
     theme: &Theme,
@@ -1196,20 +1261,14 @@ fn render_temperatures(
         write_panel_row(area, 2, "no live sensors", theme.text_muted, theme, buffer);
         return;
     }
-    let values = match state {
-        DashboardState::Calm => [52_u16, 54, 42],
-        DashboardState::Active => [68, 70, 48],
-        DashboardState::Busy => [84, 85, 61],
-        DashboardState::Critical => [96, 96, 76],
-    };
-    let labels = ["CPU", "GPU", "NVMe"];
-    for (index, (label, value)) in labels.into_iter().zip(values).enumerate() {
-        if index == 1 && !gpu_available {
-            render_temperature_row(area, 2 + index as u16, label, None, theme, buffer);
-        } else {
-            render_temperature_row(area, 2 + index as u16, label, Some(value), theme, buffer);
-        }
-    }
+    write_panel_row(
+        area,
+        2,
+        "waiting for first sample",
+        theme.text_muted,
+        theme,
+        buffer,
+    );
 }
 
 fn render_temperature_row(
@@ -1273,7 +1332,6 @@ fn render_temperature_row(
 
 fn render_processes(
     area: Rect,
-    state: DashboardState,
     system_context: Option<&DashboardV2SystemContext>,
     live_mode: bool,
     theme: &Theme,
@@ -1313,24 +1371,14 @@ fn render_processes(
         write_panel_row(area, 3, "not connected", theme.text_muted, theme, buffer);
         return;
     }
-    let load = match state {
-        DashboardState::Calm => [12_u16, 8, 5],
-        DashboardState::Active => [34, 22, 14],
-        DashboardState::Busy => [68, 51, 36],
-        DashboardState::Critical => [91, 78, 64],
-    };
-    let processes = ["sysmon", "browser", "compiler"];
-    for (index, (name, cpu)) in processes.into_iter().zip(load).enumerate() {
-        render_process_row(
-            area,
-            3 + index as u16,
-            name,
-            f32::from(cpu),
-            u64::from((cpu / 2).max(1)) * 1024 * 1024,
-            theme,
-            buffer,
-        );
-    }
+    write_panel_row(
+        area,
+        3,
+        "waiting for first sample",
+        theme.text_muted,
+        theme,
+        buffer,
+    );
 }
 
 fn render_process_columns_header(area: Rect, theme: &Theme, buffer: &mut Buffer) {
@@ -1404,7 +1452,6 @@ fn render_process_row(
 
 fn render_events(
     area: Rect,
-    state: DashboardState,
     system_context: Option<&DashboardV2SystemContext>,
     live_mode: bool,
     theme: &Theme,
@@ -1415,22 +1462,14 @@ fn render_events(
         write_panel_row(area, 2, "no live events", theme.text_muted, theme, buffer);
         return;
     }
-    let events = match state {
-        DashboardState::Calm => ["Pulse stabilized", "No active pressure"],
-        DashboardState::Active => ["Workload increased", "Network flow active"],
-        DashboardState::Busy => ["Memory pressure rising", "Thermal headroom reduced"],
-        DashboardState::Critical => ["Critical load detected", "Thermal limit approaching"],
-    };
-    for (index, event) in events.into_iter().enumerate() {
-        write_panel_row(
-            area,
-            2 + index as u16,
-            event,
-            theme.text_muted,
-            theme,
-            buffer,
-        );
-    }
+    write_panel_row(
+        area,
+        2,
+        "waiting for first sample",
+        theme.text_muted,
+        theme,
+        buffer,
+    );
 }
 
 fn format_uptime(seconds: u64) -> String {
@@ -1505,16 +1544,16 @@ fn draw_panel_frame(
     let bottom = area.bottom().saturating_sub(1);
     for x in area.x..=right {
         buffer[(x, area.y)].set_symbol(if x == area.x {
-            "╭"
+            "┌"
         } else if x == right {
-            "╮"
+            "┐"
         } else {
             "─"
         });
         buffer[(x, bottom)].set_symbol(if x == area.x {
-            "╰"
+            "└"
         } else if x == right {
-            "╯"
+            "┘"
         } else {
             "─"
         });
@@ -1602,19 +1641,13 @@ fn draw_horizontal_bar(
         let position = (f64::from(column) + 0.5) / f64::from(width.max(1));
         let filled = position <= value.clamp(0.0, 1.0);
         buffer[(x.saturating_add(column), y)]
-            .set_char(if filled { '━' } else { '─' })
+            .set_char(if filled { '#' } else { '-' })
             .set_style(
                 Style::default()
                     .fg(if filled { color } else { theme.surface_alt })
                     .bg(theme.surface),
             );
     }
-}
-
-fn gpu_is_available(models: [Option<WidgetRenderModel>; PRIMARY_COUNT]) -> bool {
-    models[2]
-        .map(|model| model.state() != super::WidgetState::Unavailable)
-        .unwrap_or(false)
 }
 
 fn draw_raster(area: Rect, raster: &ColorRasterFrame, theme: &Theme, buffer: &mut Buffer) {
@@ -1682,12 +1715,18 @@ const fn preset_label(preset: DashboardPreset) -> &'static str {
     }
 }
 
-const fn state_label(state: DashboardState) -> &'static str {
-    match state {
-        DashboardState::Calm => "Calm",
-        DashboardState::Active => "Active",
-        DashboardState::Busy => "Busy",
-        DashboardState::Critical => "Critical",
+const fn widget_label(widget: DashboardWidgetId) -> &'static str {
+    match widget {
+        DashboardWidgetId::Pulse => "PULSE",
+        DashboardWidgetId::SystemSummary => "SUMMARY",
+        DashboardWidgetId::Cpu => "CPU",
+        DashboardWidgetId::Memory => "MEMORY",
+        DashboardWidgetId::Gpu => "GPU",
+        DashboardWidgetId::Network => "NETWORK",
+        DashboardWidgetId::Storage => "STORAGE",
+        DashboardWidgetId::History => "HISTORY",
+        DashboardWidgetId::Processes => "PROCESSES",
+        DashboardWidgetId::Alerts => "ALERTS",
     }
 }
 

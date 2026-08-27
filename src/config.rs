@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use std::time::Duration;
 
 pub const REFRESH_RATES: [Duration; 3] = [
@@ -93,8 +95,17 @@ mod tests {
 
     #[test]
     fn derives_history_window_for_each_refresh_rate() {
-        assert_eq!(history_window(60, Duration::from_secs(1)), Duration::from_secs(60));
-        assert_eq!(history_window(60, Duration::from_secs(2)), Duration::from_secs(120));
-        assert_eq!(history_window(60, Duration::from_secs(4)), Duration::from_secs(240));
+        assert_eq!(
+            history_window(60, Duration::from_secs(1)),
+            Duration::from_secs(60)
+        );
+        assert_eq!(
+            history_window(60, Duration::from_secs(2)),
+            Duration::from_secs(120)
+        );
+        assert_eq!(
+            history_window(60, Duration::from_secs(4)),
+            Duration::from_secs(240)
+        );
     }
 }

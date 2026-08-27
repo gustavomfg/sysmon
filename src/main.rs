@@ -10,8 +10,7 @@ use std::{
 
 use crossterm::{
     cursor::Show,
-    event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
-    execute,
+    event, execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 
@@ -28,6 +27,7 @@ struct TerminalGuard;
 
 enum CollectorCommand {
     Stop,
+    SetInterval(Duration),
 }
 
 struct SnapshotSlot {
@@ -43,6 +43,12 @@ impl SnapshotSlot {
 struct CollectorWorker {
     commands: Sender<CollectorCommand>,
     handle: Option<JoinHandle<()>>,
+}
+
+impl CollectorWorker {
+    fn set_interval(&self, interval: Duration) {
+        let _ = self.commands.send(CollectorCommand::SetInterval(interval));
+    }
 }
 
 impl Drop for CollectorWorker {
@@ -81,19 +87,6 @@ impl Drop for TerminalGuard {
     }
 }
 
-fn should_quit(event: Event) -> bool {
-    let Event::Key(key) = event else {
-        return false;
-    };
-
-    if key.kind != KeyEventKind::Press {
-        return false;
-    }
-
-    matches!(key.code, KeyCode::Esc | KeyCode::Char('q'))
-        || (key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL))
-}
-
 fn main() -> io::Result<()> {
     let _terminal_guard = TerminalGuard::enter()?;
 
@@ -109,10 +102,14 @@ fn main() -> io::Result<()> {
 
 fn run_app(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    collector: SystemInfoCollector,
+    mut collector: SystemInfoCollector,
     app: &mut DashboardApp,
 ) -> io::Result<()> {
-    let (snapshots, _collector_worker) = spawn_collector(collector, app.refresh_interval());
+    // Prime the dashboard before the first draw so entering SysMon shows real
+    // instruments immediately instead of an empty waiting surface.
+    let collected_at = Instant::now();
+    app.update(collector.collect(collected_at), collected_at);
+    let (snapshots, collector_worker) = spawn_collector(collector, app.refresh_interval());
     let mut last_render = Instant::now() - RENDER_INTERVAL;
     let mut last_animation_update = Instant::now();
     let mut render_pending = true;
@@ -153,9 +150,15 @@ fn run_app(
 
         if event::poll(timeout)? {
             loop {
-                if should_quit(event::read()?) {
+                let event = event::read()?;
+                let previous_interval = app.refresh_interval();
+                if app.handle_event(event) {
                     return Ok(());
                 }
+                if app.refresh_interval() != previous_interval {
+                    collector_worker.set_interval(app.refresh_interval());
+                }
+                render_pending = true;
 
                 if !event::poll(Duration::ZERO)? {
                     break;
@@ -198,13 +201,17 @@ fn collection_loop(
     commands: Receiver<CollectorCommand>,
     initial_interval: Duration,
 ) {
-    let interval = initial_interval;
-    let mut next_collection = Instant::now();
+    let mut interval = initial_interval;
+    let mut next_collection = Instant::now() + initial_interval;
 
     loop {
         let wait = next_collection.saturating_duration_since(Instant::now());
         match commands.recv_timeout(wait) {
             Ok(CollectorCommand::Stop) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            Ok(CollectorCommand::SetInterval(new_interval)) => {
+                interval = new_interval;
+                next_collection = Instant::now();
+            }
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 let collected_at = Instant::now();
                 let snapshot = collector.collect(collected_at);
