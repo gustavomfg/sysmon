@@ -463,7 +463,14 @@ impl DashboardV2Renderer {
         let framed = area.width >= 16 && area.height >= 20;
         buffer.set_style(area, Style::default().bg(theme.surface));
         if framed {
-            draw_panel_frame(area, theme.border, theme.surface, buffer);
+            draw_titled_panel_frame(
+                area,
+                "METRICS",
+                theme.primary,
+                theme.border,
+                theme.surface,
+                buffer,
+            );
         }
         let panel = if framed { inset(area, 1, 1) } else { area };
         let visible = visible_primary(preset, panel, expanded_widget);
@@ -525,25 +532,20 @@ impl DashboardV2Renderer {
             return Ok(false);
         }
         buffer.set_style(area, Style::default().bg(theme.background));
-        draw_panel_frame(area, theme.border, theme.background, buffer);
+        draw_titled_panel_frame(
+            area,
+            PULSE_TITLE,
+            theme.text_muted,
+            theme.border,
+            theme.background,
+            buffer,
+        );
         let content = inset(area, 1, 1);
         if content.width == 0 || content.height == 0 {
             return Ok(false);
         }
-        buffer.set_stringn(
-            content.x,
-            content.y,
-            PULSE_TITLE,
-            usize::from(content.width),
-            Style::default().fg(theme.text_muted),
-        );
 
-        let raster_area = Rect::new(
-            content.x,
-            content.y.saturating_add(1),
-            content.width,
-            content.height.saturating_sub(1),
-        );
+        let raster_area = Rect::new(content.x, content.y, content.width, content.height);
         if raster_area.width == 0 || raster_area.height == 0 {
             return Ok(false);
         }
@@ -924,7 +926,11 @@ fn render_auxiliary(
         return;
     }
     buffer.set_style(area, Style::default().bg(theme.surface));
-    draw_panel_frame(area, theme.border, theme.surface, buffer);
+    let (title, accent) = match region {
+        DashboardRegion::SecondaryMetrics => ("SYSTEM", theme.info),
+        _ => return,
+    };
+    draw_titled_panel_frame(area, title, accent, theme.border, theme.surface, buffer);
     let content = inset(area, 1, 1);
     if content.width == 0 || content.height == 0 {
         return;
@@ -1127,7 +1133,6 @@ fn render_system_context(
     theme: &Theme,
     buffer: &mut Buffer,
 ) {
-    panel_heading(area, "SYSTEM", theme.info, theme, buffer);
     let has_live_context = system_context.is_some_and(|context| {
         context.host_name.is_some()
             || context.os_name.is_some()
@@ -1771,6 +1776,37 @@ fn draw_panel_frame(
     }
 }
 
+fn draw_titled_panel_frame(
+    area: Rect,
+    title: &str,
+    accent: ratatui::style::Color,
+    border: ratatui::style::Color,
+    background: ratatui::style::Color,
+    buffer: &mut Buffer,
+) {
+    draw_panel_frame(area, border, background, buffer);
+    if area.width < 5 || area.height < 3 {
+        return;
+    }
+    let label = format!(" {title} ");
+    let label_width = u16::try_from(label.chars().count())
+        .unwrap_or(area.width.saturating_sub(4))
+        .min(area.width.saturating_sub(4));
+    if label_width == 0 {
+        return;
+    }
+    buffer.set_stringn(
+        area.x.saturating_add(2),
+        area.y,
+        label,
+        usize::from(label_width),
+        Style::default()
+            .fg(accent)
+            .bg(background)
+            .add_modifier(Modifier::BOLD),
+    );
+}
+
 fn draw_rule(
     x: u16,
     y: u16,
@@ -2331,5 +2367,26 @@ mod tests {
         );
         assert_eq!(buffer[(11, 0)].symbol(), "…");
         assert_eq!(buffer[(12, 0)].symbol(), " ");
+    }
+
+    #[test]
+    fn titled_frames_keep_the_border_language_and_accent_the_label() {
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 20, 5));
+        draw_titled_panel_frame(
+            Rect::new(0, 0, 20, 5),
+            "CPU",
+            Color::Red,
+            Color::Blue,
+            Color::Black,
+            &mut buffer,
+        );
+
+        assert_eq!(buffer[(0, 0)].symbol(), "┌");
+        assert_eq!(buffer[(1, 0)].symbol(), "─");
+        assert_eq!(buffer[(3, 0)].symbol(), "C");
+        assert_eq!(buffer[(6, 0)].symbol(), " ");
+        assert_eq!(buffer[(3, 0)].fg, Color::Red);
+        assert_eq!(buffer[(1, 0)].fg, Color::Blue);
+        assert_eq!(buffer[(19, 0)].symbol(), "┐");
     }
 }
