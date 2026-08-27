@@ -72,7 +72,9 @@ pulse_high
 
 ## Default Theme
 
-The initial default theme should provide a modern dark interface with purple and cyan accents.
+The initial default theme should provide a modern dark interface with a
+restrained green and blue diagnostic palette. Violet and cyan remain reserved
+for the System Pulse identity, focus and selection.
 
 Working name:
 
@@ -93,28 +95,31 @@ text_muted           #747B8D
 border               #2A3040
 border_focused       #A855F7
 
-primary              #A855F7
-secondary            #22D3EE
-accent               #7C3AED
+primary              #7BD88F
+secondary            #6AA6FF
+accent               #D7BA7D
 
-success              #22C55E
-warning              #F59E0B
-danger               #EF4444
-info                 #38BDF8
+success              #7BD88F
+warning              #E5B567
+danger               #F07575
+info                 #6AA6FF
 
-chart_primary        #A855F7
-chart_secondary      #22D3EE
-chart_grid           #252A38
+chart_primary        #7BD88F
+chart_secondary      #6AA6FF
+chart_grid           #25343D
 
 selection_background #312E81
-selection_text       #FFFFFF
+selection_text       #F8F7FF
 
-pulse_low            #6D28D9
-pulse_medium         #A855F7
-pulse_high           #22D3EE
+pulse_low            #2D6A46
+pulse_medium         #7BD88F
+pulse_high           #6AA6FF
 ```
 
-These values are an initial visual direction and may be adjusted after implementation testing.
+These values are the current implementation baseline. Dashboard V2
+intentionally derives the central Pulse raster from a violet/cyan variant of
+these tokens while keeping the surrounding diagnostic instruments restrained
+and state-oriented.
 
 ---
 

@@ -9,18 +9,16 @@ Um monitor de sistema no terminal feito em Rust, com interface TUI leve, atualiz
 ## Preview
 
 ```text
-┌─ SYSMON ────────────────────────────┐ ┌─ GPU ───────────────────────────────┐
-│ Linux | Kernel 6.x                  │ │ NVIDIA GeForce ...                  │
-│ CPU: AMD/Intel ...                  │ │ Temp: 52°C                           │
-│ Cores: 8 | Processos: 240           │ │ Uso: 15 %                            │
-│ Uptime: 2d 4h 12m                   │ │ VRAM: 1024 MiB                       │
-└─────────────────────────────────────┘ └─────────────────────────────────────┘
-┌ RAM 5.2/15.5GB ─────────────────────┐ ┌ TOP MEMORY ─────────────────────────┐
-│ █████████░░░░░░░░░░░ 34%             │ │ firefox 820.4MB                      │
-└─────────────────────────────────────┘ └─────────────────────────────────────┘
-┌ DISKS ─────────┐ ┌ CPU HISTORY ─────┐ ┌ NETWORK ────────────────────────────┐
-│ / / 48/220GB   │ │ ▂▃▅▇▆▃▂          │ │ wlan0 ↓ 0.32MB/s ↑ 0.04MB/s          │
-└────────────────┘ └──────────────────┘ └─────────────────────────────────────┘
+┌─ SYSMON ───────────── SYSTEM MONITOR · host ─────── Standard · LIVE ─┐
+│┌─ METRICS ─────────┐┌─ SYSTEM PULSE ─────────────┐┌─ TEMPERATURES ──┐│
+││ CPU          42%  ││ · ·  ·····  ·   · ···       ││ CPU Package 52°C││
+││ MEM  5.2 / 15.5G ││   ····  ·······  ···        │├─ TOP PROCESSES ─┤│
+││ GPU          25%  ││ ···    ·········   ·        ││  42  sysmon 2%  ││
+││ NET     ↓ 10 KB/s ││     ·  ·····  ·····        ││  87  shell  1%  ││
+││ DISK   R 24 MB/s  │└────────────────────────────┘├─ RECENT EVENTS ─┤│
+│└───────────────────┘┌─ SYSTEM ──────────────────┐ │› SysMon started ││
+│                     │ HOST workstation  UP 2h   │ └─────────────────┘│
+└─────────────────────┴───────────────────────────┴────────────────────┘
 ```
 
 ## Recursos
@@ -30,12 +28,12 @@ Um monitor de sistema no terminal feito em Rust, com interface TUI leve, atualiz
 - Informações de sistema: OS, kernel, uptime, cores, load average e quantidade de processos.
 - Contexto operacional ao vivo com hostname, memória disponível, idade da amostra e identidade dos processos.
 - RAM e swap usados/totais com barra de progresso.
-- Top 5 processos por uso de memória, exibindo também CPU por processo.
+- Top 5 processos por uso de CPU, exibindo também PID e memória.
 - Discos montados com espaço usado/total.
 - Rede por interface em `MB/s`, priorizando as interfaces com mais tráfego.
 - GPUs NVIDIA via `nvidia-smi`, quando disponível, exibindo todas as placas detectadas.
 - Layout responsivo, com aviso quando o terminal não possui o tamanho mínimo necessário.
-- Palette de cores discreta, bordas quadradas e medidores ASCII para manter a leitura com cara de terminal.
+- Paleta de cores discreta, bordas quadradas e medidores ASCII para manter a leitura com cara de terminal.
 - Primeira coleta real antes do desenho inicial, sem valores de demonstração na interface principal.
 - Command palette, busca de processos, foco por widget e modo de movimento reduzido.
 - Saída segura com restauração do terminal.
@@ -60,6 +58,8 @@ Execute em modo desenvolvimento:
 ```bash
 cargo run
 ```
+
+Esse é o único comando de execução necessário. Os binários `*_viewer` em `src/bin` são ferramentas de desenvolvimento para testar visualizações isoladas.
 
 Ou gere o binário otimizado:
 

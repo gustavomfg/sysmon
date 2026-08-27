@@ -83,29 +83,37 @@ Decoration second.
 
 Color has semantic meaning.
 
-White
+Light text
 
 Primary values.
 
-Muted Gray
+Muted gray
 
-Labels.
+Labels, context and unavailable data.
 
-Purple
+Green
 
-Primary activity.
+Healthy or normal activity.
 
-Blue
+Blue / cyan
 
-Network and secondary activity.
+Telemetry, network and secondary activity.
 
-Yellow
+Violet
 
-Warning.
+System Pulse identity, focus and selection.
 
-Red
+Amber
 
-Critical.
+Warning and thermal attention.
+
+Coral red
+
+Critical state.
+
+The Pulse is the only component allowed to blend violet and cyan as an
+expressive identity. Diagnostic widgets use the semantic roles above without
+introducing isolated colors.
 
 No widget should introduce isolated colors.
 
