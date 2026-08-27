@@ -91,6 +91,8 @@ mod tests {
         assert_eq!(theme.background, Color::Rgb(0x0B, 0x10, 0x14));
         assert_eq!(theme.primary, Color::Rgb(0x7B, 0xD8, 0x8F));
         assert_eq!(theme.secondary, Color::Rgb(0x6A, 0xA6, 0xFF));
+        assert_eq!(theme.border_focused, Color::Rgb(0xA8, 0x55, 0xF7));
+        assert_eq!(theme.selection_background, Color::Rgb(0x31, 0x2E, 0x81));
         assert_eq!(theme.danger, Color::Rgb(0xF0, 0x75, 0x75));
     }
 
