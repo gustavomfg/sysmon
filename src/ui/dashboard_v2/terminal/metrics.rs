@@ -19,8 +19,8 @@ const MIN_GRAPH_WIDTH: u16 = 10;
 const MAX_BRAILLE_CELLS: usize = 4096;
 // A medium-weight pair: more legible than a thin rule, without returning to
 // the visually heavy full blocks used by the original meters.
-const METER_FILL_GLYPH: char = '▰';
-const METER_TRACK_GLYPH: char = '▱';
+const METER_FILL_GLYPH: char = '#';
+const METER_TRACK_GLYPH: char = '-';
 
 pub(super) fn render(
     model: WidgetRenderModel,
@@ -82,7 +82,7 @@ fn render_memory(
     theme: &Theme,
     buffer: &mut Buffer,
 ) {
-    render_header("▦ MEMORY", model, area, theme, buffer);
+    render_header("MEMORY", model, area, theme, buffer);
     let body = body(area);
     if body.height == 0 {
         return;
@@ -222,7 +222,7 @@ fn render_gpu(
     theme: &Theme,
     buffer: &mut Buffer,
 ) {
-    render_header("◇ GPU", model, area, theme, buffer);
+    render_header("GPU", model, area, theme, buffer);
     let body = body(area);
     if body.height == 0 {
         return;
@@ -307,10 +307,9 @@ fn render_network(
     buffer: &mut Buffer,
     inventory: Option<&HardwareInventory>,
 ) {
-    let title = inventory.and_then(network_inventory_label).map_or_else(
-        || "⇄ NETWORK".to_owned(),
-        |label| format!("⇄ NETWORK  {label}"),
-    );
+    let title = inventory
+        .and_then(network_inventory_label)
+        .map_or_else(|| "NETWORK".to_owned(), |label| format!("NETWORK  {label}"));
     render_header(&title, model, area, theme, buffer);
     let body = body(area);
     if body.height == 0 {
@@ -440,7 +439,7 @@ fn render_storage(
     theme: &Theme,
     buffer: &mut Buffer,
 ) {
-    render_header("▰ STORAGE", model, area, theme, buffer);
+    render_header("STORAGE", model, area, theme, buffer);
     let body = body(area);
     if body.height == 0 {
         return;
@@ -526,9 +525,9 @@ fn render_gpu_inventory(
     let primary = &inventory.gpus[primary_index];
     let primary_name = gpu_display_name(&primary.name);
     let title = if inventory.gpus.len() > 1 {
-        format!("◇ GPU  {primary_name}  ({}/{})", 1, inventory.gpus.len())
+        format!("GPU  {primary_name}  ({}/{})", 1, inventory.gpus.len())
     } else {
-        format!("◇ GPU  {primary_name}")
+        format!("GPU  {primary_name}")
     };
     render_header(&title, model, area, theme, buffer);
     let body = body(area);
@@ -731,7 +730,7 @@ fn render_storage_inventory(
     clear_surface(area, theme, buffer);
     let content = body(area);
     buffer.set_style(content, Style::default().bg(theme.surface));
-    let title = format!("▰ STORAGE  {} devices", inventory.storages.len());
+    let title = format!("STORAGE  {} devices", inventory.storages.len());
     render_header(&title, model, area, theme, buffer);
     if content.height == 0 {
         return;

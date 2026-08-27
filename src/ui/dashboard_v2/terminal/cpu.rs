@@ -71,7 +71,7 @@ fn render_header(model: WidgetRenderModel, area: Rect, theme: &Theme, buffer: &m
         WidgetState::Unavailable => " ·",
         _ => "",
     };
-    let title = format!("◈ CPU{marker}");
+    let title = format!("CPU{marker}");
     write(buffer, area, area.x, area.y, &title, style);
 }
 
@@ -1000,7 +1000,7 @@ mod tests {
     fn dedicated_card_has_large_value_hardware_and_real_history() {
         let rendered = render(DashboardPreset::Widescreen, 48, 12);
         let output = text(&rendered);
-        assert!(output.contains("◈ CPU"));
+        assert!(output.contains("CPU"));
         assert_eq!(output.matches("42%").count(), 1);
         assert_eq!(rendered[(0, 2)].symbol(), "4");
         assert!(output.contains("8 cores"));

@@ -334,7 +334,7 @@ mod tests {
     fn card_language_prioritizes_value_and_removes_debug_labels() {
         let standard = render_cpu(DashboardPreset::Standard, 48, 8);
         let standard_text = buffer_text(&standard);
-        assert!(standard_text.contains("◈ CPU"));
+        assert!(standard_text.contains("CPU"));
         assert_eq!(standard_text.matches("42%").count(), 1);
         assert_eq!(standard[(0, 2)].symbol(), "4");
         assert!(standard_text.contains("↑ +12%"));
@@ -551,14 +551,14 @@ mod tests {
         let memory_text = buffer_text(&buffer);
         assert!(memory_text.contains("60%"));
         assert!(!memory_text.lines().any(|line| line.trim() == "60%"));
-        assert!(memory_text.contains('▰'));
+        assert!(memory_text.contains('#'));
         let memory_lines: Vec<&str> = memory_text.lines().collect();
         let memory_value_line = memory_lines
             .iter()
             .position(|line| line.contains("60 B / 100 B"))
             .expect("memory value row");
         assert!(memory_lines[memory_value_line].contains("60%"));
-        assert!(memory_lines[memory_value_line + 1].contains('▰'));
+        assert!(memory_lines[memory_value_line + 1].contains('#'));
         assert!(
             !memory_text
                 .chars()
@@ -599,7 +599,7 @@ mod tests {
             .unwrap();
         let storage_text = buffer_text(&storage_buffer);
         assert!(storage_text.contains("500 B / 1000 B"));
-        assert!(storage_text.contains('▰'));
+        assert!(storage_text.contains('#'));
 
         let mut comparison = Buffer::empty(Rect::new(0, 0, 72, 24));
         TerminalRenderer::new()
@@ -744,7 +744,7 @@ mod tests {
         let text = buffer_text(&buffer);
         assert!(text.contains("sda"));
         assert!(text.contains("nvme0n1"));
-        assert!(text.matches('▰').count() + text.matches('▱').count() >= 72 * 2);
+        assert!(text.matches('#').count() + text.matches('-').count() >= 72 * 2);
     }
 
     #[test]
@@ -834,9 +834,9 @@ mod tests {
         let text = buffer_text(&buffer);
         assert!(text.contains("RTX 4060"));
         assert!(text.contains("26%"));
-        assert!(text.contains("▰"));
-        assert!(text.contains("▱"));
-        assert!(text.matches('▰').count() + text.matches('▱').count() >= 60);
+        assert!(text.contains('#'));
+        assert!(text.contains('-'));
+        assert!(text.matches('#').count() + text.matches('-').count() >= 60);
         assert!(text.contains("0.7 / 8 GB"));
         assert!(text.contains("51°C"));
     }

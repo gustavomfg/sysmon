@@ -81,12 +81,7 @@ fn render_title(block: TitleBlock, area: Rect, theme: &Theme, buffer: &mut Buffe
     if block.metadata().is_focused() {
         style = style.add_modifier(Modifier::BOLD);
     }
-    write(
-        buffer,
-        area,
-        &format!("{prefix}{} {}", title_icon(block.label()), block.label()),
-        style,
-    );
+    write(buffer, area, &format!("{prefix}{}", block.label()), style);
 }
 
 fn render_value(
@@ -148,17 +143,6 @@ fn render_value(
                 );
             }
         }
-    }
-}
-
-fn title_icon(label: &str) -> &'static str {
-    match label {
-        "CPU" => "◈",
-        "Memory" => "▦",
-        "GPU" => "◇",
-        "Network" => "⇄",
-        "Storage" => "▰",
-        _ => "·",
     }
 }
 

@@ -88,10 +88,10 @@ mod tests {
     fn pulse_contains_the_documented_semantic_colors() {
         let theme = Theme::pulse();
 
-        assert_eq!(theme.background, Color::Rgb(0x08, 0x0A, 0x0F));
-        assert_eq!(theme.primary, Color::Rgb(0xA8, 0x55, 0xF7));
-        assert_eq!(theme.secondary, Color::Rgb(0x22, 0xD3, 0xEE));
-        assert_eq!(theme.danger, Color::Rgb(0xEF, 0x44, 0x44));
+        assert_eq!(theme.background, Color::Rgb(0x0B, 0x10, 0x14));
+        assert_eq!(theme.primary, Color::Rgb(0x7B, 0xD8, 0x8F));
+        assert_eq!(theme.secondary, Color::Rgb(0x6A, 0xA6, 0xFF));
+        assert_eq!(theme.danger, Color::Rgb(0xF0, 0x75, 0x75));
     }
 
     #[test]
