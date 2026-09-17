@@ -7,16 +7,16 @@ use ratatui::{
 use crate::theme::Theme;
 
 use super::super::chart::SparklineModel;
+use super::super::inventory::select_primary_gpu;
 use super::super::metrics::CHART_POINTS;
 use super::super::{
     BlockId, ChartContent, DashboardBounds, DashboardPreset, HardwareInventory, RenderBlock,
     WidgetRenderModel, WidgetState,
 };
 use super::blocks::write;
+use super::history_chart::{self, Scale};
 use super::renderer::TerminalRenderError;
 
-const MIN_GRAPH_WIDTH: u16 = 10;
-const MAX_BRAILLE_CELLS: usize = 4096;
 // A medium-weight pair: more legible than a thin rule, without returning to
 // the visually heavy full blocks used by the original meters.
 const METER_FILL_GLYPH: char = '#';
@@ -109,20 +109,12 @@ fn render_memory(
         .visual()
         .primary()
         .map_or_else(|| "—".to_owned(), |value| format_percent(value.value()));
-    let fraction = used
-        .zip(total)
-        .map(|(used, total)| used.value() / total.value().max(1.0))
-        .or_else(|| model.visual().primary().map(|value| value.value()));
-
     let secondary = memory_context_line(&context, body.width);
     if body.height == 1 {
         write(buffer, line(body, 0), &value, value_style(model, theme));
         return;
     }
 
-    // Memory is an occupancy instrument, not a temporal signal. The value,
-    // occupancy and gauge share one strict grid: one reading row, one
-    // instrument row and one context row. No history is read here.
     write(buffer, line(body, 0), &value, value_style(model, theme));
     let occupancy_width = u16::try_from(occupancy.chars().count()).unwrap_or(body.width);
     if occupancy_width < body.width {
@@ -134,25 +126,30 @@ fn render_memory(
             value_style(model, theme),
         );
     }
-    if body.height > 1 {
-        render_segmented_meter(
-            line(body, 1),
-            fraction.unwrap_or(0.0),
-            theme.chart_primary,
-            theme,
-            buffer,
-        );
-    }
-    if body.height > 2 && !secondary.is_empty() {
+    let inline_context = body.height <= 3
+        && !secondary.is_empty()
+        && secondary.chars().count() <= usize::from(area.width.saturating_sub(8));
+    if body.height > 1 && !secondary.is_empty() {
+        let context_area = if inline_context {
+            Rect::new(area.x + 8, area.y, area.width - 8, 1)
+        } else {
+            line(body, 1)
+        };
         write_rich_context(
             buffer,
-            line(body, 2),
+            context_area,
             &secondary,
             context_style(model, theme),
             theme,
             value_style(model, theme),
         );
     }
+    let offset = if secondary.is_empty() || inline_context {
+        1
+    } else {
+        2
+    };
+    render_percent_history(model, history_chart::region(body, offset), theme, buffer);
 }
 
 fn memory_context_line(context: &super::super::MemoryContextBlock, width: u16) -> String {
@@ -240,34 +237,8 @@ fn render_gpu(
         .primary()
         .map_or_else(|| "—".to_owned(), |value| format_percent(value.value()));
     write(buffer, line(body, 0), &value, value_style(model, theme));
-    if body.height > 1 {
-        let vram = context
-            .vram_used()
-            .zip(context.vram_total())
-            .map(|(used, total)| format_compact_capacity(used.value(), total.value()));
-        let temperature = context
-            .temperature()
-            .map(|value| format_temperature(value.value()));
-        let text = match (vram, temperature) {
-            (Some(vram), Some(temperature)) => format!("{vram}  ·  {temperature}"),
-            (Some(vram), None) => vram,
-            (None, Some(temperature)) => temperature,
-            (None, None) => String::new(),
-        };
-        let usage = model.visual().primary().map(|value| value.value());
-        if let Some(usage) = usage {
-            render_segmented_meter(line(body, 1), usage, theme.chart_primary, theme, buffer);
-            if body.height > 2 {
-                write_rich_context(
-                    buffer,
-                    line(body, 2),
-                    &text,
-                    context_style(model, theme),
-                    theme,
-                    value_style(model, theme),
-                );
-            }
-        } else {
+    if model.visual().primary().is_none() {
+        if body.height > 1 {
             write(
                 buffer,
                 line(body, 1),
@@ -275,29 +246,48 @@ fn render_gpu(
                 context_style(model, theme),
             );
         }
+        return;
     }
-    if body.height > 3 && model.visual().primary().is_some() {
-        let frequency = context
-            .frequency()
-            .map(|value| format_frequency(value.value()));
-        let power = context
-            .power()
-            .map(|value| format!("{:.0} W", value.value()));
-        let text = match (frequency, power) {
-            (Some(frequency), Some(power)) => format!("{frequency}  ·  {power}"),
-            (Some(frequency), None) => frequency,
-            (None, Some(power)) => power,
-            (None, None) => String::new(),
-        };
+    let mut details = Vec::new();
+    if let Some((used, total)) = context.vram_used().zip(context.vram_total()) {
+        details.push(format_compact_capacity(used.value(), total.value()));
+    }
+    if let Some(value) = context.temperature() {
+        details.push(format_temperature(value.value()));
+    }
+    let mut clock = Vec::new();
+    if let Some(value) = context.frequency() {
+        clock.push(format_frequency(value.value()));
+    }
+    if let Some(value) = context.power() {
+        clock.push(format!("{:.0} W", value.value()));
+    }
+    let clock = clock.join(" · ");
+    let inline_clock = body.height <= 4
+        && !clock.is_empty()
+        && value.chars().count() + 2 + clock.chars().count() <= usize::from(body.width);
+    if inline_clock {
+        let start = value.chars().count() as u16 + 2;
         write_rich_context(
             buffer,
-            line(body, 3),
-            &text,
+            Rect::new(body.x + start, body.y, body.width - start, 1),
+            &clock,
             context_style(model, theme),
             theme,
             value_style(model, theme),
         );
+    } else if !clock.is_empty() {
+        details.push(clock);
     }
+    let offset = write_context_rows(
+        body,
+        &details.join(" · "),
+        context_style(model, theme),
+        theme,
+        value_style(model, theme),
+        buffer,
+    );
+    render_percent_history(model, history_chart::region(body, offset), theme, buffer);
 }
 
 fn render_network(
@@ -363,30 +353,11 @@ fn render_network(
         body.width,
         body.height.saturating_sub(graph_offset),
     );
-    if graph.width >= MIN_GRAPH_WIDTH
-        && let Some((download_area, upload_area)) = dual_graph_areas(graph)
-    {
-        if let Some(sparkline) = sparkline(model, BlockId::PrimarySparkline) {
-            render_vital_line(
-                sparkline,
-                download_area,
-                0.34,
-                theme.chart_primary,
-                theme,
-                buffer,
-            );
-        }
-        if let Some(sparkline) = sparkline(model, BlockId::SecondarySparkline) {
-            render_vital_line(
-                sparkline,
-                upload_area,
-                0.34,
-                theme.chart_secondary,
-                theme,
-                buffer,
-            );
-        }
-    }
+    let series = [
+        (sparkline(model, BlockId::PrimarySparkline), download_style),
+        (sparkline(model, BlockId::SecondarySparkline), upload_style),
+    ];
+    history_chart::render(&series, Scale::Network, graph, buffer);
 }
 
 fn write_flow_value(
@@ -548,24 +519,38 @@ fn render_gpu_inventory(
             context_style_for_theme(theme),
         );
     } else if gpu_has_usage(primary) {
-        let usage = primary.utilization_percent.unwrap_or(0.0).clamp(0.0, 100.0) / 100.0;
         write(
             buffer,
             line(body, 0),
             &gpu_usage_text(primary),
             value_style_for_inventory(primary.availability, theme),
         );
-        render_segmented_meter(line(body, 1), usage, theme.chart_primary, theme, buffer);
-        if body.height > 2 {
+        let frequency = primary.frequency_hz.map(format_frequency);
+        let inline_clock = body.height <= 4
+            && frequency.as_ref().is_some_and(|frequency| {
+                gpu_usage_text(primary).chars().count() + 2 + frequency.chars().count()
+                    <= usize::from(body.width)
+            });
+        if inline_clock {
+            let start = gpu_usage_text(primary).chars().count() as u16 + 2;
             write_rich_context(
                 buffer,
-                line(body, 2),
-                &gpu_context(primary),
+                Rect::new(body.x + start, body.y, body.width - start, 1),
+                frequency.as_deref().unwrap_or_default(),
                 context_style_for_theme(theme),
                 theme,
                 context_value_style_for_theme(theme),
             );
         }
+        let offset = write_context_rows(
+            body,
+            &gpu_context_with_frequency(primary, !inline_clock),
+            context_style_for_theme(theme),
+            theme,
+            context_value_style_for_theme(theme),
+            buffer,
+        );
+        render_percent_history(model, history_chart::region(body, offset), theme, buffer);
     } else {
         write(
             buffer,
@@ -589,38 +574,37 @@ fn render_gpu_inventory(
     }
 }
 
-fn select_primary_gpu(gpus: &[super::super::GpuDevice]) -> usize {
-    let mut selected = 0;
-    let mut selected_score = (0_u8, 0_u8, 0_u8, 0_u8);
-    for (index, gpu) in gpus.iter().enumerate() {
-        let complete = u8::from(
-            gpu.utilization_percent.is_some()
-                && gpu.vram_used_bytes.is_some()
-                && gpu.vram_total_bytes.is_some()
-                && gpu.temperature_celsius.is_some(),
-        );
-        let usage = u8::from(gpu.utilization_percent.is_some());
-        let discrete = u8::from(is_discrete_gpu(&gpu.name));
-        let telemetry = u8::from(
-            gpu.vram_used_bytes.is_some()
-                || gpu.vram_total_bytes.is_some()
-                || gpu.temperature_celsius.is_some(),
-        );
-        let score = (complete, usage, discrete, telemetry);
-        if score > selected_score {
-            selected = index;
-            selected_score = score;
+// Preserve complete context tokens before assigning remaining rows to history.
+fn write_context_rows(
+    body: Rect,
+    context: &str,
+    style: Style,
+    theme: &Theme,
+    value_style: Style,
+    buffer: &mut Buffer,
+) -> u16 {
+    let mut row = 1;
+    let mut text = String::new();
+    for token in context.split(" · ").filter(|token| !token.is_empty()) {
+        if !text.is_empty()
+            && text.chars().count() + 3 + token.chars().count() > usize::from(body.width)
+        {
+            if row < body.height {
+                write_rich_context(buffer, line(body, row), &text, style, theme, value_style);
+            }
+            row += 1;
+            text.clear();
         }
+        if !text.is_empty() {
+            text.push_str(" · ");
+        }
+        text.push_str(token);
     }
-    selected
-}
-
-fn is_discrete_gpu(name: &str) -> bool {
-    let name = name.to_ascii_lowercase();
-    name.contains("nvidia")
-        || name.contains("geforce")
-        || name.contains("rtx")
-        || name.contains("gtx")
+    if !text.is_empty() && row < body.height {
+        write_rich_context(buffer, line(body, row), &text, style, theme, value_style);
+        row += 1;
+    }
+    row
 }
 
 fn gpu_has_usage(gpu: &super::super::GpuDevice) -> bool {
@@ -652,6 +636,10 @@ fn gpu_usage_text(gpu: &super::super::GpuDevice) -> String {
 }
 
 fn gpu_context(gpu: &super::super::GpuDevice) -> String {
+    gpu_context_with_frequency(gpu, true)
+}
+
+fn gpu_context_with_frequency(gpu: &super::super::GpuDevice, include_frequency: bool) -> String {
     let mut values = Vec::new();
     if let Some((used, total)) = gpu.vram_used_bytes.zip(gpu.vram_total_bytes) {
         values.push(format_compact_capacity(used, total));
@@ -659,7 +647,7 @@ fn gpu_context(gpu: &super::super::GpuDevice) -> String {
     if let Some(temperature) = gpu.temperature_celsius {
         values.push(format!("{temperature:.0}°C"));
     }
-    if let Some(frequency) = gpu.frequency_hz {
+    if include_frequency && let Some(frequency) = gpu.frequency_hz {
         values.push(format_frequency(frequency));
     }
     values.join(" · ")
@@ -1023,231 +1011,25 @@ fn sparkline(model: WidgetRenderModel, id: BlockId) -> Option<SparklineModel<CHA
     })
 }
 
-fn dual_graph_areas(graph: Rect) -> Option<(Rect, Rect)> {
-    if graph.height < 2 {
-        return None;
-    }
-    if graph.height == 2 {
-        return Some((
-            Rect::new(graph.x, graph.y, graph.width, 1),
-            Rect::new(graph.x, graph.y.saturating_add(1), graph.width, 1),
-        ));
-    }
-    let first_height = (graph.height / 2).max(1);
-    let second_height = graph.height.saturating_sub(first_height);
-    (second_height > 0).then(|| {
-        (
-            Rect::new(graph.x, graph.y, graph.width, first_height),
-            Rect::new(
-                graph.x,
-                graph.y.saturating_add(first_height),
-                graph.width,
-                second_height,
-            ),
-        )
-    })
-}
-
-fn render_vital_line(
-    sparkline: SparklineModel<CHART_POINTS>,
+fn render_percent_history(
+    model: WidgetRenderModel,
     area: Rect,
-    alpha: f64,
-    color: ratatui::style::Color,
     theme: &Theme,
     buffer: &mut Buffer,
 ) {
-    if area.width == 0 || area.height == 0 {
-        return;
-    }
-    let mut values = [None; CHART_POINTS];
-    let mut count = 0;
-    for point in sparkline.points().iter() {
-        if count == CHART_POINTS {
-            break;
-        }
-        values[count] = point.sample().usable_value();
-        count += 1;
-    }
-    if count == 0 {
-        return;
-    }
-    let low = sparkline.stats().minimum().unwrap_or(0.0);
-    let high = sparkline.stats().maximum().unwrap_or(1.0);
-    let (lower, upper) = vital_scale(low, high);
-    let visual_span = (upper - lower).max(0.08);
-    let pixel_width = usize::from(area.width).saturating_mul(2);
-    let pixel_height = usize::from(area.height).saturating_mul(4);
-    if pixel_width == 0
-        || pixel_height == 0
-        || usize::from(area.width) * usize::from(area.height) > MAX_BRAILLE_CELLS
-    {
-        render_fallback_line(values, count, area, lower, upper, color, theme, buffer);
-        return;
-    }
-    let mut smooth = [None; CHART_POINTS];
-    let mut previous = None;
-    for index in 0..count {
-        let Some(raw) = values[index] else { continue };
-        let mut value = previous.map_or(raw, |last: f64| last + alpha * (raw - last));
-        if (raw - value).abs() > visual_span * 0.18 {
-            value += (raw - value) * 0.45;
-        }
-        if index + 1 == count {
-            value += (raw - value) * 0.70;
-        }
-        smooth[index] = Some(value.clamp(lower, upper));
-        previous = smooth[index];
-    }
-    let mut cells = [0u8; MAX_BRAILLE_CELLS];
-    let mut previous_point = None;
-    for (index, value) in smooth.iter().take(count).enumerate() {
-        let Some(value) = *value else { continue };
-        let x = if count <= 1 {
-            0
+    history_chart::render(
+        &[(
+            sparkline(model, BlockId::PrimarySparkline),
+            Style::default().fg(theme.chart_primary).bg(theme.surface),
+        )],
+        if model.visual().widget_id() == super::super::DashboardWidgetId::Memory {
+            Scale::Memory
         } else {
-            index * pixel_width.saturating_sub(1) / (count - 1)
-        };
-        let normalized = ((value - lower) / (upper - lower)).clamp(0.0, 1.0);
-        let y = pixel_height.saturating_sub(1).saturating_sub(
-            (normalized * (pixel_height.saturating_sub(1) as f64)).round() as usize,
-        );
-        let point = (x, y);
-        if let Some(previous_point) = previous_point {
-            draw_segment(&mut cells, area, previous_point, point);
-        } else {
-            set_dot(&mut cells, area, x, y);
-        }
-        previous_point = Some(point);
-    }
-    if count == 1
-        && let Some(value) = smooth[0]
-    {
-        let normalized = ((value - lower) / (upper - lower)).clamp(0.0, 1.0);
-        let y = pixel_height.saturating_sub(1).saturating_sub(
-            (normalized * (pixel_height.saturating_sub(1) as f64)).round() as usize,
-        );
-        draw_segment(&mut cells, area, (0, y), (pixel_width.saturating_sub(1), y));
-    }
-    let style = Style::default().fg(color).bg(theme.surface);
-    for row in 0..area.height {
-        for column in 0..area.width {
-            let mask = cells[usize::from(row) * usize::from(area.width) + usize::from(column)];
-            if mask != 0 {
-                let character = char::from_u32(0x2800 + u32::from(mask)).unwrap_or('·');
-                buffer.set_string(area.x + column, area.y + row, character.to_string(), style);
-            }
-        }
-    }
-}
-
-fn vital_scale(low: f64, high: f64) -> (f64, f64) {
-    let low = if low.is_finite() { low.max(0.0) } else { 0.0 };
-    let high = if high.is_finite() { high.max(low) } else { low };
-    let normalized = high <= 1.0;
-    let minimum_range = if normalized {
-        0.08
-    } else {
-        (high.abs() * 0.08).max(1.0)
-    };
-    let span = (high - low).max(minimum_range);
-    let margin = (span * 0.18).max(if normalized { 0.015 } else { 0.08 });
-    let lower = (low - margin).max(0.0);
-    let upper = if normalized {
-        (high + margin).min(1.0).max(lower + 0.08)
-    } else {
-        high + margin
-    };
-    (lower, upper.max(lower + minimum_range))
-}
-
-#[allow(clippy::too_many_arguments)]
-fn render_fallback_line(
-    values: [Option<f64>; CHART_POINTS],
-    count: usize,
-    area: Rect,
-    lower: f64,
-    upper: f64,
-    color: ratatui::style::Color,
-    theme: &Theme,
-    buffer: &mut Buffer,
-) {
-    let style = Style::default().fg(color).bg(theme.surface);
-    let mut previous = None;
-    for column in 0..area.width {
-        let index = if area.width <= 1 {
-            0
-        } else {
-            usize::from(column) * count.saturating_sub(1) / usize::from(area.width - 1)
-        };
-        let Some(value) = values.get(index).copied().flatten() else {
-            continue;
-        };
-        let level = ((value - lower) / (upper - lower)).clamp(0.0, 1.0);
-        let current = (level * 3.0).round() as u8;
-        let glyph = match (previous, current) {
-            (Some(a), b) if b > a => '╲',
-            (Some(a), b) if b < a => '╱',
-            (Some(_), _) => '─',
-            _ => '·',
-        };
-        buffer.set_string(
-            area.x + column,
-            area.y + area.height / 2,
-            glyph.to_string(),
-            style,
-        );
-        previous = Some(current);
-    }
-}
-
-fn draw_segment(cells: &mut [u8], area: Rect, start: (usize, usize), end: (usize, usize)) {
-    let mut x = start.0 as isize;
-    let mut y = start.1 as isize;
-    let target_x = end.0 as isize;
-    let target_y = end.1 as isize;
-    let delta_x = (target_x - x).abs();
-    let step_x = if x < target_x { 1 } else { -1 };
-    let delta_y = -(target_y - y).abs();
-    let step_y = if y < target_y { 1 } else { -1 };
-    let mut error = delta_x + delta_y;
-    loop {
-        set_dot(cells, area, x as usize, y as usize);
-        if x == target_x && y == target_y {
-            break;
-        }
-        let doubled = error.saturating_mul(2);
-        if doubled >= delta_y {
-            error += delta_y;
-            x += step_x;
-        }
-        if doubled <= delta_x {
-            error += delta_x;
-            y += step_y;
-        }
-    }
-}
-
-fn set_dot(cells: &mut [u8], area: Rect, x: usize, y: usize) {
-    let pixel_width = usize::from(area.width).saturating_mul(2);
-    let pixel_height = usize::from(area.height).saturating_mul(4);
-    if x >= pixel_width || y >= pixel_height {
-        return;
-    }
-    let bit = match (x % 2, y % 4) {
-        (0, 0) => 1,
-        (0, 1) => 2,
-        (0, 2) => 4,
-        (0, 3) => 64,
-        (1, 0) => 8,
-        (1, 1) => 16,
-        (1, 2) => 32,
-        (1, 3) => 128,
-        _ => return,
-    };
-    let index = (y / 4) * usize::from(area.width) + (x / 2);
-    if let Some(cell) = cells.get_mut(index) {
-        *cell |= bit;
-    }
+            Scale::Percent
+        },
+        area,
+        buffer,
+    );
 }
 
 fn value_style(model: WidgetRenderModel, theme: &Theme) -> Style {
@@ -1381,28 +1163,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn dual_graphs_reserve_the_window_inside_their_bounds() {
-        for height in 3..=10 {
-            let graph = Rect::new(4, 6, 18, height);
-            let (first, second) = dual_graph_areas(graph).unwrap();
-            assert!(first.x >= graph.x && first.right() <= graph.right());
-            assert!(second.x >= graph.x && second.right() <= graph.right());
-            assert!(first.y >= graph.y && second.bottom() <= graph.bottom());
-            assert_eq!(first.bottom(), second.y);
-        }
-    }
-
-    #[test]
-    fn dual_graphs_keep_both_directions_in_a_two_row_area() {
-        let graph = Rect::new(4, 6, 18, 2);
-        let (download, upload) = dual_graph_areas(graph).unwrap();
-        assert_eq!(download.height, 1);
-        assert_eq!(upload.height, 1);
-        assert_eq!(download.bottom(), upload.y);
-        assert_eq!(upload.bottom(), graph.bottom());
-    }
-
-    #[test]
     fn compact_gpu_capacity_avoids_unnecessary_precision() {
         let gibibyte = 1024.0 * 1024.0 * 1024.0;
         assert_eq!(
@@ -1483,19 +1243,6 @@ mod tests {
                 .count(),
             6
         );
-    }
-
-    #[test]
-    fn vital_scale_reveals_absolute_rate_variation_without_flattening_it() {
-        let (lower, upper) = vital_scale(20.0, 80.0);
-        assert!(lower < 20.0);
-        assert!(upper > 80.0);
-        assert!(upper - lower < 100.0);
-
-        let (normalized_lower, normalized_upper) = vital_scale(0.20, 0.80);
-        assert!(normalized_lower >= 0.0);
-        assert!(normalized_upper <= 1.0);
-        assert!(normalized_upper - normalized_lower >= 0.08);
     }
 
     #[test]

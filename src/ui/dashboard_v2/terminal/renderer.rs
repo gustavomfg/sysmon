@@ -551,16 +551,21 @@ mod tests {
         let memory_text = buffer_text(&buffer);
         assert!(memory_text.contains("60%"));
         assert!(!memory_text.lines().any(|line| line.trim() == "60%"));
-        assert!(memory_text.contains('#'));
+        assert!(!memory_text.contains('#'));
         let memory_lines: Vec<&str> = memory_text.lines().collect();
         let memory_value_line = memory_lines
             .iter()
             .position(|line| line.contains("60 B / 100 B"))
             .expect("memory value row");
         assert!(memory_lines[memory_value_line].contains("60%"));
-        assert!(memory_lines[memory_value_line + 1].contains('#'));
         assert!(
-            !memory_text
+            memory_lines[memory_value_line + 2..memory_value_line + 5]
+                .iter()
+                .flat_map(|line| line.chars())
+                .any(|c| ('\u{2800}'..='\u{28ff}').contains(&c))
+        );
+        assert!(
+            memory_text
                 .chars()
                 .any(|character| ('\u{2800}'..='\u{28ff}').contains(&character))
         );
@@ -800,7 +805,7 @@ mod tests {
     }
 
     #[test]
-    fn gpu_inventory_renderer_uses_a_segmented_meter_for_real_usage() {
+    fn gpu_inventory_renderer_keeps_context_with_a_history_line() {
         let model = WidgetRenderer::render_gpu(gpu_model(), context(DashboardPreset::Standard))
             .unwrap()
             .unwrap();
@@ -813,32 +818,39 @@ mod tests {
                 vram_used_bytes: Some(0.7 * 1024.0 * 1024.0 * 1024.0),
                 vram_total_bytes: Some(8.0 * 1024.0 * 1024.0 * 1024.0),
                 temperature_celsius: Some(51.0),
-                frequency_hz: None,
+                frequency_hz: Some(210_000_000.0),
                 power_watts: None,
                 availability: MetricAvailability::Available,
             }],
             Vec::new(),
             Vec::new(),
         );
-        let mut buffer = Buffer::empty(Rect::new(0, 0, 60, 6));
-        TerminalRenderer::new()
-            .render_rect_with_inventory(
-                model,
-                DashboardPreset::Standard,
-                Rect::new(0, 0, 60, 6),
-                &crate::theme::Theme::pulse(),
-                &mut buffer,
-                &inventory,
-            )
-            .unwrap();
-        let text = buffer_text(&buffer);
-        assert!(text.contains("RTX 4060"));
-        assert!(text.contains("26%"));
-        assert!(text.contains('#'));
-        assert!(text.contains('-'));
-        assert!(text.matches('#').count() + text.matches('-').count() >= 60);
-        assert!(text.contains("0.7 / 8 GB"));
-        assert!(text.contains("51°C"));
+        for (width, height) in [(60, 6), (25, 4)] {
+            let mut buffer = Buffer::empty(Rect::new(0, 0, width, height));
+            TerminalRenderer::new()
+                .render_rect_with_inventory(
+                    model,
+                    DashboardPreset::Standard,
+                    Rect::new(0, 0, width, height),
+                    &crate::theme::Theme::pulse(),
+                    &mut buffer,
+                    &inventory,
+                )
+                .unwrap();
+            let text = buffer_text(&buffer);
+            assert!(text.contains("RTX 4060"));
+            assert!(text.contains("26%"));
+            assert!(!text.contains('#'));
+            assert!(
+                text.chars()
+                    .filter(|c| ('\u{2800}'..='\u{28ff}').contains(c))
+                    .count()
+                    >= usize::from(width)
+            );
+            assert!(text.contains("0.7 / 8 GB"));
+            assert!(text.contains("51°C"));
+            assert!(text.contains("210 MHz"));
+        }
     }
 
     #[test]

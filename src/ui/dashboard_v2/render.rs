@@ -554,7 +554,9 @@ impl WidgetRenderModel {
         match self.preset {
             DashboardPreset::Compact => matches!(
                 id,
-                BlockId::CpuContext
+                BlockId::PrimarySparkline
+                    | BlockId::SecondarySparkline
+                    | BlockId::CpuContext
                     | BlockId::MemoryContext
                     | BlockId::GpuContext
                     | BlockId::NetworkContext
@@ -1042,7 +1044,7 @@ mod tests {
         let large = WidgetRenderer::render_cpu(cpu(), context(DashboardPreset::LargeWidescreen))
             .unwrap()
             .unwrap();
-        assert_eq!(compact.block_count(), 4);
+        assert_eq!(compact.block_count(), 5);
         assert!(compact.block(BlockId::CpuContext).is_some());
         assert!(compact.block(BlockId::Status).is_none());
         assert!(standard.block(BlockId::PrimarySparkline).is_some());
