@@ -5,6 +5,8 @@ use super::super::{
     WidgetState,
 };
 
+// Semantic downsampling capacity. Terminal charts use the compact raw window
+// carried by SparklineModel, independently of this diagnostic point count.
 pub const CHART_POINTS: usize = 12;
 pub const MAX_PEAKS: usize = 4;
 

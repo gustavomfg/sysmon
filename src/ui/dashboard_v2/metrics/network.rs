@@ -71,12 +71,17 @@ pub struct NetworkMetricModel<const HISTORY: usize> {
 
 impl<const HISTORY: usize> NetworkMetricModel<HISTORY> {
     pub fn from_input(input: NetworkMetricInput<HISTORY>) -> Result<Self, MetricModelError> {
-        let download_sparkline = input
-            .download_history
-            .sparkline::<CHART_POINTS>(TimeWindow::Medium);
+        let download_sparkline =
+            input
+                .download_history
+                .sparkline::<CHART_POINTS>(TimeWindow::Custom(
+                    super::super::chart::VISIBLE_HISTORY_SAMPLES,
+                ));
         let upload_sparkline = input
             .upload_history
-            .sparkline::<CHART_POINTS>(TimeWindow::Medium);
+            .sparkline::<CHART_POINTS>(TimeWindow::Custom(
+                super::super::chart::VISIBLE_HISTORY_SAMPLES,
+            ));
         let download = usable_metric_value(
             input.download_rate,
             MetricUnit::BytesPerSecond,

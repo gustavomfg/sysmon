@@ -308,15 +308,33 @@ impl<const POINTS: usize> DownsampledSeries<POINTS> {
     }
 }
 
+/// Compact presentation window; collector histories keep their own capacity.
+pub const VISIBLE_HISTORY_SAMPLES: usize = 60;
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SparklineModel<const POINTS: usize> {
     points: DownsampledSeries<POINTS>,
+    // Raw values for width-adaptive terminal charts. A bitmap represents gaps
+    // without duplicating timestamps/events in every by-value render block.
+    values: [f64; VISIBLE_HISTORY_SAMPLES],
+    valid_values: u64,
+    value_count: usize,
     stats: SeriesStats,
     trend: Trend,
     volatility: Volatility,
 }
 
 impl<const POINTS: usize> SparklineModel<POINTS> {
+    pub fn visible_samples(&self, limit: usize) -> impl Iterator<Item = Option<f64>> + '_ {
+        let start = self.value_count.saturating_sub(limit);
+        (start..self.value_count)
+            .map(|index| (self.valid_values & (1 << index) != 0).then_some(self.values[index]))
+    }
+
+    pub const fn sample_count(&self) -> usize {
+        self.value_count
+    }
+
     pub const fn points(self) -> DownsampledSeries<POINTS> {
         self.points
     }
@@ -865,8 +883,21 @@ impl<const CAPACITY: usize> TimeSeries<CAPACITY> {
 
     pub fn sparkline<const POINTS: usize>(self, window: TimeWindow) -> SparklineModel<POINTS> {
         let start = self.window_start(window);
+        let mut values = [0.0; VISIBLE_HISTORY_SAMPLES];
+        let mut valid_values = 0;
+        let value_start = start.max(self.length.saturating_sub(VISIBLE_HISTORY_SAMPLES));
+        let value_count = self.length - value_start;
+        for (index, sample) in self.iter().skip(value_start).enumerate() {
+            if let Some(value) = sample.usable_value() {
+                values[index] = value;
+                valid_values |= 1 << index;
+            }
+        }
         SparklineModel {
             points: self.downsample_from::<POINTS>(start),
+            values,
+            valid_values,
+            value_count,
             stats: self.stats_from(start),
             trend: self.trend_from(start),
             volatility: self.volatility_from(start),

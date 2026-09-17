@@ -15,8 +15,8 @@ use super::{
     StorageDevice, TemperatureSensor,
 };
 
-/// Two minutes of one-second samples keeps the metric models' medium window
-/// close to the requested sixty-second visual history.
+/// Retain 120 snapshots for diagnostic calculations; utilization and network
+/// charts display the latest width-selected raw samples at the collector cadence.
 pub const LIVE_METRICS_HISTORY_CAPACITY: usize = 120;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -127,14 +127,17 @@ impl LiveSnapshot {
             })
             .collect::<Vec<_>>();
         let hardware = HardwareInventory::new(storages, gpus, networks, temperatures);
-        let gpu = hardware.gpus.first().map(|gpu| LiveGpuSnapshot {
-            utilization_percent: gpu.utilization_percent,
-            vram_used_bytes: finite_non_negative(gpu.vram_used_bytes),
-            vram_total_bytes: finite_non_negative(gpu.vram_total_bytes),
-            temperature_celsius: finite_non_negative(gpu.temperature_celsius),
-            frequency_hz: finite_non_negative(gpu.frequency_hz),
-            power_watts: finite_non_negative(gpu.power_watts),
-        });
+        let gpu = hardware
+            .gpus
+            .get(super::inventory::select_primary_gpu(&hardware.gpus))
+            .map(|gpu| LiveGpuSnapshot {
+                utilization_percent: gpu.utilization_percent,
+                vram_used_bytes: finite_non_negative(gpu.vram_used_bytes),
+                vram_total_bytes: finite_non_negative(gpu.vram_total_bytes),
+                temperature_celsius: finite_non_negative(gpu.temperature_celsius),
+                frequency_hz: finite_non_negative(gpu.frequency_hz),
+                power_watts: finite_non_negative(gpu.power_watts),
+            });
         let storage = hardware.storages.first().map(|disk| LiveStorageSnapshot {
             used_bytes: disk.used_bytes,
             total_bytes: disk.total_bytes,
@@ -330,6 +333,16 @@ impl LiveMetricsHistory {
         let offset = collected_at.saturating_duration_since(origin);
 
         self.cpu.push(collected_at, snapshot.cpu)?;
+        // Never join utilization histories belonging to different devices.
+        let selected_id = |hardware: &HardwareInventory| {
+            hardware
+                .gpus
+                .get(super::inventory::select_primary_gpu(&hardware.gpus))
+                .map(|gpu| gpu.id.clone())
+        };
+        if selected_id(&self.hardware) != selected_id(&snapshot.hardware) {
+            self.gpu_history = TimeSeries::new(MetricUnit::Percent);
+        }
         self.hardware = snapshot.hardware.clone();
         self.memory = MemorySample {
             used_bytes: finite_non_negative(snapshot.memory_used_bytes),
@@ -637,6 +650,68 @@ mod tests {
     }
 
     #[test]
+    fn changing_the_selected_gpu_resets_its_history() {
+        let mut history = LiveMetricsHistory::new();
+        let mut sample = snapshot();
+        sample.hardware.gpus.push(GpuDevice {
+            id: HardwareId::new(HardwareKind::Gpu, "first").unwrap(),
+            name: "GPU".to_owned(),
+            utilization_percent: Some(20.0),
+            vram_used_bytes: None,
+            vram_total_bytes: None,
+            temperature_celsius: None,
+            frequency_hz: None,
+            power_watts: None,
+            availability: MetricAvailability::Available,
+        });
+        sample.gpu = Some(LiveGpuSnapshot {
+            utilization_percent: Some(20.0),
+            vram_used_bytes: None,
+            vram_total_bytes: None,
+            temperature_celsius: None,
+            frequency_hz: None,
+            power_watts: None,
+        });
+        let start = Instant::now();
+        history.push_snapshot(start, &sample).unwrap();
+        history
+            .push_snapshot(start + Duration::from_secs(1), &sample)
+            .unwrap();
+        assert_eq!(history.gpu_history.len(), 2);
+        sample.hardware.gpus[0].id = HardwareId::new(HardwareKind::Gpu, "second").unwrap();
+        history
+            .push_snapshot(start + Duration::from_secs(2), &sample)
+            .unwrap();
+        assert_eq!(history.gpu_history.len(), 1);
+        assert_eq!(history.memory_history.len(), 3);
+    }
+
+    #[test]
+    fn visible_history_keeps_raw_peaks_and_drops_at_each_collector_interval() {
+        for interval in [1, 2, 4] {
+            let start = Instant::now();
+            let mut history = LiveMetricsHistory::new();
+            for index in 0..40 {
+                let mut sample = snapshot();
+                sample.cpu.utilization_percent = Some(if index % 2 == 0 { 0.0 } else { 100.0 });
+                history
+                    .push_snapshot(start + Duration::from_secs(index * interval), &sample)
+                    .unwrap();
+            }
+            let chart = history.models().unwrap().cpu().sparkline();
+            let points = chart.points();
+            assert_eq!(chart.sample_count(), 40);
+            for (index, value) in chart.visible_samples(40).enumerate() {
+                assert_eq!(value, Some((index % 2) as f64));
+            }
+            assert_eq!(
+                points.last().unwrap().sample().offset(),
+                Duration::from_secs(39 * interval)
+            );
+        }
+    }
+
+    #[test]
     fn histories_are_fixed_and_latest_samples_are_rendered_at_the_right_edge() {
         let mut history = LiveMetricsHistory::new();
         let start = Instant::now();
@@ -649,7 +724,28 @@ mod tests {
                 .push_snapshot(start + Duration::from_secs(index as u64), &sample)
                 .unwrap();
         }
+        for series in [
+            history.memory_history,
+            history.gpu_history,
+            history.download_history,
+            history.upload_history,
+        ] {
+            assert_eq!(series.len(), LIVE_METRICS_HISTORY_CAPACITY);
+            assert_eq!(series.first().unwrap().offset(), Duration::from_secs(1));
+            assert_eq!(series.last().unwrap().offset(), Duration::from_secs(120));
+        }
         let models = history.models().unwrap();
+        assert_eq!(
+            models
+                .memory()
+                .sparkline()
+                .points()
+                .last()
+                .unwrap()
+                .sample()
+                .usable_value(),
+            Some(0.0121)
+        );
         assert_eq!(models.memory().used().unwrap().value(), 121.0);
         assert_eq!(
             models.cpu().visual().widget_id(),

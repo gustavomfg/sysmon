@@ -70,7 +70,9 @@ pub struct GpuMetricModel<const HISTORY: usize> {
 
 impl<const HISTORY: usize> GpuMetricModel<HISTORY> {
     pub fn from_input(input: GpuMetricInput<HISTORY>) -> Result<Self, MetricModelError> {
-        let sparkline = input.history.sparkline::<CHART_POINTS>(TimeWindow::Medium);
+        let sparkline = input.history.sparkline::<CHART_POINTS>(TimeWindow::Custom(
+            super::super::chart::VISIBLE_HISTORY_SAMPLES,
+        ));
         let trend = trend_of(input.history);
         let comparison = latest_comparison(input.history, MetricUnit::Percent);
         let utilization = input

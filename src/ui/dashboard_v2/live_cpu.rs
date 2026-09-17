@@ -4,8 +4,8 @@ use super::chart::{ChartError, PushOutcome, TimeSample, TimeSeries};
 use super::metrics::{CpuMetricInput, CpuMetricModel, MetricModelError, MetricReading};
 use super::visual::{MetricAvailability, MetricUnit};
 
-/// The model keeps two minutes at the collector cadence so the CPU metric's
-/// medium window exposes the latest approximately sixty one-second samples.
+/// Retain 120 collector snapshots for diagnostic calculations. The chart
+/// displays the latest width-selected samples without changing the cadence.
 pub const CPU_LIVE_HISTORY_CAPACITY: usize = 120;
 
 #[derive(Debug, Clone, Copy, PartialEq)]

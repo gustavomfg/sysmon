@@ -136,6 +136,40 @@ where
     items.dedup_by(|right, left| id(right) == id(left));
 }
 
+pub(super) fn select_primary_gpu(gpus: &[GpuDevice]) -> usize {
+    let mut selected = 0;
+    let mut selected_score = (0_u8, 0_u8, 0_u8, 0_u8);
+    for (index, gpu) in gpus.iter().enumerate() {
+        let complete = u8::from(
+            gpu.utilization_percent.is_some()
+                && gpu.vram_used_bytes.is_some()
+                && gpu.vram_total_bytes.is_some()
+                && gpu.temperature_celsius.is_some(),
+        );
+        let usage = u8::from(gpu.utilization_percent.is_some());
+        let discrete = u8::from(is_discrete_gpu(&gpu.name));
+        let telemetry = u8::from(
+            gpu.vram_used_bytes.is_some()
+                || gpu.vram_total_bytes.is_some()
+                || gpu.temperature_celsius.is_some(),
+        );
+        let score = (complete, usage, discrete, telemetry);
+        if score > selected_score {
+            selected = index;
+            selected_score = score;
+        }
+    }
+    selected
+}
+
+fn is_discrete_gpu(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    name.contains("nvidia")
+        || name.contains("geforce")
+        || name.contains("rtx")
+        || name.contains("gtx")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
