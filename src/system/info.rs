@@ -8,7 +8,7 @@ use crate::system::gpu::{GpuCollector, GpuInfo};
 use crate::system::network::NetworkInfo;
 use sysinfo::{
     Components, CpuRefreshKind, Disks, MemoryRefreshKind, Networks, ProcessRefreshKind,
-    RefreshKind, System,
+    RefreshKind, System, ThreadKind,
 };
 
 const PROCESS_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
@@ -328,6 +328,9 @@ impl SystemInfoCollector {
             .system
             .processes()
             .values()
+            // Userland threads share their parent's memory; listing them would
+            // repeat one process dozens of times in the dashboard table.
+            .filter(|process| process.thread_kind() != Some(ThreadKind::Userland))
             .map(|process| ProcessInfo {
                 pid: process.pid().as_u32(),
                 name: process.name().to_string_lossy().to_string(),

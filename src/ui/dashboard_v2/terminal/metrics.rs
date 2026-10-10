@@ -19,8 +19,8 @@ use super::renderer::TerminalRenderError;
 
 // A medium-weight pair: more legible than a thin rule, without returning to
 // the visually heavy full blocks used by the original meters.
-const METER_FILL_GLYPH: char = '#';
-const METER_TRACK_GLYPH: char = '-';
+const METER_FILL_GLYPH: char = '━';
+const METER_TRACK_GLYPH: char = '─';
 
 pub(super) fn render(
     model: WidgetRenderModel,
@@ -673,10 +673,7 @@ fn render_segmented_meter(
         } else {
             (
                 METER_TRACK_GLYPH,
-                Style::default()
-                    .fg(theme.surface_alt)
-                    .bg(theme.surface)
-                    .add_modifier(Modifier::DIM),
+                Style::default().fg(theme.border).bg(theme.surface),
             )
         };
         buffer[(area.x + index, area.y)]

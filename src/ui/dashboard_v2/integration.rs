@@ -1609,19 +1609,16 @@ fn render_temperature_row(
         Style::default().fg(theme.text_muted).bg(theme.surface),
     );
     if let Some(value) = value {
-        draw_horizontal_bar(
+        // Map 30–95 °C onto the heat ramp so idle sensors stay cool-toned.
+        let heat = heat_color((f64::from(value) - 30.0) / 65.0, theme);
+        draw_fractional_bar(
             bar_start,
             y,
             bar_width,
             f64::from(value) / 100.0,
-            if value >= 90 {
-                theme.danger
-            } else if value >= 75 {
-                theme.warning
-            } else {
-                theme.info
-            },
-            theme,
+            heat,
+            theme.border,
+            theme.surface,
             buffer,
         );
     }
@@ -1688,7 +1685,7 @@ fn render_processes(
 }
 
 fn render_process_columns_header(area: Rect, theme: &Theme, buffer: &mut Buffer) {
-    let pid_width = 7_u16.min(area.width);
+    let pid_width = process_pid_width(area);
     let memory_width = 10_u16.min(area.width);
     let cpu_width = 8_u16.min(area.width.saturating_sub(pid_width + memory_width));
     let cpu_x = area.right().saturating_sub(memory_width + cpu_width);
@@ -1738,34 +1735,66 @@ fn render_process_row(
     if row >= area.height {
         return;
     }
-    let pid_width = 7_u16.min(area.width);
+    let pid_width = process_pid_width(area);
     let memory_width = 10_u16.min(area.width);
     let cpu_width = 8_u16.min(area.width.saturating_sub(pid_width + memory_width));
     let cpu_x = area.right().saturating_sub(memory_width + cpu_width);
     let memory_x = area.right().saturating_sub(memory_width);
     let command_x = area.x.saturating_add(pid_width);
     let y = area.y.saturating_add(row);
+    // A per-row load meter makes the busiest processes readable at a glance
+    // while idle rows recede, without reordering or hiding any column.
+    let load = f64::from(cpu_percent.max(0.0)) / 100.0;
+    let idle = cpu_percent < 0.1;
+    let heat = heat_color(load, theme);
+    let meter_width = if area.width >= 44 {
+        PROCESS_METER_WIDTH
+    } else {
+        0
+    };
+    let meter_x = cpu_x.saturating_sub(meter_width);
     buffer.set_stringn(
         area.x,
         y,
         format!("{pid:>5}"),
         usize::from(pid_width),
-        context_value_style(theme),
+        Style::default().fg(theme.text_muted).bg(theme.surface),
     );
     write_truncated(
         buffer,
         command_x,
         y,
         name,
-        cpu_x.saturating_sub(command_x).saturating_sub(1),
-        Style::default().fg(theme.text).bg(theme.surface),
+        meter_x.saturating_sub(command_x).saturating_sub(1),
+        Style::default()
+            .fg(if idle { theme.text_muted } else { theme.text })
+            .bg(theme.surface),
     );
+    if meter_width > 0 {
+        draw_fractional_bar(
+            meter_x,
+            y,
+            meter_width.saturating_sub(1),
+            load,
+            heat,
+            theme.border,
+            theme.surface,
+            buffer,
+        );
+    }
     buffer.set_stringn(
         cpu_x,
         y,
         format!("{cpu_percent:>5.1}%"),
         usize::from(cpu_width),
-        context_value_style(theme),
+        if idle {
+            Style::default().fg(theme.text_muted).bg(theme.surface)
+        } else {
+            Style::default()
+                .fg(heat)
+                .bg(theme.surface)
+                .add_modifier(Modifier::BOLD)
+        },
     );
     buffer.set_stringn(
         memory_x,
@@ -2022,25 +2051,45 @@ fn write_truncated(buffer: &mut Buffer, x: u16, y: u16, text: &str, width: u16, 
     }
 }
 
-fn draw_horizontal_bar(
+const PROCESS_METER_WIDTH: u16 = 7;
+
+/// Narrow panels drop the PID column so command names stay legible.
+fn process_pid_width(area: Rect) -> u16 {
+    if area.width >= 40 { 7 } else { 0 }
+}
+/// Half-cell precision line meter: `━` for filled cells, `╸` for a half
+/// tip and a quiet `─` track, matching the card meters.
+#[allow(clippy::too_many_arguments)]
+fn draw_fractional_bar(
     x: u16,
     y: u16,
     width: u16,
     value: f64,
     color: ratatui::style::Color,
-    theme: &Theme,
+    track: ratatui::style::Color,
+    background: ratatui::style::Color,
     buffer: &mut Buffer,
 ) {
-    for column in 0..width {
-        let position = (f64::from(column) + 0.5) / f64::from(width.max(1));
-        let filled = position <= value.clamp(0.0, 1.0);
-        buffer[(x.saturating_add(column), y)]
-            .set_char(if filled { '#' } else { '-' })
-            .set_style(
-                Style::default()
-                    .fg(if filled { color } else { theme.surface_alt })
-                    .bg(theme.surface),
-            );
+    let halves = (value.clamp(0.0, 1.0) * f64::from(width) * 2.0).round() as usize;
+    for column in 0..usize::from(width) {
+        let (symbol, foreground) = match halves.saturating_sub(column * 2) {
+            0 => ('─', track),
+            1 => ('╸', color),
+            _ => ('━', color),
+        };
+        buffer[(x.saturating_add(column as u16), y)]
+            .set_char(symbol)
+            .set_style(Style::default().fg(foreground).bg(background));
+    }
+}
+
+/// Cool → warm → hot ramp for load and temperature, built from theme tokens.
+fn heat_color(amount: f64, theme: &Theme) -> ratatui::style::Color {
+    let amount = amount.clamp(0.0, 1.0) as f32;
+    if amount < 0.5 {
+        vital::mix(theme.primary, theme.warning, amount * 2.0)
+    } else {
+        vital::mix(theme.warning, theme.danger, (amount - 0.5) * 2.0)
     }
 }
 
@@ -2497,9 +2546,11 @@ mod tests {
             &theme,
             &mut buffer,
         );
-        assert_eq!(buffer[(0, 2)].fg, theme.text);
+        // PIDs are identifiers and stay quiet; CPU load carries heat color.
+        assert_eq!(buffer[(0, 2)].fg, theme.text_muted);
+        assert_eq!(buffer[(7, 2)].fg, theme.text);
         let cpu_x = 80 - 10 - 8;
-        assert_eq!(buffer[(cpu_x, 2)].fg, theme.text);
+        assert_eq!(buffer[(cpu_x, 2)].fg, heat_color(0.125, &theme));
         assert!(
             buffer[(cpu_x, 2)]
                 .modifier
