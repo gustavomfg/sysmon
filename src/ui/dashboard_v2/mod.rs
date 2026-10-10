@@ -15,6 +15,7 @@ mod render;
 mod terminal;
 mod types;
 mod visual;
+mod vital;
 mod widget;
 pub mod widgets;
 

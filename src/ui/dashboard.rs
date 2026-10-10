@@ -174,6 +174,7 @@ impl DashboardApp {
         let content =
             DashboardV2Content::new(primary, self.pulse_behavior.input(), dashboard_state)
                 .with_pulse_behavior(self.pulse_behavior)
+                .with_system_health(self.system_health)
                 .with_inventory(inventory)
                 .with_live_mode(self.has_snapshot)
                 .with_focused_widget(focused_widget)

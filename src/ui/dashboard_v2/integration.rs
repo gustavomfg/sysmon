@@ -20,7 +20,9 @@ use crate::{
 use super::{
     DashboardBounds, DashboardContext, DashboardDimensions, DashboardEngine, DashboardError,
     DashboardFrame, DashboardPreset, DashboardRegion, DashboardState, DashboardWidgetId,
-    PulseBehavior, TerminalRenderError, TerminalRenderer, WidgetRenderModel,
+    HealthComponent, HealthSeverity, PulseBehavior, SystemHealth, TerminalRenderError,
+    TerminalRenderer, WidgetRenderModel,
+    vital::{self, VitalTrace},
 };
 
 const PRIMARY_COUNT: usize = 5;
@@ -29,7 +31,6 @@ const PRIMARY_CPU_MINIMUM: u16 = 7;
 const PRIMARY_CARD_MINIMUMS: [u16; PRIMARY_COUNT] = [PRIMARY_CPU_MINIMUM, 4, 4, 4, 4];
 const PULSE_TITLE: &str = "SYSTEM PULSE";
 const HEADER_TITLE: &str = "SYSMON";
-const HEADER_CENTER: &str = "SYSTEM MONITOR";
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct DashboardProcessSummary {
@@ -113,6 +114,7 @@ pub struct DashboardV2Content {
     data_stale: bool,
     sample_age: Option<Duration>,
     recent_events: Vec<String>,
+    system_health: Option<SystemHealth>,
 }
 
 impl DashboardV2Content {
@@ -134,6 +136,7 @@ impl DashboardV2Content {
             data_stale: false,
             sample_age: None,
             recent_events: Vec::new(),
+            system_health: None,
         }
     }
 
@@ -229,6 +232,15 @@ impl DashboardV2Content {
     pub fn recent_events(&self) -> &[String] {
         &self.recent_events
     }
+
+    pub const fn with_system_health(mut self, health: SystemHealth) -> Self {
+        self.system_health = Some(health);
+        self
+    }
+
+    pub const fn system_health(&self) -> Option<SystemHealth> {
+        self.system_health
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -292,6 +304,7 @@ pub struct DashboardV2Renderer {
     pulse: PulseV2Engine,
     widgets: TerminalRenderer,
     pulse_cache: Option<PulseRasterCache>,
+    vital: VitalTrace,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -311,6 +324,7 @@ impl DashboardV2Renderer {
             pulse: PulseV2Engine::new(),
             widgets: TerminalRenderer::new(),
             pulse_cache: None,
+            vital: VitalTrace::new(),
         }
     }
 
@@ -345,13 +359,15 @@ impl DashboardV2Renderer {
         let layout = frame.layout();
 
         if let Some(section) = layout.section(DashboardRegion::Header) {
-            render_header(
-                to_rect(section.bounds(), area)?,
-                preset,
-                &content,
-                theme,
-                buffer,
-            );
+            let header = to_rect(section.bounds(), area)?;
+            render_header(header, &content, elapsed, reduced_motion, theme, buffer);
+            if header.height > 1 && content.live_mode() {
+                let behavior = content.pulse_behavior().unwrap_or_default();
+                let line = Rect::new(header.x, header.y.saturating_add(1), header.width, 1);
+                self.vital.advance(line.width, elapsed, behavior);
+                self.vital
+                    .render(line, content.state(), reduced_motion, theme, buffer);
+            }
         }
         if let Some(section) = layout.section(DashboardRegion::Footer) {
             render_footer(
@@ -791,8 +807,9 @@ fn primary_stack_fits(total_height: u16, count: usize) -> bool {
 
 fn render_header(
     area: Rect,
-    preset: DashboardPreset,
     content: &DashboardV2Content,
+    elapsed: Duration,
+    reduced_motion: bool,
     theme: &Theme,
     buffer: &mut Buffer,
 ) {
@@ -802,73 +819,126 @@ fn render_header(
     buffer.set_style(area, Style::default().bg(theme.background));
     let live = content.live_mode();
     let preview = !live && content.primary().iter().any(Option::is_some);
-    let status = if content.data_stale() {
-        "STALE"
+    let (status, status_color) = if content.data_stale() {
+        ("STALE", theme.warning)
     } else if live {
-        "LIVE"
+        ("LIVE", theme.primary)
     } else if preview {
-        "PREVIEW"
+        ("PREVIEW", theme.info)
     } else {
-        "WAITING"
+        ("WAITING", theme.text_muted)
     };
-    let focus = content
-        .focused_widget()
-        .map(widget_label)
-        .map_or_else(String::new, |label| format!("  ·  FOCUS {label}"));
     let status = match content.sample_age() {
         Some(age) if live => format!("{status} {}", format_sample_age(age)),
         _ => status.to_owned(),
     };
-    let right = format!("{}  ·  {status}{focus}", preset_label(preset));
-    let center = if live || preview {
-        content
-            .system_context()
-            .and_then(|context| context.host_name.as_deref())
-            .filter(|host| !host.is_empty())
-            .map_or_else(
-                || HEADER_CENTER.to_owned(),
-                |host| format!("{HEADER_CENTER}  ·  {host}"),
-            )
-    } else {
-        "waiting for first sample".to_owned()
-    };
-    buffer.set_stringn(
-        area.x,
-        area.y,
-        HEADER_TITLE,
-        usize::from(area.width),
-        Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
-    );
-    let right_width = u16::try_from(right.chars().count())
+    let focus = content
+        .focused_widget()
+        .map(widget_label)
+        .map_or_else(String::new, |label| format!("FOCUS {label}  ·  "));
+    let signal = vital::signal_color(content.state(), theme);
+    let behavior = content.pulse_behavior().unwrap_or_default();
+    let bpm = vital::heart_rate_bpm(behavior);
+
+    // Right cluster: focus, heart rate and data freshness, aligned right.
+    let mut right = vec![(focus, Style::default().fg(theme.text_muted))];
+    if live {
+        // The heart glyph flashes once per beat, in step with the vital line.
+        let beat = (elapsed.as_secs_f32() * bpm / 60.0).fract();
+        let heart = if reduced_motion || beat < 0.22 {
+            signal
+        } else {
+            vital::mix(theme.border, signal, 0.55)
+        };
+        right.push(("♥ ".to_owned(), Style::default().fg(heart)));
+        right.push((
+            format!("{bpm:.0}"),
+            Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
+        ));
+        right.push((
+            " bpm  ·  ".to_owned(),
+            Style::default().fg(theme.text_muted),
+        ));
+    }
+    right.push(("● ".to_owned(), Style::default().fg(status_color)));
+    right.push((status, Style::default().fg(theme.text_muted)));
+    let right_width = right
+        .iter()
+        .map(|(text, _)| text.chars().count())
+        .sum::<usize>();
+    let right_width = u16::try_from(right_width)
         .unwrap_or(area.width)
         .min(area.width);
     let right_x = area.right().saturating_sub(right_width);
-    let left_end = area
+
+    // Brand mark: a solid pill keeps the product identity without shouting.
+    let brand = format!(" {HEADER_TITLE} ");
+    let mut cursor = write_spans(
+        area,
+        area.x,
+        &[(
+            brand,
+            Style::default()
+                .fg(theme.background)
+                .bg(theme.primary)
+                .add_modifier(Modifier::BOLD),
+        )],
+        buffer,
+    );
+    let host = content
+        .system_context()
+        .and_then(|context| context.host_name.clone())
+        .filter(|host| !host.is_empty() && (live || preview));
+    if let Some(host) = host {
+        let needed = u16::try_from(host.chars().count() + 2).unwrap_or(u16::MAX);
+        if cursor.saturating_add(needed).saturating_add(2) <= right_x {
+            cursor = write_spans(
+                area,
+                cursor.saturating_add(2),
+                &[(
+                    host,
+                    Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
+                )],
+                buffer,
+            );
+        }
+    }
+
+    // Center: a one-line diagnosis explaining *why* the Pulse looks the way
+    // it does. Understanding over novelty.
+    let center = if live || preview {
+        let (word, detail, color) = diagnosis(content.system_health(), theme);
+        vec![
+            (
+                word.to_owned(),
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
+            ),
+            (format!("  {detail}"), Style::default().fg(theme.text_muted)),
+        ]
+    } else {
+        vec![(
+            "waiting for first sample".to_owned(),
+            Style::default().fg(theme.text_muted),
+        )]
+    };
+    let center_width = u16::try_from(
+        center
+            .iter()
+            .map(|(text, _)| text.chars().count())
+            .sum::<usize>(),
+    )
+    .unwrap_or(area.width)
+    .min(area.width);
+    let center_x = area
         .x
-        .saturating_add(u16::try_from(HEADER_TITLE.chars().count()).unwrap_or(area.width));
-    let center_width = u16::try_from(center.chars().count())
-        .unwrap_or(area.width)
-        .min(area.width);
-    let center_x = area.x.saturating_add((area.width - center_width) / 2);
-    let center_fits = center_x >= left_end.saturating_add(2)
-        && center_x.saturating_add(center_width).saturating_add(2) <= right_x;
-    if center_fits {
-        buffer.set_stringn(
-            center_x,
-            area.y,
-            center,
-            usize::from(center_width),
-            Style::default().fg(theme.text),
-        );
+        .saturating_add(area.width.saturating_sub(center_width) / 2);
+    if center_x >= cursor.saturating_add(2)
+        && center_x.saturating_add(center_width).saturating_add(2) <= right_x
+    {
+        write_spans(area, center_x, &center, buffer);
     }
     if right_width > 0 {
-        buffer.set_stringn(
-            right_x,
-            area.y,
-            right,
-            usize::from(right_width),
-            Style::default().fg(theme.text_muted),
-        );
+        write_spans(area, right_x, &right, buffer);
     }
     if area.height > 1 {
         draw_rule(
@@ -882,6 +952,70 @@ fn render_header(
     }
 }
 
+/// Writes styled spans on the first row of `area`, returning the next column.
+fn write_spans(area: Rect, x: u16, spans: &[(String, Style)], buffer: &mut Buffer) -> u16 {
+    let mut cursor = x;
+    for (text, style) in spans {
+        if cursor >= area.right() {
+            break;
+        }
+        let (next, _) = buffer.set_stringn(
+            cursor,
+            area.y,
+            text,
+            usize::from(area.right() - cursor),
+            *style,
+        );
+        cursor = next;
+    }
+    cursor
+}
+
+fn diagnosis(
+    health: Option<SystemHealth>,
+    theme: &Theme,
+) -> (&'static str, String, ratatui::style::Color) {
+    let Some(health) = health else {
+        return (
+            "calm",
+            "nothing demanding attention".to_owned(),
+            theme.primary,
+        );
+    };
+    let source = match health.dominant_source() {
+        Some(HealthComponent::Temperature) => "thermals".to_owned(),
+        Some(component) => component.label().to_owned(),
+        None => "system".to_owned(),
+    };
+    match health.severity() {
+        HealthSeverity::Healthy => (
+            "calm",
+            "nothing demanding attention".to_owned(),
+            theme.primary,
+        ),
+        HealthSeverity::Active => (
+            "active",
+            format!("{source} is setting the rhythm"),
+            theme.primary,
+        ),
+        HealthSeverity::Elevated => (
+            "elevated",
+            format!("{source} under sustained load"),
+            theme.accent,
+        ),
+        HealthSeverity::Stressed => (
+            "stressed",
+            format!("{source} pressure is rising"),
+            theme.warning,
+        ),
+        HealthSeverity::Critical => (
+            "critical",
+            format!("{source} needs attention"),
+            theme.danger,
+        ),
+    }
+}
+
 fn render_footer(
     area: Rect,
     preset: DashboardPreset,
@@ -892,23 +1026,44 @@ fn render_footer(
     if area.width == 0 || area.height == 0 {
         return;
     }
+    buffer.set_style(area, Style::default().bg(theme.background));
+    let key = Style::default()
+        .fg(theme.text)
+        .bg(theme.surface_alt)
+        .add_modifier(Modifier::BOLD);
+    let label = Style::default().fg(theme.text_muted);
+    let mut spans = Vec::new();
+    for (keys, action) in [
+        ("Tab", "focus"),
+        ("e", "expand"),
+        ("/", "search"),
+        ("^P", "commands"),
+        ("Esc", "back"),
+        ("q", "quit"),
+    ] {
+        spans.push((format!(" {keys} "), key));
+        spans.push((format!(" {action}   "), label));
+    }
+    write_spans(area, area.x, &spans, buffer);
     let motion = if reduced_motion {
-        "motion: reduced"
+        "reduced motion"
     } else {
-        "motion: live"
+        "live motion"
     };
-    let text = format!(
-        "{}  ·  {}  Tab/jk focus  e expand  / search  Ctrl+P commands  Esc back  Q quit",
-        preset_label(preset),
-        motion,
-    );
-    buffer.set_stringn(
-        area.x,
-        area.y,
-        text,
-        usize::from(area.width),
-        Style::default().fg(theme.text_muted),
-    );
+    let info = format!("{}  ·  {motion}", preset_label(preset));
+    let info_width = u16::try_from(info.chars().count()).unwrap_or(u16::MAX);
+    let used = spans
+        .iter()
+        .map(|(text, _)| text.chars().count())
+        .sum::<usize>();
+    if usize::from(info_width) + used + 2 <= usize::from(area.width) {
+        buffer.set_string(
+            area.right().saturating_sub(info_width),
+            area.y,
+            info,
+            Style::default().fg(theme.border),
+        );
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
