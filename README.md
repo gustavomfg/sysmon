@@ -24,6 +24,8 @@ Um monitor de sistema no terminal feito em Rust, com interface TUI leve, atualiz
 ## Recursos
 
 - Dashboard TUI usando `ratatui` e `crossterm`.
+- Linha vital no cabeçalho: um traço de eletrocardiograma cujo ritmo (bpm), amplitude e onda T seguem o System Pulse, com diagnóstico em linguagem natural do que está ditando o ritmo.
+- Tabela de processos sem threads duplicadas, com CPU colorida por calor e medidor por linha.
 - Uso geral de CPU com histórico visual.
 - Informações de sistema: OS, kernel, uptime, cores, load average e quantidade de processos.
 - Contexto operacional ao vivo com hostname, memória disponível, idade da amostra e identidade dos processos.
