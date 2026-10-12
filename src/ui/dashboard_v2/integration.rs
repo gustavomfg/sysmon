@@ -1386,7 +1386,9 @@ fn render_system_context(
             .unwrap_or(context.processes.len())
             .to_string();
 
-        if area.width >= 34 && area.height >= 6 {
+        if area.width >= 48 && area.height >= 6 {
+            render_system_instruments(area, context, theme, buffer);
+        } else if area.width >= 34 && area.height >= 6 {
             let rows = [
                 (("HOST", host), ("UP", uptime.as_str())),
                 (("CPU", cpu.as_str()), ("LOAD", load.as_str())),
@@ -1397,7 +1399,7 @@ fn render_system_context(
             {
                 write_context_pair(
                     area,
-                    2 + index as u16,
+                    index as u16,
                     left_label,
                     left,
                     right_label,
@@ -1414,21 +1416,176 @@ fn render_system_context(
                 format!("PROC {processes} · KERNEL {kernel}"),
             ];
             for (index, row) in compact.into_iter().enumerate() {
-                write_rich_panel_row(area, 2 + index as u16, &row, theme, buffer);
+                write_rich_panel_row(area, index as u16, &row, theme, buffer);
             }
         }
     } else if live_mode {
-        write_panel_row(area, 2, "no system sample", theme.text_muted, theme, buffer);
+        write_panel_row(area, 0, "no system sample", theme.text_muted, theme, buffer);
     } else {
         write_panel_row(
             area,
-            2,
+            0,
             "waiting for first sample",
             theme.text_muted,
             theme,
             buffer,
         );
     }
+}
+
+/// Wide SYSTEM layout: identity, two gauges that put load and memory in
+/// proportion, and one line of facts. Load is shown against the number of
+/// logical threads because "1.6" alone means nothing without the machine.
+fn render_system_instruments(
+    area: Rect,
+    context: &DashboardV2SystemContext,
+    theme: &Theme,
+    buffer: &mut Buffer,
+) {
+    let label = context_label_style(theme);
+    let value = context_value_style(theme);
+    let dot = (
+        " · ".to_owned(),
+        Style::default().fg(theme.border).bg(theme.surface),
+    );
+
+    let mut identity = vec![(
+        context.host_name.clone().unwrap_or_else(|| "—".to_owned()),
+        Style::default()
+            .fg(theme.text)
+            .bg(theme.surface)
+            .add_modifier(Modifier::BOLD),
+    )];
+    for part in [context.os_name.as_ref(), context.kernel.as_ref()]
+        .into_iter()
+        .flatten()
+    {
+        identity.push(dot.clone());
+        identity.push((part.clone(), label));
+    }
+    write_spans(area, area.x, &identity, buffer);
+
+    let threads = context
+        .logical_threads
+        .or(context.physical_cores)
+        .unwrap_or(1)
+        .max(1);
+    if let Some((one, five, fifteen)) = context.load_average {
+        let (arrow, arrow_color) = if one > fifteen * 1.15 + 0.05 {
+            ("↗", theme.warning)
+        } else if one < fifteen * 0.85 - 0.05 {
+            ("↘", theme.primary)
+        } else {
+            ("→", theme.text_muted)
+        };
+        let ratio = one / threads as f64;
+        render_gauge_row(
+            area,
+            2,
+            "LOAD",
+            ratio,
+            vec![
+                (format!("{one:.2} {five:.2} {fifteen:.2} "), value),
+                (
+                    arrow.to_owned(),
+                    Style::default().fg(arrow_color).bg(theme.surface),
+                ),
+            ],
+            theme,
+            buffer,
+        );
+    }
+    if let (Some(available), Some(total)) = (context.available_memory_gib, context.total_memory_gib)
+        && total > 0.0
+    {
+        let used = (total - available).max(0.0);
+        render_gauge_row(
+            area,
+            3,
+            "RAM",
+            used / total,
+            vec![
+                (format!("{used:.1}"), value),
+                (format!(" / {total:.1} GiB"), label),
+            ],
+            theme,
+            buffer,
+        );
+    }
+
+    let cpu = match (context.physical_cores, context.logical_threads) {
+        (Some(physical), Some(logical)) => format!("{physical}C / {logical}T"),
+        (Some(physical), None) => format!("{physical}C"),
+        (None, Some(logical)) => format!("{logical}T"),
+        _ => "—".to_owned(),
+    };
+    let processes = context
+        .process_count
+        .unwrap_or(context.processes.len())
+        .to_string();
+    let uptime = context
+        .uptime_seconds
+        .map_or_else(|| "—".to_owned(), format_uptime);
+    if area.height > 5 {
+        let facts = Rect::new(area.x, area.y.saturating_add(5), area.width, 1);
+        write_spans(
+            facts,
+            facts.x,
+            &[
+                ("CPU ".to_owned(), label),
+                (cpu, value),
+                ("    PROC ".to_owned(), label),
+                (processes, value),
+                ("    UP ".to_owned(), label),
+                (uptime, value),
+            ],
+            buffer,
+        );
+    }
+}
+
+fn render_gauge_row(
+    area: Rect,
+    row: u16,
+    name: &str,
+    ratio: f64,
+    readout: Vec<(String, Style)>,
+    theme: &Theme,
+    buffer: &mut Buffer,
+) {
+    if row >= area.height {
+        return;
+    }
+    let line = Rect::new(area.x, area.y.saturating_add(row), area.width, 1);
+    write_spans(
+        line,
+        line.x,
+        &[(name.to_owned(), context_label_style(theme))],
+        buffer,
+    );
+    let readout_width = u16::try_from(
+        readout
+            .iter()
+            .map(|(text, _)| text.chars().count())
+            .sum::<usize>(),
+    )
+    .unwrap_or(line.width);
+    let meter_x = line.x.saturating_add(6);
+    let readout_x = line.right().saturating_sub(readout_width);
+    let meter_width = readout_x.saturating_sub(meter_x).saturating_sub(2);
+    if meter_width >= 4 {
+        draw_fractional_bar(
+            meter_x,
+            line.y,
+            meter_width,
+            ratio,
+            heat_color(ratio, theme),
+            theme.border,
+            theme.surface,
+            buffer,
+        );
+    }
+    write_spans(line, readout_x, &readout, buffer);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2214,12 +2371,7 @@ fn draw_fractional_bar(
 
 /// Cool → warm → hot ramp for load and temperature, built from theme tokens.
 fn heat_color(amount: f64, theme: &Theme) -> ratatui::style::Color {
-    let amount = amount.clamp(0.0, 1.0) as f32;
-    if amount < 0.5 {
-        vital::mix(theme.primary, theme.warning, amount * 2.0)
-    } else {
-        vital::mix(theme.warning, theme.danger, (amount - 0.5) * 2.0)
-    }
+    vital::heat_color(amount, theme)
 }
 
 fn draw_raster(area: Rect, raster: &ColorRasterFrame, theme: &Theme, buffer: &mut Buffer) {
