@@ -1,6 +1,6 @@
 use std::{
     cmp::Ordering,
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashMap},
     time::{Duration, Instant},
 };
 
@@ -36,6 +36,8 @@ pub struct SystemInfoCollector {
     cached_disks: Vec<DiskInfo>,
     cached_storage_devices: Vec<DiskInfo>,
     processes_list: Vec<ProcessInfo>,
+    /// Accumulated CPU milliseconds per PID at the previous process refresh.
+    process_cpu_times: HashMap<u32, u64>,
     disk_models: BTreeMap<String, DiskModelCacheEntry>,
 }
 
@@ -132,6 +134,7 @@ impl SystemInfoCollector {
             cached_disks: Vec::new(),
             cached_storage_devices: Vec::new(),
             processes_list: Vec::new(),
+            process_cpu_times: HashMap::new(),
             disk_models: BTreeMap::new(),
         }
     }
@@ -324,6 +327,10 @@ impl SystemInfoCollector {
     }
 
     fn refresh_processes(&mut self, collected_at: Instant) {
+        let elapsed = self
+            .last_process_refresh
+            .map(|previous| collected_at.saturating_duration_since(previous));
+        let previous_times = std::mem::take(&mut self.process_cpu_times);
         let mut processes = self
             .system
             .processes()
@@ -331,11 +338,20 @@ impl SystemInfoCollector {
             // Userland threads share their parent's memory; listing them would
             // repeat one process dozens of times in the dashboard table.
             .filter(|process| process.thread_kind() != Some(ThreadKind::Userland))
-            .map(|process| ProcessInfo {
-                pid: process.pid().as_u32(),
-                name: process.name().to_string_lossy().to_string(),
-                memory: process.memory() as f64 / 1024.0 / 1024.0,
-                cpu_usage: process.cpu_usage(),
+            .map(|process| {
+                let pid = process.pid().as_u32();
+                let cpu_time = process.accumulated_cpu_time();
+                self.process_cpu_times.insert(pid, cpu_time);
+                ProcessInfo {
+                    pid,
+                    name: process.name().to_string_lossy().to_string(),
+                    memory: process.memory() as f64 / 1024.0 / 1024.0,
+                    cpu_usage: process_cpu_percent(
+                        previous_times.get(&pid).copied(),
+                        cpu_time,
+                        elapsed,
+                    ),
+                }
             })
             .collect::<Vec<ProcessInfo>>();
         sort_processes_for_dashboard(&mut processes);
@@ -371,6 +387,27 @@ fn system_refresh_kind() -> RefreshKind {
 
 fn process_refresh_kind() -> ProcessRefreshKind {
     ProcessRefreshKind::nothing().with_cpu().with_memory()
+}
+
+/// Percent of one core used since the previous process refresh.
+///
+/// sysinfo's own `cpu_usage` divides by the interval of the last *global*
+/// CPU refresh, which runs more often than process refreshes and inflates
+/// every process by that ratio. Measuring against wall-clock time between
+/// process refreshes keeps a single-threaded process at or below 100%.
+fn process_cpu_percent(
+    previous_ms: Option<u64>,
+    current_ms: u64,
+    elapsed: Option<Duration>,
+) -> f32 {
+    let (Some(previous_ms), Some(elapsed)) = (previous_ms, elapsed) else {
+        return 0.0;
+    };
+    let elapsed_ms = elapsed.as_secs_f64() * 1000.0;
+    if elapsed_ms <= 0.0 {
+        return 0.0;
+    }
+    (current_ms.saturating_sub(previous_ms) as f64 / elapsed_ms * 100.0) as f32
 }
 
 fn refresh_due(last_refresh: Option<Instant>, now: Instant, interval: Duration) -> bool {
@@ -556,8 +593,8 @@ mod tests {
     use std::collections::BTreeSet;
 
     use super::{
-        ProcessInfo, human_temperature_label, physical_disk_id, should_count_storage_sample,
-        sort_processes_for_dashboard, temperature_priority,
+        ProcessInfo, human_temperature_label, physical_disk_id, process_cpu_percent,
+        should_count_storage_sample, sort_processes_for_dashboard, temperature_priority,
     };
 
     #[test]
@@ -591,6 +628,21 @@ mod tests {
         assert_eq!(human_temperature_label("Composite"), "NVMe");
         assert!(temperature_priority("CPU Package") < temperature_priority("AMD GPU"));
         assert!(temperature_priority("AMD GPU") < temperature_priority("NVMe"));
+    }
+
+    #[test]
+    fn process_cpu_is_measured_against_its_own_refresh_interval() {
+        let two_seconds = Some(std::time::Duration::from_secs(2));
+        // One busy thread for 2 s of wall time is 100%, not a multiple of it.
+        assert_eq!(process_cpu_percent(Some(1_000), 3_000, two_seconds), 100.0);
+        assert_eq!(process_cpu_percent(Some(0), 500, two_seconds), 25.0);
+        // No baseline yet, or no elapsed time, reads as idle instead of guessing.
+        assert_eq!(process_cpu_percent(None, 3_000, two_seconds), 0.0);
+        assert_eq!(process_cpu_percent(Some(0), 3_000, None), 0.0);
+        assert_eq!(
+            process_cpu_percent(Some(0), 3_000, Some(std::time::Duration::ZERO)),
+            0.0
+        );
     }
 
     #[test]
