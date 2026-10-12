@@ -440,12 +440,6 @@ fn value_style(model: WidgetRenderModel, theme: &Theme, bold: bool) -> Style {
     if bold {
         style = style.add_modifier(Modifier::BOLD);
     }
-    if model.is_focused() {
-        style = style
-            .fg(theme.selection_text)
-            .bg(theme.selection_background)
-            .add_modifier(Modifier::BOLD);
-    }
     style
 }
 
@@ -457,11 +451,6 @@ fn context_style(model: WidgetRenderModel, theme: &Theme) -> Style {
         } else {
             theme.warning
         });
-    }
-    if model.is_focused() {
-        style = style
-            .fg(theme.selection_text)
-            .bg(theme.selection_background);
     }
     style
 }
@@ -478,35 +467,20 @@ fn trend_style(model: WidgetRenderModel, theme: &Theme) -> Style {
         WidgetState::Unavailable => theme.text_muted,
         _ => theme.primary,
     };
-    let mut style = Style::default().fg(color).bg(theme.surface);
-    if model.is_focused() {
-        style = style
-            .fg(theme.selection_text)
-            .bg(theme.selection_background)
-            .add_modifier(Modifier::BOLD);
-    }
-    style
+    Style::default().fg(color).bg(theme.surface)
 }
 
 fn header_style(model: WidgetRenderModel, theme: &Theme) -> Style {
+    // Focus is carried by the panel ring; the card title echoes its color.
     let mut style = Style::default().fg(theme.primary).bg(theme.surface);
     if model.is_focused() {
-        style = style
-            .fg(theme.selection_text)
-            .bg(theme.selection_background)
-            .add_modifier(Modifier::BOLD);
+        style = style.fg(theme.border_focused).add_modifier(Modifier::BOLD);
     }
     style
 }
 
-fn chart_style(model: WidgetRenderModel, theme: &Theme) -> Style {
-    let mut style = Style::default().fg(theme.chart_primary).bg(theme.surface);
-    if model.is_focused() {
-        style = style
-            .fg(theme.selection_text)
-            .bg(theme.selection_background);
-    }
-    style
+fn chart_style(_model: WidgetRenderModel, theme: &Theme) -> Style {
+    Style::default().fg(theme.chart_primary).bg(theme.surface)
 }
 
 fn write(buffer: &mut Buffer, area: Rect, x: u16, y: u16, text: &str, style: Style) {

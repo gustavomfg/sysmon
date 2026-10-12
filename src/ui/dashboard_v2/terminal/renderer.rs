@@ -473,8 +473,10 @@ mod tests {
             )
             .unwrap();
         let theme = crate::theme::Theme::pulse();
-        assert_eq!(focused_buffer[(0, 1)].bg, theme.selection_background);
-        assert!(focused_buffer[(0, 1)].modifier.contains(Modifier::BOLD));
+        // Focus is a title accent; the dashboard's focus ring does the rest.
+        assert_eq!(focused_buffer[(0, 0)].fg, theme.border_focused);
+        assert!(focused_buffer[(0, 0)].modifier.contains(Modifier::BOLD));
+        assert_eq!(focused_buffer[(0, 1)].bg, theme.surface);
 
         let unavailable_visual = MetricVisual::new(
             DashboardWidgetId::Cpu,

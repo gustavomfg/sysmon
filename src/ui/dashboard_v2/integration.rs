@@ -391,9 +391,15 @@ impl DashboardV2Renderer {
             );
         }
 
+        let focused = content.focused_widget();
+        let mut focus_ring = None;
         let pulse_rendered = if let Some(section) = layout.section(DashboardRegion::Pulse) {
+            let pulse_area = to_rect(section.bounds(), area)?;
+            if focused == Some(DashboardWidgetId::Pulse) {
+                focus_ring = Some(pulse_area);
+            }
             self.render_pulse(
-                to_rect(section.bounds(), area)?,
+                pulse_area,
                 content
                     .pulse_behavior()
                     .map(PulseBehavior::input)
@@ -410,11 +416,16 @@ impl DashboardV2Renderer {
         let mut rendered_primary = [None; PRIMARY_COUNT];
         let mut primary_len = 0;
         if let Some(section) = layout.section(DashboardRegion::PrimaryMetrics) {
+            let primary_area = to_rect(section.bounds(), area)?;
+            if focused.and_then(primary_index).is_some() {
+                focus_ring = Some(primary_area);
+            }
             primary_len = self.render_primary(
-                to_rect(section.bounds(), area)?,
+                primary_area,
                 preset,
                 content.primary(),
                 content.expanded_widget(),
+                focused,
                 theme,
                 buffer,
                 &mut rendered_primary,
@@ -423,9 +434,13 @@ impl DashboardV2Renderer {
         }
 
         if let Some(section) = layout.section(DashboardRegion::SecondaryMetrics) {
+            let secondary_area = to_rect(section.bounds(), area)?;
+            if focused == Some(DashboardWidgetId::SystemSummary) {
+                focus_ring = Some(secondary_area);
+            }
             render_auxiliary(
                 DashboardRegion::SecondaryMetrics,
-                to_rect(section.bounds(), area)?,
+                secondary_area,
                 content.inventory(),
                 content.system_context(),
                 content.live_mode(),
@@ -459,6 +474,19 @@ impl DashboardV2Renderer {
                 last.bottom().saturating_sub(first.y),
             );
             render_diagnostics_panel(outer, diagnostics, &content, theme, buffer);
+            if matches!(
+                focused,
+                Some(
+                    DashboardWidgetId::History
+                        | DashboardWidgetId::Processes
+                        | DashboardWidgetId::Alerts
+                )
+            ) {
+                focus_ring = Some(outer);
+            }
+        }
+        if let Some(ring) = focus_ring {
+            draw_focus_ring(ring, theme, buffer);
         }
 
         Ok(DashboardV2RenderSummary {
@@ -476,6 +504,7 @@ impl DashboardV2Renderer {
         preset: DashboardPreset,
         models: [Option<WidgetRenderModel>; PRIMARY_COUNT],
         expanded_widget: Option<DashboardWidgetId>,
+        focused: Option<DashboardWidgetId>,
         theme: &Theme,
         buffer: &mut Buffer,
         rendered: &mut [Option<DashboardWidgetId>; PRIMARY_COUNT],
@@ -524,6 +553,14 @@ impl DashboardV2Renderer {
             }
             self.widgets
                 .render_rect_with_inventory(model, preset, slot, theme, buffer, inventory)?;
+            if framed && focused == Some(model.visual().widget_id()) {
+                // A heavy accent on the panel edge marks the focused card.
+                for y in slot.y..slot.bottom() {
+                    buffer[(area.x, y)]
+                        .set_symbol("┃")
+                        .set_style(Style::default().fg(theme.border_focused).bg(theme.surface));
+                }
+            }
             if length < rendered.len() {
                 rendered[length] = Some(model.visual().widget_id());
                 length += 1;
@@ -2009,16 +2046,16 @@ fn draw_panel_frame(
     let bottom = area.bottom().saturating_sub(1);
     for x in area.x..=right {
         buffer[(x, area.y)].set_symbol(if x == area.x {
-            "┌"
+            "╭"
         } else if x == right {
-            "┐"
+            "╮"
         } else {
             "─"
         });
         buffer[(x, bottom)].set_symbol(if x == area.x {
-            "└"
+            "╰"
         } else if x == right {
-            "┘"
+            "╯"
         } else {
             "─"
         });
@@ -2030,6 +2067,25 @@ fn draw_panel_frame(
         buffer[(right, y)].set_symbol("│");
         buffer[(area.x, y)].set_style(style);
         buffer[(right, y)].set_style(style);
+    }
+}
+
+/// Recolors an already drawn panel border in the focus color, leaving the
+/// title text and the panel content untouched.
+fn draw_focus_ring(area: Rect, theme: &Theme, buffer: &mut Buffer) {
+    if area.width < 3 || area.height < 3 {
+        return;
+    }
+    let right = area.right() - 1;
+    let bottom = area.bottom() - 1;
+    let perimeter = (area.x..=right)
+        .flat_map(|x| [(x, area.y), (x, bottom)])
+        .chain((area.y..=bottom).flat_map(|y| [(area.x, y), (right, y)]));
+    for position in perimeter {
+        let cell = &mut buffer[position];
+        if matches!(cell.symbol(), "─" | "│" | "╭" | "╮" | "╰" | "╯" | "├" | "┤") {
+            cell.set_fg(theme.border_focused);
+        }
     }
 }
 
@@ -2660,12 +2716,12 @@ mod tests {
             &mut buffer,
         );
 
-        assert_eq!(buffer[(0, 0)].symbol(), "┌");
+        assert_eq!(buffer[(0, 0)].symbol(), "╭");
         assert_eq!(buffer[(1, 0)].symbol(), "─");
         assert_eq!(buffer[(3, 0)].symbol(), "C");
         assert_eq!(buffer[(6, 0)].symbol(), " ");
         assert_eq!(buffer[(3, 0)].fg, Color::Red);
         assert_eq!(buffer[(1, 0)].fg, Color::Blue);
-        assert_eq!(buffer[(19, 0)].symbol(), "┐");
+        assert_eq!(buffer[(19, 0)].symbol(), "╮");
     }
 }

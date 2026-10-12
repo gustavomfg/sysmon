@@ -1042,11 +1042,6 @@ fn value_style_with(
         .fg(color)
         .bg(theme.surface)
         .add_modifier(Modifier::BOLD);
-    if model.is_focused() {
-        style = style
-            .fg(theme.selection_text)
-            .bg(theme.selection_background);
-    }
     if model.state() == WidgetState::Warning {
         style = style.fg(theme.warning);
     }
@@ -1063,6 +1058,13 @@ fn header_style(model: WidgetRenderModel, theme: &Theme) -> Style {
         WidgetState::Active => theme.info,
         _ => theme.text_muted,
     };
+    // Focus is carried by the panel ring; the card title echoes its color.
+    if model.is_focused() {
+        return Style::default()
+            .fg(theme.border_focused)
+            .bg(theme.surface)
+            .add_modifier(Modifier::BOLD);
+    }
     Style::default().fg(color).bg(theme.surface)
 }
 
