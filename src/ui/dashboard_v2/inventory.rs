@@ -82,6 +82,8 @@ pub struct HardwareInventory {
     pub gpus: Vec<GpuDevice>,
     pub networks: Vec<NetworkInterface>,
     pub temperatures: Vec<TemperatureSensor>,
+    /// Utilization of each logical CPU in percent, in collector order.
+    pub cpu_cores: Vec<f64>,
 }
 
 impl HardwareInventory {
@@ -100,6 +102,7 @@ impl HardwareInventory {
             gpus,
             networks,
             temperatures,
+            cpu_cores: Vec::new(),
         }
     }
 

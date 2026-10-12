@@ -126,7 +126,19 @@ impl LiveSnapshot {
                 })
             })
             .collect::<Vec<_>>();
-        let hardware = HardwareInventory::new(storages, gpus, networks, temperatures);
+        let mut hardware = HardwareInventory::new(storages, gpus, networks, temperatures);
+        hardware.cpu_cores = snapshot
+            .cpu_core_usages
+            .iter()
+            .map(|usage| {
+                let usage = f64::from(*usage);
+                if usage.is_finite() {
+                    usage.clamp(0.0, 100.0)
+                } else {
+                    0.0
+                }
+            })
+            .collect();
         let gpu = hardware
             .gpus
             .get(super::inventory::select_primary_gpu(&hardware.gpus))

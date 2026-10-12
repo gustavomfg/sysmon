@@ -164,6 +164,7 @@ mod tests {
             cpu_usage: 37.5,
             cpu_frequency_hz: None,
             cpu_temperature_celsius: None,
+            cpu_core_usages: Vec::new(),
             total_ram: 8.0,
             used_ram: 2.0,
             available_ram: 6.0,

@@ -4,7 +4,7 @@
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    style::{Modifier, Style},
+    style::{Color, Modifier, Style},
 };
 
 use super::super::{chart::SparklineModel, metrics::CHART_POINTS};
@@ -85,13 +85,16 @@ fn visible_sample_limit(width: u16) -> usize {
     (usize::from(width) / 2 + 1).clamp(2, super::super::chart::VISIBLE_HISTORY_SAMPLES)
 }
 
-/// Use at most three terminal rows, degrading only when text leaves less room.
+/// Tallest chart a card grants; spare card rows become chart resolution.
+pub(super) const MAX_CHART_ROWS: u16 = 5;
+
+/// Use up to `MAX_CHART_ROWS`, degrading only when text leaves less room.
 pub(super) fn region(body: Rect, offset: u16) -> Rect {
     Rect::new(
         body.x,
         body.y + offset.min(body.height),
         body.width,
-        body.height.saturating_sub(offset).min(3),
+        body.height.saturating_sub(offset).min(MAX_CHART_ROWS),
     )
 }
 
@@ -105,6 +108,11 @@ pub(super) fn render(series: &[Series], scale: Scale, area: Rect, buffer: &mut B
     let (lower, upper) = scale.bounds(series, limit);
     let width = usize::from(area.width) * 2;
     let height = usize::from(area.height) * 4;
+    let fill_strength = if series.iter().filter(|(model, _)| model.is_some()).count() > 1 {
+        0.08
+    } else {
+        0.12
+    };
 
     // Rasterize bounded strips of the logical canvas, then encode whole 2x4
     // groups. Scratch memory stays fixed even on exceptionally large terminals.
@@ -116,8 +124,13 @@ pub(super) fn render(series: &[Series], scale: Scale, area: Rect, buffer: &mut B
                 usize::from(row - area.y) * 4,
                 columns,
             );
-            for (series_index, (model, _)) in series.iter().enumerate() {
+            let mut backgrounds = [Color::Reset; CANVAS_CELLS];
+            for (column, background) in backgrounds.iter_mut().take(columns).enumerate() {
+                *background = buffer[(left + column as u16, row)].bg;
+            }
+            for (series_index, (model, style)) in series.iter().enumerate() {
                 let Some(model) = model else { continue };
+                canvas.fill.fill(0.0);
                 let count = model.sample_count().min(limit);
                 let mut previous = None;
                 for (index, sample) in model.visible_samples(limit).enumerate() {
@@ -137,10 +150,24 @@ pub(super) fn render(series: &[Series], scale: Scale, area: Rect, buffer: &mut B
                     let current = (x, y);
                     let start = previous.unwrap_or(if count == 1 { (0.0, y) } else { current });
                     canvas.segment(start, current, series_index);
+                    if matches!(style.fg, Some(Color::Rgb(..))) {
+                        canvas.shade_segment(start, current, height);
+                    }
                     previous = Some(current);
+                }
+                if let Some(tint @ Color::Rgb(..)) = style.fg {
+                    for (column, background) in backgrounds.iter_mut().take(columns).enumerate() {
+                        let coverage =
+                            (canvas.fill[column * 2] + canvas.fill[column * 2 + 1]) / 2.0;
+                        *background =
+                            super::super::vital::mix(*background, tint, coverage * fill_strength);
+                    }
                 }
             }
             canvas.write(buffer, left, row, series);
+            for (column, background) in backgrounds.iter().take(columns).enumerate() {
+                buffer[(left + column as u16, row)].set_bg(*background);
+            }
         }
     }
 }
@@ -156,6 +183,7 @@ struct DotCanvas {
     columns: usize,
     masks: [u8; CANVAS_CELLS],
     owners: [usize; CANVAS_CELLS],
+    fill: [f32; CANVAS_CELLS * 2],
 }
 
 impl DotCanvas {
@@ -166,6 +194,43 @@ impl DotCanvas {
             columns: columns.min(CANVAS_CELLS),
             masks: [0; CANVAS_CELLS],
             owners: [0; CANVAS_CELLS],
+            fill: [0.0; CANVAS_CELLS * 2],
+        }
+    }
+
+    /// Average the faded area below the curve over each cell's two
+    /// sub-columns. Fractional coverage avoids a solid shelf above the trace;
+    /// using geometry also makes clipped charts and gaps shade correctly.
+    fn shade_segment(&mut self, start: (f64, f64), end: (f64, f64), height: usize) {
+        let first = (start.0.ceil().max(self.x as f64)) as usize;
+        let last = (end.0.floor().min((self.x + self.columns * 2 - 1) as f64)) as usize;
+        if first > last {
+            return;
+        }
+        for x in first..=last {
+            let t = if end.0 == start.0 {
+                0.0
+            } else {
+                (x as f64 - start.0) / (end.0 - start.0)
+            };
+            let line = start.1 + (end.1 - start.1) * t;
+            // Keep fractional coverage, but never shade a cell row above the
+            // nearest rasterized dot when the curve straddles a row boundary.
+            if (self.y + 4) as f64 <= line.round() {
+                continue;
+            }
+            let top = (self.y as f64).max(line);
+            let bottom = (self.y + 4) as f64;
+            if top >= bottom {
+                continue;
+            }
+            let depth = height as f64 - line;
+            // Integrate a linear fade from the curve to the chart floor.
+            let fade = ((bottom - top)
+                - ((bottom - line).powi(2) - (top - line).powi(2)) / (2.0 * depth))
+                / 4.0;
+            let target = &mut self.fill[x - self.x];
+            *target = target.max(fade.clamp(0.0, 1.0) as f32);
         }
     }
 
@@ -281,6 +346,127 @@ mod tests {
                 .unwrap();
         }
         history.sparkline(TimeWindow::Medium)
+    }
+
+    #[test]
+    fn glow_tints_only_the_background_beneath_the_line() {
+        let surface = Color::Rgb(0x10, 0x17, 0x1D);
+        let area = Rect::new(0, 0, 12, 4);
+        let series = [(
+            Some(model(&[Some(0.5); 8])),
+            Style::default().fg(Color::Rgb(0x7B, 0xD8, 0x8F)),
+        )];
+        let mut buffer = Buffer::empty(area);
+        buffer.set_style(area, Style::default().bg(surface));
+        render(&series, Scale::Percent, area, &mut buffer);
+
+        let line_y = (0..4)
+            .find(|y| mask(&buffer, 5, *y) != 0)
+            .expect("flat series draws a line");
+        assert!(line_y < 3, "a mid-scale line leaves room beneath it");
+        for y in 0..line_y {
+            assert_eq!(buffer[(5, y)].bg, surface, "nothing above the line");
+        }
+        assert_ne!(
+            buffer[(5, line_y + 1)].bg,
+            surface,
+            "area under the line glows"
+        );
+        assert_eq!(
+            buffer[(5, line_y + 1)].symbol(),
+            " ",
+            "glow never adds glyphs"
+        );
+    }
+
+    #[test]
+    fn fill_follows_fractional_curve_height_within_a_terminal_row() {
+        let area = Rect::new(0, 0, 20, 4);
+        let mut buffer = Buffer::empty(area);
+        buffer.set_style(area, Style::default().bg(Color::Rgb(0, 0, 0)));
+        render(
+            &[(
+                Some(model(&[Some(1100.0), Some(1300.0)])),
+                Style::default().fg(Color::Rgb(255, 255, 255)),
+            )],
+            Scale::Network,
+            area,
+            &mut buffer,
+        );
+        // Both ends lie in the same cell row, but their covered area differs.
+        let intensity = |x| match buffer[(x, 1)].bg {
+            Color::Rgb(red, _, _) => red,
+            _ => panic!("RGB fill expected"),
+        };
+        assert!(intensity(0) > 0);
+        assert!(intensity(19) > intensity(0));
+        for x in 1..20 {
+            assert!(intensity(x).abs_diff(intensity(x - 1)) <= 2);
+            assert_eq!(buffer[(x, 0)].bg, Color::Rgb(0, 0, 0));
+        }
+    }
+
+    #[test]
+    fn upload_fill_uses_its_own_color_when_download_has_no_samples() {
+        let area = Rect::new(0, 0, 20, 4);
+        let mut buffer = Buffer::empty(area);
+        buffer.set_style(area, Style::default().bg(Color::Rgb(0, 0, 0)));
+        let series = [
+            (
+                Some(model(&[None; 3])),
+                Style::default().fg(Color::Rgb(0, 0, 255)),
+            ),
+            (
+                Some(model(&[Some(1500.0); 3])),
+                Style::default().fg(Color::Rgb(0, 255, 0)),
+            ),
+        ];
+        render(&series, Scale::Network, area, &mut buffer);
+        assert!(matches!(buffer[(10, 2)].bg, Color::Rgb(0, green, 0) if green > 0));
+    }
+
+    #[test]
+    fn clipped_fill_matches_the_full_canvas_even_when_the_line_is_above_it() {
+        let area = Rect::new(0, 0, 24, 6);
+        let clipped = Rect::new(4, 3, 10, 2);
+        let base = Style::default().bg(Color::Rgb(16, 23, 29));
+        let series = [(
+            Some(model(&[Some(1500.0); 4])),
+            Style::default().fg(Color::Rgb(106, 166, 255)),
+        )];
+        let mut full = Buffer::empty(area);
+        full.set_style(area, base);
+        render(&series, Scale::Network, area, &mut full);
+        let mut partial = Buffer::empty(clipped);
+        partial.set_style(clipped, base);
+        render(&series, Scale::Network, area, &mut partial);
+        for y in clipped.y..clipped.bottom() {
+            for x in clipped.x..clipped.right() {
+                assert_eq!(partial[(x, y)], full[(x, y)]);
+                assert_ne!(partial[(x, y)].bg, base.bg.unwrap());
+            }
+        }
+    }
+
+    #[test]
+    fn missing_samples_leave_a_gap_in_both_line_and_fill() {
+        let area = Rect::new(0, 0, 21, 4);
+        let base = Color::Rgb(16, 23, 29);
+        let mut buffer = Buffer::empty(area);
+        buffer.set_style(area, Style::default().bg(base));
+        render(
+            &[(
+                Some(model(&[Some(1000.0), None, Some(1000.0)])),
+                Style::default().fg(Color::Rgb(123, 216, 143)),
+            )],
+            Scale::Network,
+            area,
+            &mut buffer,
+        );
+        for y in 0..area.height {
+            assert_eq!(buffer[(10, y)].symbol(), " ");
+            assert_eq!(buffer[(10, y)].bg, base);
+        }
     }
 
     fn mask(buffer: &Buffer, x: u16, y: u16) -> u32 {
@@ -400,7 +586,7 @@ mod tests {
     }
     #[test]
     fn chart_height_uses_spare_rows_without_crossing_context_or_panel() {
-        for (height, expected) in [(2, 0), (3, 1), (4, 2), (5, 3), (10, 3)] {
+        for (height, expected) in [(2, 0), (3, 1), (4, 2), (5, 3), (7, 5), (10, 5)] {
             let body = Rect::new(4, 6, 30, height);
             let chart = region(body, 2);
             assert_eq!(chart.height, expected);

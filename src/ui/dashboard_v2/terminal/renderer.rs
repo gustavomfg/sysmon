@@ -51,7 +51,8 @@ impl TerminalRenderer {
         inventory: Option<&HardwareInventory>,
     ) -> Result<(), TerminalRenderError> {
         if model.visual().widget_id() == super::super::DashboardWidgetId::Cpu {
-            return CpuCardRenderer::render(model, preset, bounds, theme, buffer);
+            let cores = inventory.map_or(&[][..], |inventory| inventory.cpu_cores.as_slice());
+            return CpuCardRenderer::render_with_cores(model, preset, bounds, theme, buffer, cores);
         }
         if matches!(
             model.visual().widget_id(),

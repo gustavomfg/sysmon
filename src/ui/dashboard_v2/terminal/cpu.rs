@@ -26,6 +26,17 @@ impl CpuCardRenderer {
         theme: &Theme,
         buffer: &mut Buffer,
     ) -> Result<(), TerminalRenderError> {
+        Self::render_with_cores(model, preset, bounds, theme, buffer, &[])
+    }
+
+    pub(super) fn render_with_cores(
+        model: WidgetRenderModel,
+        preset: DashboardPreset,
+        bounds: DashboardBounds,
+        theme: &Theme,
+        buffer: &mut Buffer,
+        cores: &[f64],
+    ) -> Result<(), TerminalRenderError> {
         let area = to_rect(bounds, *buffer.area())?;
         buffer.set_style(area, Style::default().bg(theme.surface));
         if area.width == 0 || area.height == 0 {
@@ -46,7 +57,14 @@ impl CpuCardRenderer {
         if preset == DashboardPreset::Compact || body.width < 24 || body.height < 4 {
             render_compact_body(model, body, theme, buffer);
         } else {
-            render_body(model, body, theme, buffer);
+            let core_map = core_map_area(cores, body);
+            let text_width = core_map.map_or(body.width, |map| {
+                map.x.saturating_sub(body.x).saturating_sub(CORE_MAP_GAP)
+            });
+            render_body(model, body, text_width, theme, buffer);
+            if let Some(map) = core_map {
+                render_core_map(cores, map, theme, buffer);
+            }
         }
         Ok(())
     }
@@ -119,11 +137,18 @@ struct CpuCardRegions {
     history: Rect,
 }
 
-fn render_body(model: WidgetRenderModel, area: Rect, theme: &Theme, buffer: &mut Buffer) {
+fn render_body(
+    model: WidgetRenderModel,
+    area: Rect,
+    text_width: u16,
+    theme: &Theme,
+    buffer: &mut Buffer,
+) {
+    let text_area = Rect::new(area.x, area.y, text_width, area.height);
     let value_offset = if area.height >= 7 { 1 } else { 0 };
-    let value = line_region(area, area.y.saturating_add(value_offset));
-    let hardware = line_region(area, value.y.saturating_add(1));
-    let secondary = line_region(area, hardware.y.saturating_add(1));
+    let value = line_region(text_area, area.y.saturating_add(value_offset));
+    let hardware = line_region(text_area, value.y.saturating_add(1));
+    let secondary = line_region(text_area, hardware.y.saturating_add(1));
     let history_y = secondary.y.saturating_add(1);
     let regions = CpuCardRegions {
         value,
@@ -133,13 +158,15 @@ fn render_body(model: WidgetRenderModel, area: Rect, theme: &Theme, buffer: &mut
             area.x,
             history_y.min(area.bottom()),
             area.width,
-            area.bottom().saturating_sub(history_y).min(3),
+            area.bottom()
+                .saturating_sub(history_y)
+                .min(history_chart::MAX_CHART_ROWS),
         ),
     };
 
     render_primary_value(model, regions.value, theme, buffer);
 
-    let hardware_text = hardware_line(model, area.width);
+    let hardware_text = hardware_line(model, text_width);
     if !hardware_text.is_empty() {
         write_rich_context(
             buffer,
@@ -154,6 +181,75 @@ fn render_body(model: WidgetRenderModel, area: Rect, theme: &Theme, buffer: &mut
     render_secondary_context(model, regions.secondary, theme, buffer);
 
     render_history(model, regions.history, theme, buffer);
+}
+
+/// Text column reserved on the left of the card before the core map.
+const CORE_MAP_TEXT_WIDTH: u16 = 22;
+const CORE_MAP_GAP: u16 = 2;
+const LEVELS: [char; 9] = [' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+
+fn core_map_area(cores: &[f64], body: Rect) -> Option<Rect> {
+    let rows = if body.height >= 7 { 4 } else { 3 };
+    let free = body
+        .width
+        .saturating_sub(CORE_MAP_TEXT_WIDTH + CORE_MAP_GAP);
+    let count = u16::try_from(cores.len()).unwrap_or(u16::MAX);
+    if count == 0 || free < count || body.height < rows + 1 {
+        return None;
+    }
+    let stride = if free >= count.saturating_mul(2).saturating_sub(1) {
+        2
+    } else {
+        1
+    };
+    let width = count
+        .saturating_sub(1)
+        .saturating_mul(stride)
+        .saturating_add(1);
+    Some(Rect::new(
+        body.right().saturating_sub(width),
+        body.y,
+        width,
+        rows,
+    ))
+}
+
+/// Per-core load as a compact equalizer in the empty right side of the
+/// value rows: one heat-colored column per logical CPU, so imbalance (one
+/// pinned core among idle ones) is visible even when the average is low.
+fn render_core_map(cores: &[f64], area: Rect, theme: &Theme, buffer: &mut Buffer) {
+    let rows = area.height;
+    let count = u16::try_from(cores.len()).unwrap_or(u16::MAX);
+    // Gaps between bars when they fit, a solid block otherwise.
+    let stride = if area.width >= count.saturating_mul(2).saturating_sub(1) {
+        2
+    } else {
+        1
+    };
+    let bottom = area.bottom().saturating_sub(1);
+    for (index, usage) in cores.iter().enumerate() {
+        let x = area
+            .x
+            .saturating_add(u16::try_from(index).unwrap_or(0).saturating_mul(stride));
+        let load = (usage / 100.0).clamp(0.0, 1.0);
+        let mut color = super::super::vital::heat_color(load, theme);
+        if stride == 1 && index % 2 == 1 {
+            // Touching bars alternate tone so neighbors stay distinguishable.
+            color = super::super::vital::mix(color, theme.surface, 0.30);
+        }
+        let eighths = (load * f64::from(rows) * 8.0).round() as u16;
+        for row in 0..rows {
+            let filled = eighths.saturating_sub(row * 8).min(8);
+            let (symbol, foreground) = if filled == 0 && row == 0 {
+                ('▁', theme.border)
+            } else {
+                (LEVELS[usize::from(filled)], color)
+            };
+            buffer[(x, bottom - row)]
+                .set_char(symbol)
+                .set_style(Style::default().fg(foreground).bg(theme.surface));
+        }
+    }
 }
 
 fn line_region(area: Rect, row: u16) -> Rect {
@@ -620,6 +716,79 @@ mod tests {
             width,
             height,
         )
+    }
+
+    #[test]
+    fn core_map_draws_one_heat_column_per_core_in_the_free_space() {
+        let context = WidgetContext::new(
+            DashboardPreset::Widescreen,
+            DashboardState::Calm,
+            Duration::ZERO,
+        )
+        .with_availability(WidgetAvailability::all());
+        let model = WidgetRenderer::render_cpu(model_at(0.2), context)
+            .unwrap()
+            .unwrap();
+        let cores = [0.0, 100.0, 50.0, 12.5];
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 40, 8));
+        CpuCardRenderer::render_with_cores(
+            model,
+            DashboardPreset::Widescreen,
+            DashboardBounds::new(0, 0, 40, 8).unwrap(),
+            &Theme::pulse(),
+            &mut buffer,
+            &cores,
+        )
+        .unwrap();
+        // Bars are right-aligned with one-cell gaps: x = 33, 35, 37, 39.
+        let column = |x: u16| -> String { (1..5).map(|y| buffer[(x, y)].symbol()).collect() };
+        assert_eq!(column(33), "   ▁", "idle core keeps a floor");
+        assert_eq!(column(35), "████", "saturated core fills the map");
+        assert_eq!(column(37), "  ██");
+        assert_ne!(buffer[(35, 4)].fg, buffer[(39, 4)].fg, "load sets heat");
+
+        // Without per-core data the card renders exactly as before.
+        assert!(text(&render_at(0.2, 40, 8)).chars().all(|c| c != '█'));
+    }
+
+    #[test]
+    fn core_map_reserves_a_gap_and_keeps_cpu_context_legible() {
+        let context = WidgetContext::new(
+            DashboardPreset::Standard,
+            DashboardState::Calm,
+            Duration::ZERO,
+        )
+        .with_availability(WidgetAvailability::all());
+        let model = WidgetRenderer::render_cpu(model(), context)
+            .unwrap()
+            .unwrap();
+        for count in [8, 10] {
+            let mut buffer = Buffer::empty(Rect::new(0, 0, 32, 8));
+            CpuCardRenderer::render_with_cores(
+                model,
+                DashboardPreset::Standard,
+                DashboardBounds::new(0, 0, 32, 8).unwrap(),
+                &Theme::pulse(),
+                &mut buffer,
+                &vec![100.0; count],
+            )
+            .unwrap();
+            let output = text(&buffer);
+            assert!(output.contains("8 cores · 3.2 GHz"));
+            assert!(output.contains("55.0°C  ↑ +32% · 10s"));
+            if count == 8 {
+                for y in 1..5 {
+                    assert_eq!(buffer[(22, y)].symbol(), " ");
+                    assert_eq!(buffer[(23, y)].symbol(), " ");
+                }
+                assert!(output.contains('█'));
+            } else {
+                assert!(
+                    !output.contains('█'),
+                    "omit cores when the text and gap cannot fit"
+                );
+            }
+        }
     }
 
     fn render_model(

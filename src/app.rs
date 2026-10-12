@@ -700,6 +700,7 @@ mod tests {
             cpu_usage,
             cpu_frequency_hz: None,
             cpu_temperature_celsius: None,
+            cpu_core_usages: Vec::new(),
             total_ram: 1.0,
             used_ram: 0.5,
             available_ram: 0.5,

@@ -95,6 +95,8 @@ pub struct SystemInfo {
     pub cpu_frequency_hz: Option<f64>,
     #[allow(dead_code)]
     pub cpu_temperature_celsius: Option<f64>,
+    /// Usage of each logical CPU, in collector order.
+    pub cpu_core_usages: Vec<f32>,
     pub total_ram: f64,
     pub used_ram: f64,
     pub available_ram: f64,
@@ -193,6 +195,12 @@ impl SystemInfoCollector {
             cpu_usage: self.system.global_cpu_usage(),
             cpu_frequency_hz,
             cpu_temperature_celsius,
+            cpu_core_usages: self
+                .system
+                .cpus()
+                .iter()
+                .map(|cpu| cpu.cpu_usage())
+                .collect(),
             total_ram: self.system.total_memory() as f64 / 1024.0 / 1024.0 / 1024.0,
             used_ram: self.system.used_memory() as f64 / 1024.0 / 1024.0 / 1024.0,
             available_ram: self.system.available_memory() as f64 / 1024.0 / 1024.0 / 1024.0,

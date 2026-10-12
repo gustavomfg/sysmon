@@ -205,6 +205,16 @@ pub fn signal_color(state: DashboardState, theme: &Theme) -> Color {
     }
 }
 
+/// Cool → warm → hot ramp for load and temperature, built from theme tokens.
+pub fn heat_color(amount: f64, theme: &Theme) -> Color {
+    let amount = amount.clamp(0.0, 1.0) as f32;
+    if amount < 0.5 {
+        mix(theme.primary, theme.warning, amount * 2.0)
+    } else {
+        mix(theme.warning, theme.danger, (amount - 0.5) * 2.0)
+    }
+}
+
 /// Linear RGB blend; non-RGB colors fall back to the nearest endpoint.
 pub fn mix(from: Color, to: Color, amount: f32) -> Color {
     let amount = amount.clamp(0.0, 1.0);
