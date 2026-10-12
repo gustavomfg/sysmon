@@ -102,7 +102,9 @@ impl DashboardV2SystemContext {
 /// into collectors, snapshots, or the V1 application state.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DashboardV2Content {
-    primary: [Option<WidgetRenderModel>; PRIMARY_COUNT],
+    // Boxed: the five models are ~100 KB, and the builder methods below
+    // move `self` on every call.
+    primary: Box<[Option<WidgetRenderModel>; PRIMARY_COUNT]>,
     pulse_input: NormalizedPulseInput,
     pulse_behavior: Option<PulseBehavior>,
     state: DashboardState,
@@ -125,7 +127,7 @@ impl DashboardV2Content {
         state: DashboardState,
     ) -> Self {
         Self {
-            primary,
+            primary: Box::new(primary),
             pulse_input,
             pulse_behavior: None,
             state,
@@ -143,7 +145,7 @@ impl DashboardV2Content {
     }
 
     pub fn primary(&self) -> [Option<WidgetRenderModel>; PRIMARY_COUNT] {
-        self.primary
+        *self.primary
     }
 
     pub fn pulse_input(&self) -> NormalizedPulseInput {
