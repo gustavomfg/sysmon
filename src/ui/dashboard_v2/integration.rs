@@ -114,6 +114,7 @@ pub struct DashboardV2Content {
     data_stale: bool,
     sample_age: Option<Duration>,
     recent_events: Vec<String>,
+    event_ages: Vec<Duration>,
     system_health: Option<SystemHealth>,
 }
 
@@ -136,6 +137,7 @@ impl DashboardV2Content {
             data_stale: false,
             sample_age: None,
             recent_events: Vec::new(),
+            event_ages: Vec::new(),
             system_health: None,
         }
     }
@@ -231,6 +233,16 @@ impl DashboardV2Content {
 
     pub fn recent_events(&self) -> &[String] {
         &self.recent_events
+    }
+
+    /// Age of each recent event, aligned with `recent_events`.
+    pub fn with_event_ages(mut self, event_ages: Vec<Duration>) -> Self {
+        self.event_ages = event_ages;
+        self
+    }
+
+    pub fn event_ages(&self) -> &[Duration] {
+        &self.event_ages
     }
 
     pub const fn with_system_health(mut self, health: SystemHealth) -> Self {
@@ -1100,7 +1112,9 @@ fn render_auxiliary(
         DashboardRegion::Processes => {
             render_processes(content, system_context, live_mode, theme, buffer)
         }
-        DashboardRegion::Alerts => render_events(content, recent_events, live_mode, theme, buffer),
+        DashboardRegion::Alerts => {
+            render_events(content, recent_events, &[], live_mode, theme, buffer)
+        }
         _ => {}
     }
 }
@@ -1127,6 +1141,7 @@ fn render_diagnostics_panel(
         diagnostics.map(|region| region.is_some()),
         dashboard.live_mode(),
         dashboard.inventory().temperatures.len(),
+        dashboard.recent_events().len(),
     );
     for (index, region) in regions.into_iter().enumerate() {
         let Some(region) = region else { continue };
@@ -1158,6 +1173,7 @@ fn render_diagnostics_panel(
             _ => render_events(
                 region,
                 dashboard.recent_events(),
+                dashboard.event_ages(),
                 dashboard.live_mode(),
                 theme,
                 buffer,
@@ -1171,6 +1187,7 @@ fn diagnostic_sections(
     active: [bool; 3],
     live_mode: bool,
     temperature_count: usize,
+    event_count: usize,
 ) -> [Option<Rect>; 3] {
     let content = inset(outer, 1, 1);
     if content.width == 0 || content.height == 0 {
@@ -1193,7 +1210,10 @@ fn diagnostic_sections(
     };
     let temperature_minimum =
         2_u16.saturating_add(u16::try_from(temperature_rows).unwrap_or(u16::MAX.saturating_sub(2)));
-    let minimums = [temperature_minimum, 5, 3];
+    // Events keep a compact status row until there is a story to tell, then
+    // show up to five entries so health narration stays readable.
+    let event_minimum = 2_u16.saturating_add(u16::try_from(event_count.clamp(1, 5)).unwrap_or(5));
+    let minimums = [temperature_minimum, 5, event_minimum];
     let weights = if live_mode { [0_u16, 1, 0] } else { [4, 5, 3] };
     let gaps = active_count.saturating_sub(1) as u16;
     let usable = content.height.saturating_sub(gaps);
@@ -1808,6 +1828,7 @@ fn render_process_row(
 fn render_events(
     area: Rect,
     recent_events: &[String],
+    event_ages: &[Duration],
     live_mode: bool,
     theme: &Theme,
     buffer: &mut Buffer,
@@ -1815,15 +1836,38 @@ fn render_events(
     panel_heading(area, "RECENT EVENTS", theme.secondary, theme, buffer);
     if !recent_events.is_empty() {
         let visible_rows = usize::from(area.height.saturating_sub(2));
+        let aged = event_ages.len() == recent_events.len();
         for (index, event) in recent_events.iter().rev().take(visible_rows).enumerate() {
-            let prefix = if index == 0 { "› " } else { "  " };
-            let row = format!("{prefix}{event}");
+            let y = area.y.saturating_add(2 + index as u16);
+            // Relative age on the right: "how long ago" is what matters.
+            let age = aged
+                .then(|| event_ages[event_ages.len() - 1 - index])
+                .map(format_event_age)
+                .unwrap_or_default();
+            let age_width = u16::try_from(age.chars().count()).unwrap_or(0);
+            if age_width > 0 && area.width > age_width + 8 {
+                buffer.set_string(
+                    area.right().saturating_sub(age_width),
+                    y,
+                    &age,
+                    Style::default().fg(theme.border).bg(theme.surface),
+                );
+            }
+            let (marker, marker_color) = event_marker(event, theme);
+            buffer.set_string(
+                area.x,
+                y,
+                marker,
+                Style::default().fg(marker_color).bg(theme.surface),
+            );
             write_truncated(
                 buffer,
-                area.x,
-                area.y.saturating_add(2 + index as u16),
-                &row,
-                area.width,
+                area.x.saturating_add(2),
+                y,
+                event,
+                area.width
+                    .saturating_sub(2)
+                    .saturating_sub(if age_width > 0 { age_width + 1 } else { 0 }),
                 Style::default()
                     .fg(if index == 0 {
                         theme.text
@@ -1847,6 +1891,35 @@ fn render_events(
         theme,
         buffer,
     );
+}
+
+fn format_event_age(age: Duration) -> String {
+    let seconds = age.as_secs();
+    if seconds < 5 {
+        "now".to_owned()
+    } else if seconds < 60 {
+        format!("{seconds}s")
+    } else if seconds < 3_600 {
+        format!("{}m", seconds / 60)
+    } else {
+        format!("{}h", seconds / 3_600)
+    }
+}
+
+/// Health narration gets a severity glyph; interface actions a quiet one.
+fn event_marker(event: &str, theme: &Theme) -> (&'static str, ratatui::style::Color) {
+    let lower = event.to_ascii_lowercase();
+    if lower.contains("critical") {
+        ("◆", theme.danger)
+    } else if lower.contains("pressure") || lower.contains("stressed") {
+        ("◆", theme.warning)
+    } else if lower.contains("sustained") {
+        ("◆", theme.accent)
+    } else if lower.contains("calm") || lower.contains("pace") || lower.contains("easing") {
+        ("◇", theme.primary)
+    } else {
+        ("›", theme.text_muted)
+    }
 }
 
 fn format_uptime(seconds: u64) -> String {
@@ -2427,7 +2500,7 @@ mod tests {
     #[test]
     fn live_diagnostics_give_empty_events_only_their_status_row() {
         let outer = Rect::new(0, 0, 44, 35);
-        let sections = diagnostic_sections(outer, [true, true, true], true, 3);
+        let sections = diagnostic_sections(outer, [true, true, true], true, 3, 1);
         let temperatures = sections[0].unwrap();
         let processes = sections[1].unwrap();
         let events = sections[2].unwrap();

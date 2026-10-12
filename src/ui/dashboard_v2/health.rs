@@ -16,6 +16,8 @@ use super::{
 
 const COMPONENT_COUNT: usize = 6;
 const EPSILON: f32 = 0.01;
+/// Fraction of swap in use before it is read as memory pressure.
+const SWAP_PRESSURE_START: f32 = 0.05;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum HealthComponent {
@@ -185,7 +187,11 @@ impl HealthSnapshot {
         let memory_pressure = memory_occupancy.map(|value| {
             let occupancy_pressure = pressure_from(value, policy.memory_pressure_start(), 0.95);
             match swap_fraction {
-                Some(swap) if swap > 0.0 => occupancy_pressure.max((0.25 + swap).min(1.0)),
+                // Kernels park idle pages in swap (zram/zswap) at any load, so
+                // only meaningful residency counts as memory pressure.
+                Some(swap) if swap >= SWAP_PRESSURE_START => {
+                    occupancy_pressure.max((0.25 + swap).min(1.0))
+                }
                 _ => occupancy_pressure,
             }
         });

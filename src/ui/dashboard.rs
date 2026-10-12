@@ -19,9 +19,10 @@ use crate::{
     theme::Theme,
     ui::dashboard_v2::{
         DashboardContext, DashboardDimensions, DashboardPreset, DashboardState, DashboardV2Content,
-        DashboardV2Renderer, HealthEngine, HealthSnapshot, LiveMetricModels, LiveMetricsError,
-        LiveMetricsHistory, LiveSnapshot, PulseBehavior, PulseBehaviorEngine, WidgetAvailability,
-        WidgetContext, WidgetRenderer, WidgetState,
+        DashboardV2Renderer, HealthComponent, HealthEngine, HealthSeverity, HealthSnapshot,
+        LiveMetricModels, LiveMetricsError, LiveMetricsHistory, LiveSnapshot, PulseBehavior,
+        PulseBehaviorEngine, SystemHealth, WidgetAvailability, WidgetContext, WidgetRenderer,
+        WidgetState,
     },
     widget::WidgetId,
 };
@@ -46,6 +47,57 @@ pub struct DashboardApp {
     has_snapshot: bool,
     last_collected_at: Option<Instant>,
     expanded_widget: Option<crate::ui::dashboard_v2::DashboardWidgetId>,
+    narrator: HealthNarrator,
+}
+
+/// Turns health transitions into short timeline sentences. A change must
+/// hold for `NARRATION_DWELL` before it is told, so brief spikes and the
+/// health engine's own smoothing never flood the event list.
+#[derive(Debug, Clone, Copy)]
+struct HealthNarrator {
+    told: HealthSeverity,
+    candidate: HealthSeverity,
+    held: Duration,
+}
+
+const NARRATION_DWELL: Duration = Duration::from_secs(3);
+
+impl HealthNarrator {
+    const fn new() -> Self {
+        Self {
+            told: HealthSeverity::Healthy,
+            candidate: HealthSeverity::Healthy,
+            held: Duration::ZERO,
+        }
+    }
+
+    fn observe(&mut self, health: SystemHealth, delta: Duration) -> Option<String> {
+        let severity = health.severity();
+        if severity != self.candidate {
+            self.candidate = severity;
+            self.held = Duration::ZERO;
+        } else {
+            self.held = self.held.saturating_add(delta);
+        }
+        if self.candidate == self.told || self.held < NARRATION_DWELL {
+            return None;
+        }
+        let rising = self.candidate > self.told;
+        self.told = self.candidate;
+        let source = match health.dominant_source() {
+            Some(HealthComponent::Temperature) => "Thermals",
+            Some(component) => component.label(),
+            None => "System",
+        };
+        Some(match (severity, rising) {
+            (HealthSeverity::Healthy, _) => "Back to calm".to_owned(),
+            (HealthSeverity::Active, true) => format!("{source} picked up the pace"),
+            (HealthSeverity::Active, false) => format!("Easing off · {source} still active"),
+            (HealthSeverity::Elevated, _) => format!("{source} under sustained load"),
+            (HealthSeverity::Stressed, _) => format!("{source} pressure rising"),
+            (HealthSeverity::Critical, _) => format!("{source} critical · needs attention"),
+        })
+    }
 }
 
 impl DashboardApp {
@@ -68,6 +120,7 @@ impl DashboardApp {
             has_snapshot: false,
             last_collected_at: None,
             expanded_widget: None,
+            narrator: HealthNarrator::new(),
         }
     }
 
@@ -114,6 +167,11 @@ impl DashboardApp {
             .map(HealthSnapshot::from_models)
             .unwrap_or_default();
         self.system_health = self.health_engine.update(health_snapshot, delta);
+        if self.has_snapshot
+            && let Some(event) = self.narrator.observe(self.system_health, delta)
+        {
+            self.ui.record_event(event);
+        }
         self.pulse_behavior = self.pulse_behavior_engine.update(self.system_health, delta);
         self.has_snapshot && (!self.ui.reduced_motion() || legacy_changed)
     }
@@ -181,7 +239,8 @@ impl DashboardApp {
                 .with_expanded_widget(self.expanded_widget)
                 .with_data_stale(data_stale)
                 .with_sample_age(sample_age)
-                .with_recent_events(self.ui.timeline().events().to_vec());
+                .with_recent_events(self.ui.timeline().events().to_vec())
+                .with_event_ages(self.ui.timeline().ages(Instant::now()));
         let content = if let Some(system_context) = self.system_context.clone() {
             content.with_system_context(system_context)
         } else {
@@ -717,7 +776,50 @@ mod tests {
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     use ratatui::{Terminal, backend::TestBackend};
 
-    use super::{DashboardApp, focused_widget};
+    use super::{DashboardApp, HealthNarrator, focused_widget};
+    use crate::ui::dashboard_v2::{
+        HealthComponent, HealthEngine, HealthSignals, HealthSnapshot, SystemHealth,
+    };
+    use std::time::Duration;
+
+    fn health(cpu_activity: f32, memory_pressure: f32) -> SystemHealth {
+        HealthEngine::new().evaluate(
+            HealthSnapshot::default()
+                .with_component(
+                    HealthComponent::Cpu,
+                    HealthSignals::new(Some(cpu_activity), None, None, None),
+                )
+                .with_component(
+                    HealthComponent::Memory,
+                    HealthSignals::new(None, Some(memory_pressure), None, None),
+                ),
+        )
+    }
+
+    #[test]
+    fn narrator_tells_held_transitions_once_and_ignores_brief_spikes() {
+        let mut narrator = HealthNarrator::new();
+        let calm = health(0.0, 0.0);
+        let busy = health(1.0, 0.95);
+        assert!(busy.severity() > calm.severity());
+
+        // A one-second spike is never told.
+        assert_eq!(narrator.observe(busy, Duration::from_secs(1)), None);
+        assert_eq!(narrator.observe(calm, Duration::from_secs(1)), None);
+
+        // A held change is told exactly once.
+        let mut told = Vec::new();
+        for _ in 0..10 {
+            told.extend(narrator.observe(busy, Duration::from_secs(1)));
+        }
+        assert_eq!(told.len(), 1);
+
+        let mut recovered = Vec::new();
+        for _ in 0..10 {
+            recovered.extend(narrator.observe(calm, Duration::from_secs(1)));
+        }
+        assert_eq!(recovered, vec!["Back to calm".to_owned()]);
+    }
 
     #[test]
     fn renders_a_terminal_native_surface_at_representative_sizes() {

@@ -184,6 +184,10 @@ impl AppState {
         &self.timeline
     }
 
+    pub fn record_event(&mut self, event: impl Into<String>) {
+        self.timeline.record(event);
+    }
+
     pub fn is_focused(&self, target: FocusTarget) -> bool {
         self.focus.target() == Some(target)
     }
@@ -257,22 +261,15 @@ impl AppState {
                     self.timeline.record("Closed Settings");
                 }
             }
+            // Focus is shown on screen by the focus ring, so navigation stays
+            // out of the timeline and leaves room for system events.
             Action::FocusNext => {
-                if let Some(target) = self.focus.next_from(&self.visible_focus_targets()) {
-                    self.timeline.record(format!("Focus: {}", target.label()));
-                }
+                self.focus.next_from(&self.visible_focus_targets());
             }
             Action::FocusPrevious => {
-                if let Some(target) = self.focus.previous_from(&self.visible_focus_targets()) {
-                    self.timeline.record(format!("Focus: {}", target.label()));
-                }
+                self.focus.previous_from(&self.visible_focus_targets());
             }
-            Action::ExitFocus => {
-                if self.focus_active() {
-                    self.focus.clear();
-                    self.timeline.record("Focus mode off");
-                }
-            }
+            Action::ExitFocus => self.focus.clear(),
         }
 
         false

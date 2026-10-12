@@ -613,6 +613,27 @@ mod tests {
     }
 
     #[test]
+    fn idle_pages_parked_in_swap_are_not_memory_pressure() {
+        use super::super::{HealthComponent, HealthSnapshot};
+        let pressure = |swap_bytes: f64| {
+            let mut sample = snapshot();
+            sample.memory_swap_bytes = Some(swap_bytes);
+            let mut history = LiveMetricsHistory::new();
+            history.push_snapshot(Instant::now(), &sample).unwrap();
+            HealthSnapshot::from_models(&history.models().unwrap())
+                .component(HealthComponent::Memory)
+                .and_then(|signals| signals.pressure())
+                .unwrap()
+        };
+        let gib = 1024.0 * 1024.0 * 1024.0;
+        assert!(
+            pressure(4.0 * 1024.0 * 1024.0) < 0.05,
+            "3 MB of zram is not pressure"
+        );
+        assert!(pressure(2.0 * gib) >= 0.25, "a quarter of swap in use is");
+    }
+
+    #[test]
     fn adapter_keeps_memory_storage_and_gpu_availability_explicit() {
         let mut history = LiveMetricsHistory::new();
         history.push_snapshot(Instant::now(), &snapshot()).unwrap();

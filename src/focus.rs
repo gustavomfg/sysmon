@@ -25,21 +25,6 @@ impl FocusTarget {
         Self::Timeline,
         Self::Network,
     ];
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Overview => "Overview",
-            Self::System => "System",
-            Self::Cpu => "CPU",
-            Self::Memory => "Memory",
-            Self::Gpu => "GPU",
-            Self::Processes => "Processes",
-            Self::Storage => "Storage",
-            Self::History => "History",
-            Self::Timeline => "Timeline",
-            Self::Network => "Network",
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, Default)]
