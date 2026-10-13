@@ -1,0 +1,13 @@
+case,baseline_us,final_us,change_percent
+80x24-theme0-focus0,8308.8,8174.41,-1.6
+100x30-theme0-focus0,5171.71,4878.54,-5.7
+120x35-theme0-focus0,6236.53,6196.22,-0.6
+160x45-theme0-focus0,12397.75,12091.92,-2.5
+200x55-theme0-focus0,16445.4,16237.56,-1.3
+120x35-theme1-focus0,6160.15,6156.28,-0.1
+120x35-theme2-focus0,6084.48,6108.66,0.4
+160x45-theme0-focus3,245.84,268.73,9.3
+160x45-theme0-focus4,256.26,261.26,1.9
+160x45-theme0-focus5,337.5,278.34,-17.5
+160x45-theme0-focus10,660.95,263.88,-60.1
+160x45-theme0-focus7,301.25,279.17,-7.3

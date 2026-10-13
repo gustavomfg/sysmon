@@ -8,18 +8,9 @@ Um monitor de sistema no terminal feito em Rust, com interface TUI leve, atualiz
 
 ## Preview
 
-```text
-┌─ SYSMON ───────────── SYSTEM MONITOR · host ─────── Standard · LIVE ─┐
-│┌─ METRICS ─────────┐┌─ SYSTEM PULSE ─────────────┐┌─ TEMPERATURES ──┐│
-││ CPU          42%  ││ · ·  ·····  ·   · ···       ││ CPU Package 52°C││
-││ MEM  5.2 / 15.5G ││   ····  ·······  ···        │├─ TOP PROCESSES ─┤│
-││ GPU          25%  ││ ···    ·········   ·        ││  42  sysmon 2%  ││
-││ NET     ↓ 10 KB/s ││     ·  ·····  ·····        ││  87  shell  1%  ││
-││ DISK   R 24 MB/s  │└────────────────────────────┘├─ RECENT EVENTS ─┤│
-│└───────────────────┘┌─ SYSTEM ──────────────────┐ │› SysMon started ││
-│                     │ HOST workstation  UP 2h   │ └─────────────────┘│
-└─────────────────────┴───────────────────────────┴────────────────────┘
-```
+![Dashboard com instrumentos de telemetria](docs/graphics/dashboard.png)
+
+Captura do renderer real a 160×45, com dados sintéticos identificados do exemplo de desenvolvimento.
 
 ## Recursos
 
@@ -27,19 +18,19 @@ Um monitor de sistema no terminal feito em Rust, com interface TUI leve, atualiz
 - Linha vital no cabeçalho: um traço de eletrocardiograma cujo ritmo (bpm), amplitude e onda T seguem o System Pulse, com diagnóstico em linguagem natural do que está ditando o ritmo.
 - Tabela de processos sem threads duplicadas, com CPU por processo medida no próprio intervalo de coleta, colorida por calor e com medidor por linha.
 - Mapa de núcleos no card de CPU: uma barra por núcleo lógico, revelando núcleos saturados mesmo quando a média está baixa.
-- Gráficos de histórico com brilho sob a linha, usando a altura livre dos cards.
+- Instrumentos de telemetria em Braille, com timestamps reais, escalas, picos e preenchimento discreto.
 - Narrador de eventos: mudanças de saúde que persistem (ex.: "CPU under sustained load", "Back to calm") entram em RECENT EVENTS com idade relativa.
 - Painéis arredondados com anel de foco violeta no painel e no card selecionados.
-- Uso geral de CPU com histórico visual.
+- CPU com escala fixa de 0–100%, comparação em pontos percentuais e detalhamento por núcleo no modo expandido.
 - Informações de sistema: OS, kernel, uptime, cores, load average e quantidade de processos.
 - Contexto operacional ao vivo com hostname, memória disponível, idade da amostra e identidade dos processos.
-- RAM e swap usados/totais com barra de progresso.
+- RAM com barra de capacidade, memória disponível, histórico e contexto de swap quando disponível.
 - Top 5 processos por uso de CPU, exibindo também PID e memória.
-- Discos montados com espaço usado/total.
-- Rede por interface em `MB/s`, priorizando as interfaces com mais tráfego.
+- Armazenamento com capacidade separada da atividade histórica de leitura/escrita.
+- Rede com download/upload, picos recentes e escala compartilhada; interfaces adicionais aparecem nos detalhes.
 - GPUs NVIDIA via `nvidia-smi`, quando disponível, exibindo todas as placas detectadas.
 - Layout responsivo, com aviso quando o terminal não possui o tamanho mínimo necessário.
-- Paleta de cores discreta, bordas quadradas e medidores ASCII para manter a leitura com cara de terminal.
+- Três temas, barras finas e cores consistentes; saída alternativa em ASCII, 16/256 cores ou monocromática.
 - Primeira coleta real antes do desenho inicial, sem valores de demonstração na interface principal.
 - Command palette, busca de processos, foco por widget e modo de movimento reduzido.
 - Saída segura com restauração do terminal.
@@ -115,10 +106,37 @@ A coleta principal vem da crate `sysinfo`. Para GPUs, o app chama `nvidia-smi`, 
 ## Limitações
 
 - GPUs são detectadas apenas em placas NVIDIA com `nvidia-smi` disponível.
-- A leitura de rede divide o delta de bytes pelo intervalo real entre atualizações e apresenta a taxa em `MB/s` decimal.
+- Rede e I/O aparecem em unidades binárias explícitas (`KiB/s`, `MiB/s`); startup e resets de rede produzem lacunas, sem taxas artificiais.
+- O histórico retém 120 amostras por série. Os cards mostram os últimos dois minutos disponíveis; a expansão aproveita o histórico retido. Alterar a largura não muda a janela temporal.
+- Históricos de GPU e armazenamento acompanham o dispositivo principal; os valores atuais dos demais dispositivos continuam disponíveis. Rede agrega interfaces que não são loopback, incluindo interfaces virtuais.
+- Sensores sem limite crítico informado pelo driver usam uma escala visual neutra. As heurísticas gerais de saúde do SYSTEM PULSE continuam sendo as existentes.
 - O layout ajusta a proporção dos painéis conforme a largura; abaixo do tamanho mínimo, o app exibe um aviso em vez de cortar o dashboard.
 
 ## Desenvolvimento
+
+### Capturas dos gráficos
+
+O exemplo abaixo usa dados **sintéticos identificados**, a aplicação real e o `TestBackend` do ratatui. Gera capturas textuais e por célula para cinco tamanhos, três temas e os principais modos expandidos:
+
+```bash
+cargo run --offline --release --example graphics_capture -- target/graphics-captures --bench
+cargo run --offline --release --example graphics_capture -- target/graphics-animated --bench --animate
+python3 tools/render_graphics_capture.py target/graphics-captures
+python3 tools/smoke_graphics_terminal.py
+```
+
+A conversão opcional para PNG precisa de Pillow e uma das fontes indicadas no script. Não há dependência nova no executável. Veja a [comparação visual](docs/graphics/comparison.png), a [arquitetura](docs/graphics-architecture.md), a [pesquisa](docs/graphics-research.md) e os [resultados e medições](docs/graphics-overhaul-results.md).
+
+### Compatibilidade de terminal
+
+Detecção padrão preserva Unicode e True Color em terminais modernos; `TERM=linux` ou `dumb` usa ASCII e 16 cores. Para configurar explicitamente:
+
+```bash
+SYSMON_COLOR=ansi256 cargo run --release
+SYSMON_COLOR=mono SYSMON_GRAPHICS=ascii cargo run --release
+```
+
+`SYSMON_COLOR` aceita `truecolor`, `ansi16`, `ansi256` e `mono`; `SYSMON_GRAPHICS` aceita `unicode` e `ascii`. `NO_COLOR` desativa cores quando não há escolha explícita em `SYSMON_COLOR`.
 
 Comandos úteis:
 

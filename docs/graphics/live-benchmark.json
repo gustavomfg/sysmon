@@ -1,0 +1,46 @@
+[
+  {
+    "variant": "baseline",
+    "terminal": "80x24",
+    "measurement_seconds": 5.81,
+    "cpu_one_core_percent": 49.75,
+    "rss_min_kib": 6696.0,
+    "rss_max_kib": 6824.0,
+    "exit_code": 0,
+    "alternate_screen_restored": true,
+    "output_bytes": 630887
+  },
+  {
+    "variant": "final",
+    "terminal": "80x24",
+    "measurement_seconds": 5.9,
+    "cpu_one_core_percent": 46.78,
+    "rss_min_kib": 7276.0,
+    "rss_max_kib": 7404.0,
+    "exit_code": 0,
+    "alternate_screen_restored": true,
+    "output_bytes": 630414
+  },
+  {
+    "variant": "baseline",
+    "terminal": "160x45",
+    "measurement_seconds": 5.82,
+    "cpu_one_core_percent": 28.36,
+    "rss_min_kib": 7980.0,
+    "rss_max_kib": 7980.0,
+    "exit_code": 0,
+    "alternate_screen_restored": true,
+    "output_bytes": 1763490
+  },
+  {
+    "variant": "final",
+    "terminal": "160x45",
+    "measurement_seconds": 5.82,
+    "cpu_one_core_percent": 27.81,
+    "rss_min_kib": 8428.0,
+    "rss_max_kib": 8812.0,
+    "exit_code": 0,
+    "alternate_screen_restored": true,
+    "output_bytes": 1758582
+  }
+]
