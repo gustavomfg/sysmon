@@ -125,6 +125,7 @@ impl Trend {
 pub struct PeriodComparison {
     direction: TrendDirection,
     delta: Option<f64>,
+    window: Option<std::time::Duration>,
 }
 
 impl PeriodComparison {
@@ -132,6 +133,7 @@ impl PeriodComparison {
         Self {
             direction: TrendDirection::Unknown,
             delta: None,
+            window: None,
         }
     }
 
@@ -150,6 +152,7 @@ impl PeriodComparison {
         Self {
             direction: direction_for_delta(delta),
             delta: Some(delta),
+            window: None,
         }
     }
 
@@ -163,6 +166,14 @@ impl PeriodComparison {
 
     pub const fn has_previous(self) -> bool {
         self.delta.is_some()
+    }
+
+    pub const fn with_window(mut self, window: std::time::Duration) -> Self {
+        self.window = Some(window);
+        self
+    }
+    pub const fn window(self) -> Option<std::time::Duration> {
+        self.window
     }
 }
 

@@ -58,12 +58,23 @@ impl CpuCardRenderer {
             render_compact_body(model, body, theme, buffer);
         } else {
             let core_map = core_map_area(cores, body);
+            let detail = core_detail_area(cores, body);
+            let plot_body = Rect::new(
+                body.x,
+                body.y,
+                body.width,
+                body.height
+                    .saturating_sub(detail.map_or(0, |area| area.height + 1)),
+            );
             let text_width = core_map.map_or(body.width, |map| {
                 map.x.saturating_sub(body.x).saturating_sub(CORE_MAP_GAP)
             });
-            render_body(model, body, text_width, theme, buffer);
+            render_body(model, plot_body, text_width, theme, buffer);
             if let Some(map) = core_map {
                 render_core_map(cores, map, theme, buffer);
+            }
+            if let Some(detail) = detail {
+                render_core_detail(cores, detail, theme, buffer);
             }
         }
         Ok(())
@@ -260,6 +271,75 @@ fn line_region(area: Rect, row: u16) -> Rect {
     }
 }
 
+fn core_detail_area(cores: &[f64], body: Rect) -> Option<Rect> {
+    if cores.is_empty() || body.height < 16 || body.width < 48 {
+        return None;
+    }
+    let rows = (cores.len().div_ceil(4) as u16).min((body.height / 4).clamp(2, 8));
+    Some(Rect::new(
+        body.x,
+        body.bottom() - rows - 1,
+        body.width,
+        rows + 1,
+    ))
+}
+
+fn render_core_detail(cores: &[f64], area: Rect, theme: &Theme, buffer: &mut Buffer) {
+    let slots = usize::from(area.height.saturating_sub(1)) * 4;
+    let mut readings = cores.iter().copied().enumerate().collect::<Vec<_>>();
+    if readings.len() > slots {
+        readings.sort_by(|(left_id, left), (right_id, right)| {
+            right.total_cmp(left).then_with(|| left_id.cmp(right_id))
+        });
+    }
+    let title = if cores.len() > slots {
+        format!("CORE LOAD · busiest {slots}/{}", cores.len())
+    } else {
+        "CORE LOAD · logical CPUs".to_owned()
+    };
+    write(
+        buffer,
+        area,
+        area.x,
+        area.y,
+        &title,
+        Style::default().fg(theme.text_muted).bg(theme.surface),
+    );
+    let width = area.width / 4;
+    for (slot, (index, usage)) in readings.into_iter().take(slots).enumerate() {
+        let x = area.x + (slot as u16 % 4) * width;
+        let y = area.y + 1 + slot as u16 / 4;
+        let valid = usage.is_finite() && (0.0..=100.0).contains(&usage);
+        let text = if valid {
+            format!("c{index:02} {usage:>3.0}%")
+        } else {
+            format!("c{index:02}    —")
+        };
+        let color = if valid {
+            super::super::vital::heat_color(usage / 100.0, theme)
+        } else {
+            theme.text_muted
+        };
+        write(
+            buffer,
+            area,
+            x,
+            y,
+            &text,
+            Style::default().fg(theme.text).bg(theme.surface),
+        );
+        let start = x + text.chars().count() as u16 + 1;
+        let meter = Rect::new(start, y, (x + width).saturating_sub(start + 2), 1);
+        super::instruments::capacity_meter(
+            meter,
+            valid.then_some(usage / 100.0),
+            color,
+            theme,
+            buffer,
+        );
+    }
+}
+
 fn render_primary_value(model: WidgetRenderModel, area: Rect, theme: &Theme, buffer: &mut Buffer) {
     if area.width == 0 || area.height == 0 {
         return;
@@ -316,10 +396,11 @@ fn render_secondary_context(
 }
 
 fn render_history(model: WidgetRenderModel, area: Rect, theme: &Theme, buffer: &mut Buffer) {
-    history_chart::render(
+    history_chart::instrument(
         &[(sparkline(model), chart_style(model, theme))],
         Scale::Percent,
         area,
+        theme,
         buffer,
     );
 }
@@ -391,7 +472,13 @@ fn format_frequency(hertz: f64) -> String {
 }
 
 fn format_trend(model: WidgetRenderModel) -> String {
-    let arrow = match model.visual().trend().direction() {
+    let comparison = model.visual().comparison();
+    let direction = if comparison.has_previous() {
+        comparison.direction()
+    } else {
+        model.visual().trend().direction()
+    };
+    let arrow = match direction {
         TrendDirection::Rising => "↑",
         TrendDirection::Falling => "↓",
         TrendDirection::Stable => "→",
@@ -401,19 +488,13 @@ fn format_trend(model: WidgetRenderModel) -> String {
         return String::new();
     }
     let delta = model.visual().comparison().delta();
-    let window = sparkline(model).and_then(|sparkline| {
-        let mut previous = None;
-        let mut last = None;
-        for point in sparkline.points().iter() {
-            previous = last;
-            last = Some(point);
+    let suffix = comparison.window().map_or_else(String::new, |window| {
+        if window.subsec_millis() == 0 {
+            format!(" · {}s", window.as_secs())
+        } else {
+            format!(" · {:.1}s", window.as_secs_f64())
         }
-        let last = last?.sample().offset();
-        let previous = previous?.sample().offset();
-        let seconds = last.saturating_sub(previous).as_secs();
-        (seconds > 0).then_some(seconds)
     });
-    let suffix = window.map_or_else(String::new, |seconds| format!(" · {seconds}s"));
     match delta {
         Some(delta)
             if model
@@ -421,7 +502,7 @@ fn format_trend(model: WidgetRenderModel) -> String {
                 .primary()
                 .is_some_and(|value| value.unit() == MetricUnit::Percent) =>
         {
-            format!("{arrow} {:+.0}%{suffix}", delta * 100.0)
+            format!("{arrow} {:+.0}pp{suffix}", delta * 100.0)
         }
         Some(delta) => format!("{arrow} {delta:+.1}{suffix}"),
         None => arrow.to_owned(),
@@ -726,6 +807,21 @@ mod tests {
     }
 
     #[test]
+    fn expanded_core_detail_includes_saturated_high_index_cores_and_stays_bounded() {
+        let theme = Theme::pulse();
+        let area = Rect::new(0, 0, 120, 30);
+        let mut buffer = Buffer::empty(area);
+        let mut cores = vec![5.0; 64];
+        cores[63] = 100.0;
+        let detail = core_detail_area(&cores, area).unwrap();
+        render_core_detail(&cores, detail, &theme, &mut buffer);
+        let text = text(&buffer);
+        assert!(text.contains("c63 100%"));
+        assert!(text.contains("busiest 28/64"));
+        assert!(detail.bottom() <= area.bottom());
+    }
+
+    #[test]
     fn core_map_reserves_a_gap_and_keeps_cpu_context_legible() {
         let context = WidgetContext::new(
             DashboardPreset::Standard,
@@ -749,7 +845,7 @@ mod tests {
             .unwrap();
             let output = text(&buffer);
             assert!(output.contains("8 cores · 3.2 GHz"));
-            assert!(output.contains("55.0°C  ↑ +32% · 10s"));
+            assert!(output.contains("55.0°C  ↑ +32pp · 10s"));
             if count == 8 {
                 for y in 1..5 {
                     assert_eq!(buffer[(22, y)].symbol(), " ");
@@ -789,7 +885,12 @@ mod tests {
     }
 
     fn text(buffer: &Buffer) -> String {
-        buffer.content.iter().map(|cell| cell.symbol()).collect()
+        buffer
+            .content
+            .chunks(usize::from(buffer.area.width))
+            .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     fn braille_cells(buffer: &Buffer, x_start: u16, x_end: u16, y_start: u16, y_end: u16) -> usize {
@@ -809,12 +910,15 @@ mod tests {
         let rendered = render(DashboardPreset::Widescreen, 48, 12);
         let output = text(&rendered);
         assert!(output.contains("CPU"));
-        assert_eq!(output.matches("42%").count(), 1);
+        assert_eq!(
+            output.lines().filter(|line| line.trim() == "42%").count(),
+            1
+        );
         assert_eq!(rendered[(0, 2)].symbol(), "4");
         assert!(output.contains("8 cores"));
         assert!(output.contains("3.2 GHz"));
         assert!(output.contains("55.0°C"));
-        assert!(output.contains("↑ +32% · 10s"));
+        assert!(output.contains("↑ +32pp · 10s"));
         assert!(output.contains('%'));
         assert!(!output.contains("normal"));
     }
@@ -823,10 +927,13 @@ mod tests {
     fn value_is_prominent_and_chart_occupies_the_right_region() {
         let rendered = render(DashboardPreset::Standard, 43, 10);
         let output = text(&rendered);
-        assert_eq!(output.matches("42%").count(), 1);
+        assert_eq!(
+            output.lines().filter(|line| line.trim() == "42%").count(),
+            1
+        );
         assert_eq!(rendered[(0, 2)].symbol(), "4");
         assert!(output.contains("8 cores"));
-        assert!(output.contains("↑ +32%"));
+        assert!(output.contains("↑ +32pp"));
         assert!(!output.contains('█'));
 
         let chart_cells = braille_cells(&rendered, 0, 43, 5, 9);
@@ -858,7 +965,7 @@ mod tests {
             "chart should remain visible across the available body height"
         );
         assert!(!text(&rendered).contains("50s"));
-        assert!(!text(&rendered).contains("100%"));
+        assert!(text(&rendered).contains("100%"));
     }
 
     #[test]
@@ -884,22 +991,28 @@ mod tests {
             let rendered = render_at(value, 48, 12);
             assert!(text(&rendered).contains(&format!("{:.0}%", value * 100.0)));
             assert!(text(&rendered).contains("55.0°C"));
-            let row = (5..8)
-                .find(|row| {
-                    rendered[(0, *row)]
+            let mut positions = Vec::new();
+            for y in 5..11 {
+                for x in 0..48 {
+                    if rendered[(x, y)]
                         .symbol()
                         .chars()
                         .next()
                         .is_some_and(|c| ('\u{2801}'..='\u{28ff}').contains(&c))
-                })
-                .expect("constant level should render a Braille line");
-            for column in 1..48 {
-                assert_eq!(
-                    rendered[(column, row)].symbol(),
-                    rendered[(0, row)].symbol()
-                );
+                    {
+                        positions.push((x, y));
+                    }
+                }
             }
-            assert_eq!(braille_cells(&rendered, 0, 48, 5, 8), 48);
+            assert!(!positions.is_empty());
+            assert!(
+                positions.iter().all(|(_, y)| *y == positions[0].1),
+                "constant telemetry is a flat trace"
+            );
+            let retained = model_at(value).sparkline().duration().as_secs_f64();
+            let first = 5 + ((1.0 - retained / 120.0) * 85.0 / 2.0).floor() as u16;
+            let actual = positions.iter().map(|(x, _)| *x).min().unwrap();
+            assert!(actual.abs_diff(first) <= 1, "uncollected time stays blank");
         }
     }
 

@@ -66,6 +66,8 @@ pub struct TemperatureInfo {
     pub id: String,
     pub label: String,
     pub celsius: Option<f64>,
+    /// Driver-reported critical temperature, when the sensor provides it.
+    pub critical_celsius: Option<f64>,
 }
 
 #[derive(Debug, Clone)]
@@ -147,7 +149,19 @@ impl SystemInfoCollector {
             .map_or(Duration::ZERO, |previous| {
                 collected_at.saturating_duration_since(previous)
             });
+        let previous_networks = self
+            .networks
+            .iter()
+            .map(|(name, data)| {
+                (
+                    name.clone(),
+                    (data.total_received(), data.total_transmitted()),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
         self.networks.refresh(true);
+        let all_networks =
+            NetworkInfo::collected(&self.networks, network_interval, &previous_networks);
         self.last_network_refresh = Some(collected_at);
 
         let process_refresh_due = refresh_due(
@@ -213,8 +227,8 @@ impl SystemInfoCollector {
             storage_devices: self.cached_storage_devices.clone(),
             processes_list: self.processes_list.clone(),
             gpus: self.gpus.get().to_vec(),
-            networks: NetworkInfo::get(&self.networks, network_interval),
-            all_networks: NetworkInfo::get_all(&self.networks, network_interval),
+            networks: NetworkInfo::legacy_view(all_networks.clone()),
+            all_networks,
             temperatures,
         }
     }
@@ -473,6 +487,10 @@ fn temperature_infos(components: &Components) -> Vec<TemperatureInfo> {
                     .temperature()
                     .map(f64::from)
                     .filter(|value| value.is_finite()),
+                critical_celsius: component
+                    .critical()
+                    .map(f64::from)
+                    .filter(|limit| limit.is_finite() && *limit > 0.0),
             })
         })
         .collect::<Vec<_>>();

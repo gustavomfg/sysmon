@@ -94,13 +94,13 @@ impl<const HISTORY: usize> StorageMetricModel<HISTORY> {
     pub fn from_input(input: StorageMetricInput<HISTORY>) -> Result<Self, MetricModelError> {
         let occupancy_sparkline = input
             .occupancy_history
-            .sparkline::<CHART_POINTS>(TimeWindow::Medium);
+            .sparkline::<CHART_POINTS>(TimeWindow::Long);
         let read_sparkline = input
             .read_history
-            .sparkline::<CHART_POINTS>(TimeWindow::Medium);
+            .sparkline::<CHART_POINTS>(TimeWindow::Long);
         let write_sparkline = input
             .write_history
-            .sparkline::<CHART_POINTS>(TimeWindow::Medium);
+            .sparkline::<CHART_POINTS>(TimeWindow::Long);
         let trend = trend_of(input.occupancy_history);
         let visual_comparison = latest_comparison(input.occupancy_history, MetricUnit::Percent);
         let occupancy = input

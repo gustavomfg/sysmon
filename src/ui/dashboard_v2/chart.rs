@@ -27,6 +27,8 @@ pub enum TimeWindow {
     Medium,
     Long,
     Custom(usize),
+    /// A wall-clock interval ending at the latest recorded sample.
+    Recent(Duration),
 }
 
 impl TimeWindow {
@@ -36,6 +38,7 @@ impl TimeWindow {
             Self::Medium => (capacity / 2).max(1).min(capacity),
             Self::Long => capacity,
             Self::Custom(limit) => limit.min(capacity),
+            Self::Recent(_) => capacity,
         }
     }
 }
@@ -309,15 +312,21 @@ impl<const POINTS: usize> DownsampledSeries<POINTS> {
 }
 
 /// Compact presentation window; collector histories keep their own capacity.
-pub const VISIBLE_HISTORY_SAMPLES: usize = 60;
+pub const VISIBLE_HISTORY_SAMPLES: usize = 120;
+const HISTORY_WORDS: usize = VISIBLE_HISTORY_SAMPLES.div_ceil(64);
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SparklineModel<const POINTS: usize> {
     points: DownsampledSeries<POINTS>,
-    // Raw values for width-adaptive terminal charts. A bitmap represents gaps
-    // without duplicating timestamps/events in every by-value render block.
+    // Compact raw telemetry, retained independently of terminal width.
+    // Relative nanoseconds preserve timing without duplicating TimeSample's
+    // availability/event metadata in every semantic render block.
     values: [f64; VISIBLE_HISTORY_SAMPLES],
-    valid_values: u64,
+    valid_values: [u64; HISTORY_WORDS],
+    ages_ns: [u64; VISIBLE_HISTORY_SAMPLES],
+    latest_offset: Duration,
+    cadence: Duration,
+    rate_ceiling: f64,
     value_count: usize,
     stats: SeriesStats,
     trend: Trend,
@@ -327,8 +336,35 @@ pub struct SparklineModel<const POINTS: usize> {
 impl<const POINTS: usize> SparklineModel<POINTS> {
     pub fn visible_samples(&self, limit: usize) -> impl Iterator<Item = Option<f64>> + '_ {
         let start = self.value_count.saturating_sub(limit);
-        (start..self.value_count)
-            .map(|index| (self.valid_values & (1 << index) != 0).then_some(self.values[index]))
+        (start..self.value_count).map(|index| self.value_at(index))
+    }
+
+    fn value_at(&self, index: usize) -> Option<f64> {
+        (self.valid_values[index / 64] & (1 << (index % 64)) != 0).then_some(self.values[index])
+    }
+
+    /// Actual monotonic offsets; unavailable readings remain explicit gaps.
+    pub fn timed_samples(&self) -> impl Iterator<Item = (Duration, Option<f64>)> + '_ {
+        (0..self.value_count).map(|index| {
+            (
+                self.latest_offset
+                    .saturating_sub(Duration::from_nanos(self.ages_ns[index])),
+                self.value_at(index),
+            )
+        })
+    }
+
+    pub const fn latest_offset(&self) -> Duration {
+        self.latest_offset
+    }
+    pub const fn cadence(&self) -> Duration {
+        self.cadence
+    }
+    pub const fn rate_ceiling(&self) -> f64 {
+        self.rate_ceiling
+    }
+    pub fn duration(&self) -> Duration {
+        Duration::from_nanos(self.ages_ns.first().copied().unwrap_or(0))
     }
 
     pub const fn sample_count(&self) -> usize {
@@ -773,6 +809,60 @@ pub struct TimeSeries<const CAPACITY: usize> {
     unit: MetricUnit,
     samples: [Option<TimeSample>; CAPACITY],
     length: usize,
+    head: usize,
+    rate_scale: RateScale,
+    last_inserted: Option<Duration>,
+}
+
+/// Scale is presentation state, never a transformation of measured values.
+/// Attack is immediate; release requires 30 seconds below a quarter of the
+/// ceiling. Updates happen on collection, so animation frames cannot pump it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct RateScale {
+    ceiling: f64,
+    low_since: Option<Duration>,
+    last_seen: Option<Duration>,
+}
+
+impl RateScale {
+    const fn new() -> Self {
+        Self {
+            ceiling: 1024.0,
+            low_since: None,
+            last_seen: None,
+        }
+    }
+    fn observe(&mut self, at: Duration, peak: f64) {
+        if self
+            .last_seen
+            .is_some_and(|previous| at.saturating_sub(previous) > Duration::from_secs(10))
+        {
+            self.low_since = None;
+        }
+        self.last_seen = Some(at);
+        let target = rate_band(peak);
+        if target > self.ceiling {
+            self.ceiling = target;
+            self.low_since = None;
+        } else if target <= self.ceiling / 4.0 {
+            let since = *self.low_since.get_or_insert(at);
+            if at.saturating_sub(since) >= Duration::from_secs(30) {
+                self.ceiling = target;
+                self.low_since = None;
+            }
+        } else {
+            self.low_since = None;
+        }
+    }
+}
+
+pub(crate) fn rate_band(peak: f64) -> f64 {
+    let peak = if peak.is_finite() {
+        peak.max(1024.0)
+    } else {
+        1024.0
+    };
+    2.0_f64.powf(peak.log2().ceil()).max(peak).min(f64::MAX)
 }
 
 impl<const CAPACITY: usize> TimeSeries<CAPACITY> {
@@ -781,6 +871,9 @@ impl<const CAPACITY: usize> TimeSeries<CAPACITY> {
             unit,
             samples: [None; CAPACITY],
             length: 0,
+            head: 0,
+            rate_scale: RateScale::new(),
+            last_inserted: None,
         }
     }
 
@@ -805,30 +898,60 @@ impl<const CAPACITY: usize> TimeSeries<CAPACITY> {
             return Err(ChartError::CapacityZero);
         }
         if self
-            .last()
-            .is_some_and(|last| sample.offset() <= last.offset())
+            .last_inserted
+            .is_some_and(|last| sample.offset() <= last)
         {
             return Err(ChartError::TemporalOrder);
         }
-        if self.length == CAPACITY {
-            for index in 1..CAPACITY {
-                self.samples[index - 1] = self.samples[index];
-            }
-            self.samples[CAPACITY - 1] = Some(sample);
-            Ok(PushOutcome::EvictedOldest)
+        let outcome = if self.length == CAPACITY {
+            self.samples[self.head] = Some(sample);
+            self.head = (self.head + 1) % CAPACITY;
+            PushOutcome::EvictedOldest
         } else {
-            self.samples[self.length] = Some(sample);
+            self.samples[(self.head + self.length) % CAPACITY] = Some(sample);
             self.length += 1;
-            Ok(PushOutcome::Added)
+            PushOutcome::Added
+        };
+        self.last_inserted = Some(sample.offset());
+        if self.unit == MetricUnit::BytesPerSecond && sample.usable_value().is_some() {
+            let start = self.window_start(TimeWindow::Recent(Duration::from_secs(120)));
+            let peak = self
+                .iter()
+                .skip(start)
+                .filter_map(TimeSample::usable_value)
+                .fold(0.0_f64, f64::max);
+            self.rate_scale.observe(sample.offset(), peak);
+        } else if self.unit == MetricUnit::BytesPerSecond {
+            self.rate_scale.low_since = None;
+            self.rate_scale.last_seen = None;
         }
+        Ok(outcome)
     }
 
     pub fn get(self, index: usize) -> Option<TimeSample> {
-        (index < self.length).then(|| self.samples[index]).flatten()
+        (index < self.length)
+            .then(|| self.samples[(self.head + index) % CAPACITY])
+            .flatten()
     }
 
     pub fn iter(self) -> impl Iterator<Item = TimeSample> {
-        self.samples.into_iter().take(self.length).flatten()
+        (0..self.length).filter_map(move |index| self.samples[(self.head + index) % CAPACITY])
+    }
+
+    /// Explicit expiration for consumers requiring a duration bound as well
+    /// as the fixed capacity. Equality retains the sample at the boundary.
+    pub fn prune_before(&mut self, cutoff: Duration) -> usize {
+        let mut removed = 0;
+        while self.first().is_some_and(|sample| sample.offset() < cutoff) {
+            self.samples[self.head] = None;
+            self.head = (self.head + 1) % CAPACITY;
+            self.length -= 1;
+            removed += 1;
+        }
+        if self.length == 0 {
+            self.rate_scale = RateScale::new();
+        }
+        removed
     }
 
     pub fn first(self) -> Option<TimeSample> {
@@ -884,19 +1007,39 @@ impl<const CAPACITY: usize> TimeSeries<CAPACITY> {
     pub fn sparkline<const POINTS: usize>(self, window: TimeWindow) -> SparklineModel<POINTS> {
         let start = self.window_start(window);
         let mut values = [0.0; VISIBLE_HISTORY_SAMPLES];
-        let mut valid_values = 0;
+        let mut valid_values = [0; HISTORY_WORDS];
+        let mut ages_ns = [0; VISIBLE_HISTORY_SAMPLES];
+        let latest_offset = self.last().map_or(Duration::ZERO, TimeSample::offset);
         let value_start = start.max(self.length.saturating_sub(VISIBLE_HISTORY_SAMPLES));
         let value_count = self.length - value_start;
         for (index, sample) in self.iter().skip(value_start).enumerate() {
+            ages_ns[index] =
+                u64::try_from(latest_offset.saturating_sub(sample.offset()).as_nanos())
+                    .unwrap_or(u64::MAX);
             if let Some(value) = sample.usable_value() {
                 values[index] = value;
-                valid_values |= 1 << index;
+                valid_values[index / 64] |= 1 << (index % 64);
             }
         }
+        let mut intervals = [Duration::ZERO; VISIBLE_HISTORY_SAMPLES];
+        let interval_count = value_count.saturating_sub(1);
+        for index in 0..interval_count {
+            intervals[index] = Duration::from_nanos(ages_ns[index] - ages_ns[index + 1]);
+        }
+        intervals[..interval_count].sort_unstable();
+        let cadence = if interval_count > 0 {
+            intervals[(interval_count - 1) / 2]
+        } else {
+            Duration::from_secs(1)
+        };
         SparklineModel {
             points: self.downsample_from::<POINTS>(start),
             values,
             valid_values,
+            ages_ns,
+            latest_offset,
+            cadence,
+            rate_ceiling: self.rate_scale.ceiling,
             value_count,
             stats: self.stats_from(start),
             trend: self.trend_from(start),
@@ -980,7 +1123,17 @@ impl<const CAPACITY: usize> TimeSeries<CAPACITY> {
     }
 
     fn window_start(self, window: TimeWindow) -> usize {
-        self.length.saturating_sub(window.sample_limit(CAPACITY))
+        if let TimeWindow::Recent(duration) = window {
+            let cutoff = self
+                .last()
+                .map_or(Duration::ZERO, TimeSample::offset)
+                .saturating_sub(duration);
+            self.iter()
+                .position(|sample| sample.offset() >= cutoff)
+                .unwrap_or(self.length)
+        } else {
+            self.length.saturating_sub(window.sample_limit(CAPACITY))
+        }
     }
 
     fn stats_from(self, start: usize) -> SeriesStats {
@@ -1214,6 +1367,102 @@ fn delta_direction(delta: f64) -> TrendDirection {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn circular_history_wraps_prunes_and_keeps_temporal_order_after_expiration() {
+        let mut history = TimeSeries::<3>::new(MetricUnit::Percent);
+        for at in 0..8 {
+            history.push(sample(at, Some(at as f64))).unwrap();
+        }
+        assert_eq!(
+            history
+                .iter()
+                .map(|sample| sample.offset().as_secs())
+                .collect::<Vec<_>>(),
+            vec![5, 6, 7]
+        );
+        assert_eq!(history.prune_before(Duration::from_secs(6)), 1);
+        history.push(sample(8, Some(8.0))).unwrap();
+        assert_eq!(history.first().unwrap().offset(), Duration::from_secs(6));
+        assert_eq!(history.prune_before(Duration::from_secs(10)), 3);
+        assert_eq!(
+            history.push(sample(7, Some(7.0))),
+            Err(ChartError::TemporalOrder)
+        );
+        history.push(sample(11, Some(11.0))).unwrap();
+        assert_eq!(history.len(), 1);
+    }
+
+    #[test]
+    fn presentation_preserves_irregular_times_and_gaps_across_bitmap_words() {
+        let mut history = TimeSeries::<120>::new(MetricUnit::Percent);
+        for index in 0..120 {
+            history
+                .push(sample(
+                    index * index,
+                    if [63, 64, 119].contains(&index) {
+                        None
+                    } else {
+                        Some(index as f64)
+                    },
+                ))
+                .unwrap();
+        }
+        let plot = history.sparkline::<12>(TimeWindow::Long);
+        let actual = plot.timed_samples().collect::<Vec<_>>();
+        assert_eq!(actual.len(), 120);
+        for index in [0_usize, 1, 62, 63, 64, 65, 118, 119] {
+            assert_eq!(actual[index].0, Duration::from_secs((index * index) as u64));
+            assert_eq!(
+                actual[index].1,
+                if [63, 64, 119].contains(&index) {
+                    None
+                } else {
+                    Some(index as f64)
+                }
+            );
+        }
+        let recent = history.sparkline::<12>(TimeWindow::Recent(Duration::from_secs(240)));
+        assert_eq!(recent.sample_count(), 2);
+        assert_eq!(recent.stats().available_samples(), 1);
+    }
+
+    #[test]
+    fn rate_scale_attacks_immediately_and_releases_only_after_monotonic_dwell() {
+        let mut scale = RateScale::new();
+        scale.observe(Duration::ZERO, 100_000.0);
+        let high = scale.ceiling;
+        assert!(high >= 100_000.0);
+        for seconds in 1..=30 {
+            scale.observe(Duration::from_secs(seconds), 100.0);
+        }
+        assert_eq!(scale.ceiling, high);
+        scale.observe(Duration::from_secs(31), 100.0);
+        assert_eq!(scale.ceiling, 1024.0);
+        scale.observe(Duration::from_secs(32), 1_000_000.0);
+        assert!(scale.ceiling >= 1_000_000.0);
+        assert!(rate_band(f64::MAX).is_finite());
+    }
+
+    #[test]
+    fn missing_rate_samples_and_pauses_cannot_count_toward_scale_release() {
+        let mut scale = RateScale::new();
+        scale.observe(Duration::ZERO, 100_000.0);
+        for seconds in 1..=20 {
+            scale.observe(Duration::from_secs(seconds), 100.0);
+        }
+        let high = scale.ceiling;
+        scale.observe(Duration::from_secs(200), 100.0);
+        assert_eq!(scale.ceiling, high);
+        assert_eq!(scale.low_since, Some(Duration::from_secs(200)));
+        let mut history = TimeSeries::<2>::new(MetricUnit::BytesPerSecond);
+        history.push(sample(0, Some(100_000.0))).unwrap();
+        history.push(sample(1, Some(0.0))).unwrap();
+        history.push(sample(2, Some(0.0))).unwrap();
+        assert!(history.rate_scale.low_since.is_some());
+        history.push(sample(3, None)).unwrap();
+        assert!(history.rate_scale.low_since.is_none());
+    }
 
     fn value(value: f64, unit: MetricUnit) -> MetricValue {
         MetricValue::new(value, unit, 1, VisualPriority::Primary).unwrap()

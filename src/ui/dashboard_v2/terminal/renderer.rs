@@ -312,7 +312,10 @@ mod tests {
     fn dashboard_cpu_route_uses_product_value_and_full_width_plot() {
         let buffer = render_cpu(DashboardPreset::Standard, 43, 10);
         let output = buffer_text(&buffer);
-        assert_eq!(output.matches("42%").count(), 1);
+        assert_eq!(
+            output.lines().filter(|line| line.trim() == "42%").count(),
+            1
+        );
         assert_eq!(buffer[(0, 2)].symbol(), "4");
 
         let mut chart_cells = 0;
@@ -328,7 +331,10 @@ mod tests {
                 }
             }
         }
-        assert!(chart_cells >= 5);
+        assert!(
+            chart_cells > 0,
+            "the two-second fixture occupies only the real portion of the two-minute window"
+        );
     }
 
     #[test]
@@ -336,9 +342,15 @@ mod tests {
         let standard = render_cpu(DashboardPreset::Standard, 48, 8);
         let standard_text = buffer_text(&standard);
         assert!(standard_text.contains("CPU"));
-        assert_eq!(standard_text.matches("42%").count(), 1);
+        assert_eq!(
+            standard_text
+                .lines()
+                .filter(|line| line.trim() == "42%")
+                .count(),
+            1
+        );
         assert_eq!(standard[(0, 2)].symbol(), "4");
-        assert!(standard_text.contains("↑ +12%"));
+        assert!(standard_text.contains("↑ +12pp"));
         assert!(standard_text.contains("8 cores"));
         assert!(standard_text.contains("55.0°C"));
         assert!(!standard_text.contains("normal"));
@@ -554,7 +566,7 @@ mod tests {
         let memory_text = buffer_text(&buffer);
         assert!(memory_text.contains("60%"));
         assert!(!memory_text.lines().any(|line| line.trim() == "60%"));
-        assert!(!memory_text.contains('━'));
+        assert!(memory_text.contains('━'));
         let memory_lines: Vec<&str> = memory_text.lines().collect();
         let memory_value_line = memory_lines
             .iter()
@@ -562,7 +574,7 @@ mod tests {
             .expect("memory value row");
         assert!(memory_lines[memory_value_line].contains("60%"));
         assert!(
-            memory_lines[memory_value_line + 2..memory_value_line + 5]
+            memory_lines[memory_value_line + 3..]
                 .iter()
                 .flat_map(|line| line.chars())
                 .any(|c| ('\u{2800}'..='\u{28ff}').contains(&c))
@@ -587,9 +599,9 @@ mod tests {
             )
             .unwrap();
         let gpu_text = buffer_text(&gpu_buffer);
-        assert!(gpu_text.contains("0.7 / 8 GB"));
+        assert!(gpu_text.contains("0.7 / 8 GiB"));
         assert!(gpu_text.contains("53°C"));
-        assert!(!gpu_text.contains("678.0 MB"));
+        assert!(!gpu_text.contains("678.0 MiB"));
 
         let storage =
             WidgetRenderer::render_storage(storage_model(), context(DashboardPreset::Standard))
@@ -630,6 +642,30 @@ mod tests {
             .count();
         assert!(vital_lines >= 2);
         assert!(!buffer_text(&comparison).contains("60s"));
+    }
+
+    #[test]
+    fn storage_preserves_both_io_histories_in_every_responsive_profile() {
+        for preset in [
+            DashboardPreset::Compact,
+            DashboardPreset::Standard,
+            DashboardPreset::Widescreen,
+            DashboardPreset::LargeWidescreen,
+        ] {
+            let model = WidgetRenderer::render_storage(storage_model(), context(preset))
+                .unwrap()
+                .unwrap();
+            assert!(
+                model
+                    .block(super::super::super::BlockId::SecondarySparkline)
+                    .is_some()
+            );
+            assert!(
+                model
+                    .block(super::super::super::BlockId::TertiarySparkline)
+                    .is_some()
+            );
+        }
     }
 
     #[test]
@@ -752,7 +788,10 @@ mod tests {
         let text = buffer_text(&buffer);
         assert!(text.contains("sda"));
         assert!(text.contains("nvme0n1"));
-        assert!(text.matches('━').count() + text.matches('─').count() >= 72 * 2);
+        assert!(
+            text.matches('━').count() + text.matches('─').count() + text.matches('╸').count()
+                >= 72 * 2
+        );
     }
 
     #[test]
@@ -843,14 +882,14 @@ mod tests {
             let text = buffer_text(&buffer);
             assert!(text.contains("RTX 4060"));
             assert!(text.contains("26%"));
-            assert!(!text.contains('━'));
+            assert_eq!(text.contains('━'), height >= 6);
             assert!(
                 text.chars()
                     .filter(|c| ('\u{2800}'..='\u{28ff}').contains(c))
                     .count()
-                    >= usize::from(width)
+                    > 0
             );
-            assert!(text.contains("0.7 / 8 GB"));
+            assert!(text.contains("0.7 / 8 GiB"));
             assert!(text.contains("51°C"));
             assert!(text.contains("210 MHz"));
         }

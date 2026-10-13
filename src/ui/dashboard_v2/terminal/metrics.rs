@@ -15,11 +15,14 @@ use super::super::{
 };
 use super::blocks::write;
 use super::history_chart::{self, Scale};
+use super::instruments::{capacity_meter, format_bytes, format_rate, short_rate};
 use super::renderer::TerminalRenderError;
 
 // A medium-weight pair: more legible than a thin rule, without returning to
 // the visually heavy full blocks used by the original meters.
+#[cfg(test)]
 const METER_FILL_GLYPH: char = '━';
+#[cfg(test)]
 const METER_TRACK_GLYPH: char = '─';
 
 pub(super) fn render(
@@ -144,11 +147,19 @@ fn render_memory(
             value_style(model, theme),
         );
     }
-    let offset = if secondary.is_empty() || inline_context {
+    let mut offset = if secondary.is_empty() || inline_context {
         1
     } else {
         2
     };
+    if body.height >= offset + 2 {
+        let ratio = used
+            .zip(total)
+            .filter(|(_, total)| total.value() > 0.0)
+            .map(|(used, total)| used.value() / total.value());
+        capacity_meter(line(body, offset), ratio, theme.primary, theme, buffer);
+        offset += 1;
+    }
     render_percent_history(model, history_chart::region(body, offset), theme, buffer);
 }
 
@@ -279,7 +290,7 @@ fn render_gpu(
     } else if !clock.is_empty() {
         details.push(clock);
     }
-    let offset = write_context_rows(
+    let mut offset = write_context_rows(
         body,
         &details.join(" · "),
         context_style(model, theme),
@@ -287,6 +298,21 @@ fn render_gpu(
         value_style(model, theme),
         buffer,
     );
+    if body.height >= offset + 3
+        && let Some((used, total)) = context
+            .vram_used()
+            .zip(context.vram_total())
+            .filter(|(_, total)| total.value() > 0.0)
+    {
+        capacity_meter(
+            line(body, offset),
+            Some(used.value() / total.value()),
+            theme.border_focused,
+            theme,
+            buffer,
+        );
+        offset += 1;
+    }
     render_percent_history(model, history_chart::region(body, offset), theme, buffer);
 }
 
@@ -357,7 +383,26 @@ fn render_network(
         (sparkline(model, BlockId::PrimarySparkline), download_style),
         (sparkline(model, BlockId::SecondarySparkline), upload_style),
     ];
-    history_chart::render(&series, Scale::Network, graph, buffer);
+    for (row, (history, _)) in series.iter().enumerate() {
+        if let Some(peak) = history.as_ref().and_then(history_chart::recent_peak) {
+            let text = format!("pk {}", short_rate(peak));
+            let width = text.chars().count() as u16;
+            let value_width = if row == 0 {
+                download.chars().count()
+            } else {
+                upload.chars().count()
+            } as u16;
+            if body.width >= width + value_width + 5 && row < usize::from(body.height) {
+                write(
+                    buffer,
+                    Rect::new(body.right() - width, body.y + row as u16, width, 1),
+                    &text,
+                    context_style(model, theme),
+                );
+            }
+        }
+    }
+    history_chart::flow_instrument(&series, graph, ["↓ RECEIVE", "↑ SEND"], theme, buffer);
 }
 
 fn write_flow_value(
@@ -397,9 +442,9 @@ fn network_inventory_label(inventory: &HardwareInventory) -> Option<String> {
         first = first.or(Some(network.name.as_str()));
     }
     match (count, first) {
-        (0, _) => Some("no physical interface".to_owned()),
+        (0, _) => Some("no network interface".to_owned()),
         (1, Some(name)) => Some(name.to_owned()),
-        (count, _) => Some(format!("{count} interfaces")),
+        (count, _) => Some(format!("Σ {count} interfaces")),
     }
 }
 
@@ -469,6 +514,27 @@ fn render_storage(
             value_style(model, theme),
         );
     }
+    let offset = if context.latency().is_some() { 4 } else { 3 };
+    render_storage_history(model, history_chart::region(body, offset), theme, buffer);
+}
+
+fn render_storage_history(
+    model: WidgetRenderModel,
+    area: Rect,
+    theme: &Theme,
+    buffer: &mut Buffer,
+) {
+    let series = [
+        (
+            sparkline(model, BlockId::SecondarySparkline),
+            Style::default().fg(theme.info).bg(theme.surface),
+        ),
+        (
+            sparkline(model, BlockId::TertiarySparkline),
+            Style::default().fg(theme.primary).bg(theme.surface),
+        ),
+    ];
+    history_chart::flow_instrument(&series, area, ["R READ", "W WRITE"], theme, buffer);
 }
 
 fn storage_context_activity(context: &super::super::StorageContextBlock) -> String {
@@ -496,7 +562,11 @@ fn render_gpu_inventory(
     let primary = &inventory.gpus[primary_index];
     let primary_name = gpu_display_name(&primary.name);
     let title = if inventory.gpus.len() > 1 {
-        format!("GPU  {primary_name}  ({}/{})", 1, inventory.gpus.len())
+        format!(
+            "GPU  {primary_name}  ({}/{})",
+            primary_index + 1,
+            inventory.gpus.len()
+        )
     } else {
         format!("GPU  {primary_name}")
     };
@@ -542,7 +612,7 @@ fn render_gpu_inventory(
                 context_value_style_for_theme(theme),
             );
         }
-        let offset = write_context_rows(
+        let mut offset = write_context_rows(
             body,
             &gpu_context_with_frequency(primary, !inline_clock),
             context_style_for_theme(theme),
@@ -550,6 +620,21 @@ fn render_gpu_inventory(
             context_value_style_for_theme(theme),
             buffer,
         );
+        if body.height >= offset + 3
+            && let Some((used, total)) = primary
+                .vram_used_bytes
+                .zip(primary.vram_total_bytes)
+                .filter(|(_, total)| *total > 0.0)
+        {
+            capacity_meter(
+                line(body, offset),
+                Some(used / total),
+                theme.border_focused,
+                theme,
+                buffer,
+            );
+            offset += 1;
+        }
         render_percent_history(model, history_chart::region(body, offset), theme, buffer);
     } else {
         write(
@@ -660,26 +745,7 @@ fn render_segmented_meter(
     theme: &Theme,
     buffer: &mut Buffer,
 ) {
-    if area.width == 0 || area.height == 0 {
-        return;
-    }
-    let filled = (f64::from(area.width) * value.clamp(0.0, 1.0)).round() as u16;
-    for index in 0..area.width {
-        let (character, style) = if index < filled {
-            (
-                METER_FILL_GLYPH,
-                Style::default().fg(fill).bg(theme.surface),
-            )
-        } else {
-            (
-                METER_TRACK_GLYPH,
-                Style::default().fg(theme.border).bg(theme.surface),
-            )
-        };
-        buffer[(area.x + index, area.y)]
-            .set_char(character)
-            .set_style(style);
-    }
+    capacity_meter(area, Some(value), fill, theme, buffer);
 }
 
 fn value_style_for_inventory(
@@ -792,6 +858,19 @@ fn render_storage_inventory(
             &format!("+{} devices", inventory.storages.len() - visible),
             context_style_for_theme(theme),
         );
+    } else {
+        let used_rows = (inventory.storages.len() as u16).saturating_mul(rows_per_device);
+        let mut offset = used_rows;
+        if content.height.saturating_sub(offset) >= 4 && inventory.storages.len() > 1 {
+            write(
+                buffer,
+                line(content, offset),
+                &format!("I/O {} · R / W", inventory.storages[0].name),
+                context_style_for_theme(theme),
+            );
+            offset += 1;
+        }
+        render_storage_history(model, history_chart::region(content, offset), theme, buffer);
     }
 }
 
@@ -1014,10 +1093,18 @@ fn render_percent_history(
     theme: &Theme,
     buffer: &mut Buffer,
 ) {
-    history_chart::render(
+    history_chart::instrument(
         &[(
             sparkline(model, BlockId::PrimarySparkline),
-            Style::default().fg(theme.chart_primary).bg(theme.surface),
+            Style::default()
+                .fg(
+                    if model.visual().widget_id() == super::super::DashboardWidgetId::Gpu {
+                        theme.border_focused
+                    } else {
+                        theme.chart_primary
+                    },
+                )
+                .bg(theme.surface),
         )],
         if model.visual().widget_id() == super::super::DashboardWidgetId::Memory {
             Scale::Memory
@@ -1025,6 +1112,7 @@ fn render_percent_history(
             Scale::Percent
         },
         area,
+        theme,
         buffer,
     );
 }
@@ -1111,33 +1199,22 @@ fn format_frequency(value: f64) -> String {
     }
 }
 
-fn format_bytes(value: f64) -> String {
-    let absolute = value.abs();
-    if absolute >= 1024.0 * 1024.0 * 1024.0 {
-        format!("{:.1} GB", value / 1024.0 / 1024.0 / 1024.0)
-    } else if absolute >= 1024.0 * 1024.0 {
-        format!("{:.1} MB", value / 1024.0 / 1024.0)
-    } else if absolute >= 1024.0 {
-        format!("{:.1} KB", value / 1024.0)
-    } else {
-        format!("{value:.0} B")
-    }
-}
-
 fn format_compact_capacity(used: f64, total: f64) -> String {
     const GIBIBYTE: f64 = 1024.0 * 1024.0 * 1024.0;
     const MEBIBYTE: f64 = 1024.0 * 1024.0;
     if total >= GIBIBYTE {
-        format!("{:.1} / {:.0} GB", used / GIBIBYTE, total / GIBIBYTE)
+        let capacity = total / GIBIBYTE;
+        let capacity = if (capacity - capacity.round()).abs() < 0.05 {
+            format!("{capacity:.0}")
+        } else {
+            format!("{capacity:.1}")
+        };
+        format!("{:.1} / {capacity} GiB", used / GIBIBYTE)
     } else if total >= MEBIBYTE {
-        format!("{:.0} / {:.0} MB", used / MEBIBYTE, total / MEBIBYTE)
+        format!("{:.0} / {:.0} MiB", used / MEBIBYTE, total / MEBIBYTE)
     } else {
         format!("{} / {}", format_bytes(used), format_bytes(total))
     }
-}
-
-fn format_rate(value: f64) -> String {
-    format!("{}/s", format_bytes(value))
 }
 
 fn to_rect(bounds: DashboardBounds, buffer: Rect) -> Result<Rect, TerminalRenderError> {
@@ -1166,8 +1243,9 @@ mod tests {
         let gibibyte = 1024.0 * 1024.0 * 1024.0;
         assert_eq!(
             format_compact_capacity(0.7 * gibibyte, 8.0 * gibibyte),
-            "0.7 / 8 GB"
+            "0.7 / 8 GiB"
         );
+        assert_eq!(format_compact_capacity(2e9, 8e9), "1.9 / 7.5 GiB");
     }
 
     #[test]

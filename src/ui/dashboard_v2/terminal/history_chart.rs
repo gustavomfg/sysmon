@@ -1,11 +1,14 @@
 //! Shared, allocation-free line rasterizer for the existing terminal regions.
 //! Each terminal cell provides 2 × 4 Braille subpixels. No smoothing changes
 //! telemetry, and missing samples break the line instead of implying activity.
+use super::instruments::short_rate;
+use crate::theme::Theme;
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
     style::{Color, Modifier, Style},
 };
+use std::time::Duration;
 
 use super::super::{chart::SparklineModel, metrics::CHART_POINTS};
 
@@ -18,6 +21,7 @@ pub(super) enum Scale {
     Network,
 }
 
+#[cfg(test)]
 impl Scale {
     fn bounds(self, series: &[Series], limit: usize) -> (f64, f64) {
         match self {
@@ -81,31 +85,385 @@ impl Scale {
     }
 }
 
+#[cfg(test)]
 fn visible_sample_limit(width: u16) -> usize {
     (usize::from(width) / 2 + 1).clamp(2, super::super::chart::VISIBLE_HISTORY_SAMPLES)
 }
 
 /// Tallest chart a card grants; spare card rows become chart resolution.
-pub(super) const MAX_CHART_ROWS: u16 = 5;
+pub(super) const MAX_CHART_ROWS: u16 = 32;
 
 /// Use up to `MAX_CHART_ROWS`, degrading only when text leaves less room.
 pub(super) fn region(body: Rect, offset: u16) -> Rect {
     Rect::new(
         body.x,
-        body.y + offset.min(body.height),
+        body.y.saturating_add(offset.min(body.height)),
         body.width,
         body.height.saturating_sub(offset).min(MAX_CHART_ROWS),
     )
 }
 
-pub(super) fn render(series: &[Series], scale: Scale, area: Rect, buffer: &mut Buffer) {
+#[derive(Clone, Copy)]
+struct PlotWindow {
+    end: Duration,
+    span: Duration,
+    limit: usize,
+}
+
+pub(super) const STANDARD_WINDOW: Duration = Duration::from_secs(120);
+
+fn window(series: &[Series], expanded: bool) -> PlotWindow {
+    let end = series
+        .iter()
+        .filter_map(|(model, _)| model.as_ref())
+        .map(SparklineModel::latest_offset)
+        .max()
+        .unwrap_or_default();
+    let retained = series
+        .iter()
+        .filter_map(|(model, _)| model.as_ref())
+        .map(|model| model.duration() + end.saturating_sub(model.latest_offset()))
+        .max()
+        .unwrap_or_default();
+    let span = if expanded {
+        Duration::from_secs((retained.as_secs().saturating_add(59) / 60).saturating_mul(60))
+            .max(STANDARD_WINDOW)
+    } else {
+        STANDARD_WINDOW
+    };
+    PlotWindow {
+        end,
+        span,
+        limit: super::super::chart::VISIBLE_HISTORY_SAMPLES,
+    }
+}
+
+pub(super) fn recent_peak(model: &SparklineModel<CHART_POINTS>) -> Option<f64> {
+    model
+        .timed_samples()
+        .filter(|(at, _)| model.latest_offset().saturating_sub(*at) <= STANDARD_WINDOW)
+        .filter_map(|(_, value)| value)
+        .reduce(f64::max)
+}
+
+/// Real time, a visible domain, actual extrema and explicit telemetry gaps.
+/// No moving average or visual frame counter changes the measured trace.
+pub(super) fn instrument(
+    series: &[Series],
+    scale: Scale,
+    area: Rect,
+    theme: &Theme,
+    buffer: &mut Buffer,
+) {
+    draw_instrument(
+        series,
+        scale,
+        area,
+        window(series, area.height >= 10),
+        None,
+        theme,
+        buffer,
+    );
+}
+
+/// Expanded flows use two lanes with one shared time and rate domain.
+pub(super) fn flow_instrument(
+    series: &[Series; 2],
+    area: Rect,
+    labels: [&str; 2],
+    theme: &Theme,
+    buffer: &mut Buffer,
+) {
+    if area.is_empty() {
+        return;
+    }
+    if (3..12).contains(&area.height) {
+        instrument(series, Scale::Network, area, theme, buffer);
+        return;
+    }
+    let domain = window(series, area.height >= 10);
+    let peak = series
+        .iter()
+        .filter_map(|(model, _)| model.as_ref())
+        .flat_map(SparklineModel::timed_samples)
+        .filter(|(at, _)| domain.end.saturating_sub(*at) <= domain.span)
+        .filter_map(|(_, value)| value)
+        .fold(0.0_f64, f64::max);
+    let held = series
+        .iter()
+        .filter_map(|(model, _)| model.as_ref())
+        .map(SparklineModel::rate_ceiling)
+        .fold(1024.0_f64, f64::max);
+    let upper = super::super::chart::rate_band(peak.max(held));
+    // A cell has one foreground color. Separate compact channels rather than
+    // coloring overlapping receive/send dots as if they belonged to one series.
+    if area.height <= 2 {
+        for index in 0..2 {
+            let lane = if area.height == 1 {
+                let width = area.width.saturating_sub(1) / 2;
+                Rect::new(area.x + (width + 1) * index as u16, area.y, width, 1)
+            } else {
+                Rect::new(area.x, area.y + index as u16, area.width, 1)
+            };
+            if lane.width < 3 {
+                continue;
+            }
+            let prefix = labels[index].chars().take(1).collect::<String>();
+            put(buffer, lane, &prefix, series[index].1);
+            let plot = Rect::new(lane.x + 2, lane.y, lane.width - 2, 1);
+            render_window(
+                &series[index..index + 1],
+                (0.0, upper),
+                plot,
+                domain,
+                buffer,
+            );
+        }
+        return;
+    }
+    let height = (area.height - 1) / 2;
+    for index in 0..2 {
+        let y = area.y + (height + 1) * index as u16;
+        let lane_height = if index == 0 {
+            height
+        } else {
+            area.bottom().saturating_sub(y)
+        };
+        let lane = Rect::new(area.x, y, area.width, lane_height);
+        put(buffer, lane, labels[index], series[index].1);
+        let plot = Rect::new(
+            lane.x,
+            lane.y + 1,
+            lane.width,
+            lane.height.saturating_sub(1),
+        );
+        draw_instrument(
+            &series[index..index + 1],
+            Scale::Network,
+            plot,
+            domain,
+            Some(upper),
+            theme,
+            buffer,
+        );
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_instrument(
+    series: &[Series],
+    scale: Scale,
+    area: Rect,
+    domain: PlotWindow,
+    shared_ceiling: Option<f64>,
+    theme: &Theme,
+    buffer: &mut Buffer,
+) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let peak = series
+        .iter()
+        .filter_map(|(model, _)| model.as_ref())
+        .flat_map(SparklineModel::timed_samples)
+        .filter(|(at, _)| domain.end.saturating_sub(*at) <= domain.span)
+        .filter_map(|(_, value)| value)
+        .filter(|value| value.is_finite())
+        .reduce(f64::max);
+    let upper = if matches!(scale, Scale::Network) {
+        let held = series
+            .iter()
+            .filter_map(|(model, _)| model.as_ref())
+            .map(SparklineModel::rate_ceiling)
+            .fold(1024.0_f64, f64::max);
+        shared_ceiling
+            .unwrap_or_else(|| super::super::chart::rate_band(peak.unwrap_or(0.0).max(held)))
+    } else {
+        1.0
+    };
+    let labeled = area.width >= 18 && area.height >= 3;
+    let upper_text = if matches!(scale, Scale::Network) {
+        short_rate(upper)
+    } else {
+        "100%".to_owned()
+    };
+    let gutter = if labeled {
+        (upper_text.chars().count() as u16 + 1).min(area.width.saturating_sub(8))
+    } else {
+        0
+    };
+    let plot = Rect::new(
+        area.x.saturating_add(gutter),
+        area.y,
+        area.width.saturating_sub(gutter),
+        area.height.saturating_sub(u16::from(labeled)),
+    );
+    render_window(series, (0.0, upper), plot, domain, buffer);
+    // A single stable endpoint accent identifies the latest real reading.
+    for model in series.iter().filter_map(|(model, _)| model.as_ref()) {
+        if let Some((at, Some(value))) = model.timed_samples().last() {
+            let age = domain.end.saturating_sub(at);
+            if age > domain.span || !value.is_finite() {
+                continue;
+            }
+            let x = plot.x
+                + (((1.0 - age.as_secs_f64() / domain.span.as_secs_f64())
+                    * f64::from(plot.width.saturating_mul(2).saturating_sub(1)))
+                .round() as u16)
+                    / 2;
+            let y = plot.y
+                + (((1.0 - (value / upper).clamp(0.0, 1.0))
+                    * f64::from(plot.height.saturating_mul(4).saturating_sub(1)))
+                .round() as u16)
+                    / 4;
+            let clip = *buffer.area();
+            if x >= clip.x && x < clip.right() && y >= clip.y && y < clip.bottom() {
+                buffer[(x, y)].modifier.insert(Modifier::BOLD);
+            }
+        }
+    }
+    if !labeled {
+        return;
+    }
+    let label_style = Style::default().fg(theme.text_muted).bg(theme.surface);
+    put(
+        buffer,
+        Rect::new(area.x, area.y, gutter.saturating_sub(1), 1),
+        &upper_text,
+        label_style,
+    );
+    put(
+        buffer,
+        Rect::new(
+            area.x,
+            plot.bottom().saturating_sub(1),
+            gutter.saturating_sub(1),
+            1,
+        ),
+        "0",
+        label_style,
+    );
+    if plot.height >= 6 {
+        let text = if matches!(scale, Scale::Network) {
+            short_rate(upper / 2.0)
+        } else {
+            "50%".to_owned()
+        };
+        put(
+            buffer,
+            Rect::new(
+                area.x,
+                plot.y + plot.height / 2,
+                gutter.saturating_sub(1),
+                1,
+            ),
+            &text,
+            label_style,
+        );
+    }
+    // Measuring guides stay quiet and never overwrite the trace.
+    let visible = plot.intersection(*buffer.area());
+    for y in visible.y..visible.bottom() {
+        if y != plot.y
+            && y != plot.bottom() - 1
+            && !(plot.height >= 6 && y == plot.y + plot.height / 2)
+        {
+            continue;
+        }
+        for x in visible.x..visible.right() {
+            if (x - plot.x).is_multiple_of(4) && buffer[(x, y)].symbol() == " " {
+                buffer[(x, y)].set_symbol("·").set_fg(theme.chart_grid);
+            }
+        }
+    }
+    let bottom = Rect::new(area.x, area.bottom().saturating_sub(1), area.width, 1);
+    let seconds = domain.span.as_secs();
+    let age = if seconds >= 60 {
+        format!("-{}m", seconds / 60)
+    } else {
+        format!("-{seconds}s")
+    };
+    put(buffer, bottom, &age, label_style);
+    put(
+        buffer,
+        Rect::new(bottom.right().saturating_sub(4), bottom.y, 4, 1),
+        "last",
+        label_style,
+    );
+    let summary = peak.map_or_else(
+        || "no history".to_owned(),
+        |value| {
+            if matches!(scale, Scale::Network) {
+                format!("pk {}", short_rate(value))
+            } else {
+                format!("pk {:.0}%", value.clamp(0.0, 1.0) * 100.0)
+            }
+        },
+    );
+    let size = summary.chars().count() as u16;
+    if size + age.len() as u16 + 6 <= bottom.width {
+        put(
+            buffer,
+            Rect::new(bottom.x + (bottom.width - size) / 2, bottom.y, size, 1),
+            &summary,
+            label_style,
+        );
+    }
+}
+
+fn put(buffer: &mut Buffer, area: Rect, text: &str, style: Style) {
+    let clip = *buffer.area();
+    for (index, character) in text.chars().take(usize::from(area.width)).enumerate() {
+        let x = area.x.saturating_add(index as u16);
+        if x >= clip.x && x < clip.right() && area.y >= clip.y && area.y < clip.bottom() {
+            buffer[(x, area.y)].set_char(character).set_style(style);
+        }
+    }
+}
+
+// Fit-to-data test viewport isolates geometric rasterization. The live
+// instrument always selects a duration independent of terminal columns.
+#[cfg(test)]
+fn render(series: &[Series], scale: Scale, area: Rect, buffer: &mut Buffer) {
+    let limit = visible_sample_limit(area.width);
+    let end = series
+        .iter()
+        .filter_map(|(model, _)| model.as_ref())
+        .map(SparklineModel::latest_offset)
+        .max()
+        .unwrap_or_default();
+    let first = series
+        .iter()
+        .filter_map(|(model, _)| model.as_ref())
+        .filter_map(|model| {
+            model
+                .timed_samples()
+                .nth(model.sample_count().saturating_sub(limit))
+        })
+        .map(|(at, _)| at)
+        .min()
+        .unwrap_or(end);
+    let domain = PlotWindow {
+        end,
+        span: end.saturating_sub(first).max(Duration::from_nanos(1)),
+        limit,
+    };
+    render_window(series, scale.bounds(series, limit), area, domain, buffer);
+}
+
+fn render_window(
+    series: &[Series],
+    bounds: (f64, f64),
+    area: Rect,
+    domain: PlotWindow,
+    buffer: &mut Buffer,
+) {
     // Keep geometry in the requested viewport when its edges are clipped.
     let clip = area.intersection(*buffer.area());
     if area.is_empty() || clip.is_empty() {
         return;
     }
-    let limit = visible_sample_limit(area.width);
-    let (lower, upper) = scale.bounds(series, limit);
+    let (lower, upper) = bounds;
     let width = usize::from(area.width) * 2;
     let height = usize::from(area.height) * 4;
     let fill_strength = if series.iter().filter(|(model, _)| model.is_some()).count() > 1 {
@@ -131,29 +489,38 @@ pub(super) fn render(series: &[Series], scale: Scale, area: Rect, buffer: &mut B
             for (series_index, (model, style)) in series.iter().enumerate() {
                 let Some(model) = model else { continue };
                 canvas.fill.fill(0.0);
-                let count = model.sample_count().min(limit);
                 let mut previous = None;
-                for (index, sample) in model.visible_samples(limit).enumerate() {
+                let mut previous_at = None;
+                let maximum_gap = model
+                    .cadence()
+                    .saturating_mul(3)
+                    .max(Duration::from_secs(10));
+                for (at, sample) in model
+                    .timed_samples()
+                    .skip(model.sample_count().saturating_sub(domain.limit))
+                {
                     let Some(value) = sample.filter(|value| value.is_finite()) else {
                         previous = None;
+                        previous_at = None;
                         continue;
                     };
                     // Do not quantize vertices: round only the interpolated
                     // geometric dots in DDA, never the telemetry samples.
-                    let x = if count <= 1 {
-                        (width - 1) as f64
-                    } else {
-                        index as f64 * (width - 1) as f64 / (count - 1) as f64
-                    };
+                    let age = domain.end.saturating_sub(at).as_secs_f64();
+                    let x = (1.0 - age / domain.span.as_secs_f64()) * (width - 1) as f64;
                     let y = (1.0 - ((value - lower) / (upper - lower)).clamp(0.0, 1.0))
                         * (height - 1) as f64;
                     let current = (x, y);
-                    let start = previous.unwrap_or(if count == 1 { (0.0, y) } else { current });
+                    if previous_at.is_some_and(|last| at.saturating_sub(last) > maximum_gap) {
+                        previous = None;
+                    }
+                    let start = previous.unwrap_or(current);
                     canvas.segment(start, current, series_index);
                     if matches!(style.fg, Some(Color::Rgb(..))) {
                         canvas.shade_segment(start, current, height);
                     }
                     previous = Some(current);
+                    previous_at = Some(at);
                 }
                 if let Some(tint @ Color::Rgb(..)) = style.fg {
                     for (column, background) in backgrounds.iter_mut().take(columns).enumerate() {
@@ -202,6 +569,9 @@ impl DotCanvas {
     /// sub-columns. Fractional coverage avoids a solid shelf above the trace;
     /// using geometry also makes clipped charts and gaps shade correctly.
     fn shade_segment(&mut self, start: (f64, f64), end: (f64, f64), height: usize) {
+        if end.0 < self.x as f64 || start.0 > (self.x + self.columns * 2 - 1) as f64 {
+            return;
+        }
         let first = (start.0.ceil().max(self.x as f64)) as usize;
         let last = (end.0.floor().min((self.x + self.columns * 2 - 1) as f64)) as usize;
         if first > last {
@@ -325,6 +695,219 @@ mod tests {
     use super::*;
     use ratatui::style::Color;
     use std::time::Duration;
+
+    fn timed_model(
+        values: &[(u64, Option<f64>)],
+        unit: MetricUnit,
+    ) -> SparklineModel<CHART_POINTS> {
+        let mut history = TimeSeries::<120>::new(unit);
+        for &(at, value) in values {
+            history
+                .push(
+                    TimeSample::new(
+                        Duration::from_secs(at),
+                        value,
+                        if value.is_some() {
+                            MetricAvailability::Available
+                        } else {
+                            MetricAvailability::Unavailable
+                        },
+                        None,
+                    )
+                    .unwrap(),
+                )
+                .unwrap();
+        }
+        history.sparkline(TimeWindow::Long)
+    }
+
+    #[test]
+    fn instrument_does_not_invent_history_at_startup() {
+        let theme = Theme::pulse();
+        let area = Rect::new(0, 0, 40, 6);
+        let mut buffer = Buffer::empty(area);
+        instrument(
+            &[(
+                Some(timed_model(&[(0, Some(0.6))], MetricUnit::Percent)),
+                Style::default().fg(theme.primary),
+            )],
+            Scale::Percent,
+            area,
+            &theme,
+            &mut buffer,
+        );
+        let dots = buffer
+            .content
+            .iter()
+            .enumerate()
+            .filter(|(_, cell)| {
+                cell.symbol()
+                    .chars()
+                    .next()
+                    .is_some_and(|ch| ('\u{2801}'..='\u{28ff}').contains(&ch))
+            })
+            .map(|(index, _)| index % 40)
+            .collect::<Vec<_>>();
+        assert_eq!(dots, vec![39]);
+    }
+
+    #[test]
+    fn temporal_positions_preserve_irregular_spacing_and_long_pauses() {
+        let theme = Theme::pulse();
+        let area = Rect::new(0, 0, 120, 4);
+        let mut buffer = Buffer::empty(area);
+        let series = [(
+            Some(timed_model(
+                &[(0, Some(0.5)), (1, Some(0.5)), (120, Some(0.5))],
+                MetricUnit::Percent,
+            )),
+            Style::default().fg(theme.primary),
+        )];
+        render_window(
+            &series,
+            (0.0, 1.0),
+            area,
+            PlotWindow {
+                end: Duration::from_secs(120),
+                span: STANDARD_WINDOW,
+                limit: 120,
+            },
+            &mut buffer,
+        );
+        assert!((0..4).any(|y| mask(&buffer, 0, y) > 0));
+        assert!((0..4).any(|y| mask(&buffer, 119, y) > 0));
+        assert!(
+            (20..100).all(|x| (0..4).all(|y| mask(&buffer, x, y) == 0)),
+            "collection hiatus must not become a connecting line"
+        );
+    }
+
+    #[test]
+    fn resizing_keeps_visible_peaks_and_the_same_two_minute_window() {
+        let theme = Theme::pulse();
+        let values = (0..120)
+            .map(|at| (at, Some(if at == 30 { 1.0 } else { 0.1 })))
+            .collect::<Vec<_>>();
+        let chart = timed_model(&values, MetricUnit::Percent);
+        for width in [12, 32, 120, 300] {
+            let area = Rect::new(0, 0, width, 6);
+            let mut buffer = Buffer::empty(area);
+            instrument(
+                &[(Some(chart), Style::default().fg(theme.primary))],
+                Scale::Percent,
+                area,
+                &theme,
+                &mut buffer,
+            );
+            assert!(
+                (0..width).any(|x| mask(&buffer, x, 0) > 0),
+                "100% peak survives at {width} columns"
+            );
+            if width >= 18 {
+                let text: String = buffer.content.iter().map(|cell| cell.symbol()).collect();
+                assert!(text.contains("-2m"));
+                assert!(text.contains("pk 100%"));
+            }
+        }
+    }
+
+    #[test]
+    fn instrument_clipping_preserves_axes_trace_and_fill() {
+        let theme = Theme::pulse();
+        let area = Rect::new(0, 0, 60, 12);
+        let series = [(
+            Some(timed_model(
+                &[(0, Some(0.1)), (60, Some(0.9)), (120, Some(0.4))],
+                MetricUnit::Percent,
+            )),
+            Style::default().fg(theme.primary),
+        )];
+        let mut full = Buffer::empty(area);
+        full.set_style(area, Style::default().bg(theme.surface));
+        instrument(&series, Scale::Percent, area, &theme, &mut full);
+        let clip = Rect::new(3, 2, 20, 10);
+        let mut partial = Buffer::empty(clip);
+        partial.set_style(clip, Style::default().bg(theme.surface));
+        instrument(&series, Scale::Percent, area, &theme, &mut partial);
+        for y in clip.y..clip.bottom() {
+            for x in clip.x..clip.right() {
+                assert_eq!(partial[(x, y)], full[(x, y)]);
+            }
+        }
+    }
+
+    #[test]
+    fn expanded_flow_lanes_share_the_scale_and_retained_time_window() {
+        let theme = Theme::pulse();
+        let area = Rect::new(0, 0, 80, 30);
+        let mut buffer = Buffer::empty(area);
+        let down = timed_model(
+            &[
+                (0, Some(3_145_728.0)),
+                (120, Some(1_048_576.0)),
+                (238, Some(1_048_576.0)),
+            ],
+            MetricUnit::BytesPerSecond,
+        );
+        let up = timed_model(
+            &[(0, Some(512.0)), (120, Some(512.0)), (238, Some(512.0))],
+            MetricUnit::BytesPerSecond,
+        );
+        flow_instrument(
+            &[
+                (Some(down), Style::default().fg(theme.info)),
+                (Some(up), Style::default().fg(theme.primary)),
+            ],
+            area,
+            ["RECEIVE", "SEND"],
+            &theme,
+            &mut buffer,
+        );
+        let text: String = buffer.content.iter().map(|cell| cell.symbol()).collect();
+        assert_eq!(text.matches("4MiB/s").count(), 2);
+        assert_eq!(text.matches("-4m").count(), 2);
+        assert!(text.contains("RECEIVE") && text.contains("SEND"));
+    }
+
+    #[test]
+    fn compact_flows_keep_both_directions_distinct_and_clip_safely() {
+        let theme = Theme::pulse();
+        let chart = timed_model(
+            &[(0, Some(1024.0)), (120, Some(2048.0))],
+            MetricUnit::BytesPerSecond,
+        );
+        let series = [
+            (Some(chart), Style::default().fg(theme.info)),
+            (Some(chart), Style::default().fg(theme.primary)),
+        ];
+        for height in [1, 2] {
+            let area = Rect::new(0, 0, 32, height);
+            let mut full = Buffer::empty(area);
+            flow_instrument(&series, area, ["READ", "WRITE"], &theme, &mut full);
+            let text: String = full.content.iter().map(|cell| cell.symbol()).collect();
+            assert!(text.contains('R') && text.contains('W'));
+            assert!(full.content.iter().any(|cell| {
+                cell.symbol()
+                    .chars()
+                    .any(|ch| ('\u{2801}'..='\u{28ff}').contains(&ch))
+                    && cell.fg == theme.info
+            }));
+            assert!(full.content.iter().any(|cell| {
+                cell.symbol()
+                    .chars()
+                    .any(|ch| ('\u{2801}'..='\u{28ff}').contains(&ch))
+                    && cell.fg == theme.primary
+            }));
+            let clip = Rect::new(3, 0, 20, height);
+            let mut partial = Buffer::empty(clip);
+            flow_instrument(&series, area, ["READ", "WRITE"], &theme, &mut partial);
+            for y in clip.y..clip.bottom() {
+                for x in clip.x..clip.right() {
+                    assert_eq!(partial[(x, y)], full[(x, y)]);
+                }
+            }
+        }
+    }
 
     fn model(values: &[Option<f64>]) -> SparklineModel<CHART_POINTS> {
         let mut history = TimeSeries::<120>::new(MetricUnit::BytesPerSecond);
@@ -586,7 +1169,7 @@ mod tests {
     }
     #[test]
     fn chart_height_uses_spare_rows_without_crossing_context_or_panel() {
-        for (height, expected) in [(2, 0), (3, 1), (4, 2), (5, 3), (7, 5), (10, 5)] {
+        for (height, expected) in [(2, 0), (3, 1), (4, 2), (5, 3), (7, 5), (10, 8), (70, 32)] {
             let body = Rect::new(4, 6, 30, height);
             let chart = region(body, 2);
             assert_eq!(chart.height, expected);

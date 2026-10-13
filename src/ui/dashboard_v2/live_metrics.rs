@@ -104,13 +104,21 @@ impl LiveSnapshot {
                 Some(NetworkInterface {
                     id: HardwareId::new(HardwareKind::Network, network.id.clone())?,
                     name: network.interface.clone(),
-                    download_bytes_per_sec: finite_non_negative(Some(
-                        network.received_per_sec * 1_000_000.0,
-                    )),
-                    upload_bytes_per_sec: finite_non_negative(Some(
-                        network.transmitted_per_sec * 1_000_000.0,
-                    )),
-                    availability: MetricAvailability::Available,
+                    download_bytes_per_sec: finite_non_negative(
+                        network
+                            .sample_interval
+                            .map(|_| network.received_per_sec * 1_000_000.0),
+                    ),
+                    upload_bytes_per_sec: finite_non_negative(
+                        network
+                            .sample_interval
+                            .map(|_| network.transmitted_per_sec * 1_000_000.0),
+                    ),
+                    availability: if network.sample_interval.is_some() {
+                        MetricAvailability::Available
+                    } else {
+                        MetricAvailability::Unavailable
+                    },
                 })
             })
             .collect::<Vec<_>>();
@@ -122,6 +130,8 @@ impl LiveSnapshot {
                     id: HardwareId::new(HardwareKind::Temperature, sensor.id.clone())?,
                     label: sensor.label.clone(),
                     celsius: finite_non_negative(sensor.celsius),
+                    critical_celsius: finite_non_negative(sensor.critical_celsius)
+                        .filter(|limit| *limit > 0.0),
                     availability: MetricAvailability::Available,
                 })
             })
@@ -156,6 +166,10 @@ impl LiveSnapshot {
             read_bytes_per_sec: disk.read_bytes_per_sec,
             write_bytes_per_sec: disk.write_bytes_per_sec,
         });
+        let has_network = snapshot
+            .all_networks
+            .iter()
+            .any(|network| !is_loopback_interface(&network.interface));
         let (download, upload) = snapshot
             .all_networks
             .iter()
@@ -166,6 +180,12 @@ impl LiveSnapshot {
                     up + network.transmitted_per_sec * 1_000_000.0,
                 )
             });
+        let network_ready = has_network
+            && snapshot
+                .all_networks
+                .iter()
+                .filter(|network| !is_loopback_interface(&network.interface))
+                .all(|network| network.sample_interval.is_some());
 
         Self {
             cpu: CpuLiveSample {
@@ -180,8 +200,8 @@ impl LiveSnapshot {
             memory_swap_bytes: finite_non_negative(Some(snapshot.used_swap * GIBIBYTE)),
             memory_total_swap_bytes: finite_non_negative(Some(snapshot.total_swap * GIBIBYTE)),
             gpu,
-            download_bytes_per_sec: Some(download),
-            upload_bytes_per_sec: Some(upload),
+            download_bytes_per_sec: network_ready.then_some(download),
+            upload_bytes_per_sec: network_ready.then_some(upload),
             storage,
             hardware,
         }
@@ -354,6 +374,30 @@ impl LiveMetricsHistory {
         };
         if selected_id(&self.hardware) != selected_id(&snapshot.hardware) {
             self.gpu_history = TimeSeries::new(MetricUnit::Percent);
+        }
+        let primary_storage = |hardware: &HardwareInventory| {
+            hardware.storages.first().map(|device| device.id.clone())
+        };
+        if primary_storage(&self.hardware) != primary_storage(&snapshot.hardware) {
+            self.occupancy_history = TimeSeries::new(MetricUnit::Percent);
+            self.read_history = TimeSeries::new(MetricUnit::BytesPerSecond);
+            self.write_history = TimeSeries::new(MetricUnit::BytesPerSecond);
+        }
+        let same_networks = self
+            .hardware
+            .networks
+            .iter()
+            .filter(|network| !is_loopback_interface(&network.name))
+            .map(|network| &network.id)
+            .eq(snapshot
+                .hardware
+                .networks
+                .iter()
+                .filter(|network| !is_loopback_interface(&network.name))
+                .map(|network| &network.id));
+        if !same_networks {
+            self.download_history = TimeSeries::new(MetricUnit::BytesPerSecond);
+            self.upload_history = TimeSeries::new(MetricUnit::BytesPerSecond);
         }
         self.hardware = snapshot.hardware.clone();
         self.memory = MemorySample {
@@ -631,6 +675,84 @@ mod tests {
             "3 MB of zram is not pressure"
         );
         assert!(pressure(2.0 * gib) >= 0.25, "a quarter of swap in use is");
+    }
+
+    #[test]
+    fn device_and_network_changes_begin_new_histories_instead_of_joining_epochs() {
+        let mut sample = snapshot();
+        let start = Instant::now();
+        let mut history = LiveMetricsHistory::new();
+        sample.hardware.storages.push(StorageDevice {
+            id: HardwareId::new(HardwareKind::Storage, "disk-a").unwrap(),
+            name: "disk-a".to_owned(),
+            model: None,
+            mount_points: vec!["/".to_owned()],
+            used_bytes: sample.storage.unwrap().used_bytes,
+            total_bytes: sample.storage.unwrap().total_bytes,
+            read_bytes_per_sec: Some(8.0e6),
+            write_bytes_per_sec: Some(2.0e6),
+            latency_seconds: None,
+            availability: MetricAvailability::Available,
+            is_virtual: false,
+        });
+        sample.hardware.networks.push(NetworkInterface {
+            id: HardwareId::new(HardwareKind::Network, "eth0").unwrap(),
+            name: "eth0".to_owned(),
+            download_bytes_per_sec: sample.download_bytes_per_sec,
+            upload_bytes_per_sec: sample.upload_bytes_per_sec,
+            availability: MetricAvailability::Available,
+        });
+        history.push_snapshot(start, &sample).unwrap();
+        history
+            .push_snapshot(start + Duration::from_secs(1), &sample)
+            .unwrap();
+        assert_eq!(
+            history
+                .models()
+                .unwrap()
+                .storage()
+                .read_sparkline()
+                .sample_count(),
+            2
+        );
+        sample.hardware.storages[0].id = HardwareId::new(HardwareKind::Storage, "disk-b").unwrap();
+        sample.hardware.networks[0].id = HardwareId::new(HardwareKind::Network, "eth1").unwrap();
+        sample.hardware.networks[0].name = "eth1".to_owned();
+        history
+            .push_snapshot(start + Duration::from_secs(2), &sample)
+            .unwrap();
+        let models = history.models().unwrap();
+        assert_eq!(models.storage().read_sparkline().sample_count(), 1);
+        assert_eq!(models.network().download_sparkline().sample_count(), 1);
+        assert_eq!(
+            models
+                .storage()
+                .read_sparkline()
+                .timed_samples()
+                .next()
+                .unwrap()
+                .0,
+            Duration::from_secs(2)
+        );
+    }
+
+    #[test]
+    fn invalid_rates_are_gaps_and_never_zero_valued_history() {
+        let mut sample = snapshot();
+        sample.download_bytes_per_sec = Some(f64::NAN);
+        sample.upload_bytes_per_sec = Some(f64::INFINITY);
+        let mut history = LiveMetricsHistory::new();
+        history.push_snapshot(Instant::now(), &sample).unwrap();
+        let models = history.models().unwrap();
+        assert!(models.network().download().is_none() && models.network().upload().is_none());
+        assert_eq!(
+            models
+                .network()
+                .download_sparkline()
+                .visible_samples(120)
+                .collect::<Vec<_>>(),
+            vec![None]
+        );
     }
 
     #[test]

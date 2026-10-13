@@ -556,6 +556,7 @@ impl WidgetRenderModel {
                 id,
                 BlockId::PrimarySparkline
                     | BlockId::SecondarySparkline
+                    | BlockId::TertiarySparkline
                     | BlockId::CpuContext
                     | BlockId::MemoryContext
                     | BlockId::GpuContext
@@ -572,6 +573,7 @@ impl WidgetRenderModel {
                     | BlockId::StorageContext
                     | BlockId::PrimarySparkline
                     | BlockId::SecondarySparkline
+                    | BlockId::TertiarySparkline
                     | BlockId::Status
             ),
             DashboardPreset::Widescreen => matches!(
@@ -583,6 +585,7 @@ impl WidgetRenderModel {
                     | BlockId::StorageContext
                     | BlockId::PrimarySparkline
                     | BlockId::SecondarySparkline
+                    | BlockId::TertiarySparkline
                     | BlockId::Area
                     | BlockId::Segments
                     | BlockId::Comparison
@@ -593,44 +596,45 @@ impl WidgetRenderModel {
         }
     }
 
-    pub const fn visual(self) -> MetricVisual {
+    pub const fn visual(&self) -> MetricVisual {
         self.visual
     }
 
-    pub const fn preset(self) -> DashboardPreset {
+    pub const fn preset(&self) -> DashboardPreset {
         self.preset
     }
 
-    pub const fn availability(self) -> MetricAvailability {
+    pub const fn availability(&self) -> MetricAvailability {
         self.availability
     }
 
-    pub const fn state(self) -> WidgetState {
+    pub const fn state(&self) -> WidgetState {
         self.visual.state()
     }
 
-    pub const fn highlight(self) -> Highlight {
+    pub const fn highlight(&self) -> Highlight {
         self.visual.highlight()
     }
 
-    pub const fn is_focused(self) -> bool {
+    pub const fn is_focused(&self) -> bool {
         self.focused
     }
 
-    pub const fn block_count(self) -> usize {
+    pub const fn block_count(&self) -> usize {
         self.length
     }
 
-    pub fn blocks(self) -> impl Iterator<Item = RenderBlock> {
-        self.blocks.into_iter().take(self.length).flatten()
+    pub fn blocks(&self) -> impl Iterator<Item = RenderBlock> + '_ {
+        self.blocks.iter().take(self.length).flatten().copied()
     }
 
-    pub fn block(self, id: BlockId) -> Option<RenderBlock> {
+    pub fn block(&self, id: BlockId) -> Option<RenderBlock> {
         self.blocks
-            .into_iter()
+            .iter()
             .take(self.length)
             .flatten()
             .find(|block| block.id() == id)
+            .copied()
     }
 
     pub fn add_sparkline(
