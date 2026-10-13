@@ -11,6 +11,7 @@ mod process_search;
 pub mod pulse_v2;
 #[allow(clippy::new_without_default)]
 pub mod system;
+pub mod terminal_capabilities;
 pub mod theme;
 mod timeline;
 pub mod ui;
