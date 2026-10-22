@@ -1,11 +1,9 @@
-#![allow(dead_code)]
-
 use std::{sync::Arc, time::Duration};
 
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
 };
 
 use crate::{
@@ -2445,7 +2443,7 @@ fn draw_fractional_bar(
     }
 }
 
-/// Cool → warm → hot ramp for load and temperature, built from theme tokens.
+/// Utilization colors follow the shared semantic thresholds.
 fn heat_color(amount: f64, theme: &Theme) -> ratatui::style::Color {
     vital::heat_color(amount, theme)
 }
@@ -2533,7 +2531,7 @@ const fn widget_label(widget: DashboardWidgetId) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ratatui::{buffer::Buffer, layout::Rect};
+    use ratatui::{buffer::Buffer, layout::Rect, style::Color};
 
     #[test]
     fn pulse_coalesces_eased_inputs_until_the_next_scene_tick() {

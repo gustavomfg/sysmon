@@ -25,16 +25,6 @@ const METER_FILL_GLYPH: char = '━';
 #[cfg(test)]
 const METER_TRACK_GLYPH: char = '─';
 
-pub(super) fn render(
-    model: WidgetRenderModel,
-    preset: DashboardPreset,
-    bounds: DashboardBounds,
-    theme: &Theme,
-    buffer: &mut Buffer,
-) -> Result<(), TerminalRenderError> {
-    render_with_inventory(model, preset, bounds, theme, buffer, None)
-}
-
 pub(super) fn render_with_inventory(
     model: WidgetRenderModel,
     preset: DashboardPreset,
@@ -1164,15 +1154,6 @@ fn context_style(model: WidgetRenderModel, theme: &Theme) -> Style {
         theme.danger
     } else {
         theme.text_muted
-    };
-    Style::default().fg(color).bg(theme.surface)
-}
-
-fn state_style(model: WidgetRenderModel, theme: &Theme) -> Style {
-    let color = match model.state() {
-        WidgetState::Critical => theme.danger,
-        WidgetState::Warning => theme.warning,
-        _ => theme.text_muted,
     };
     Style::default().fg(color).bg(theme.surface)
 }

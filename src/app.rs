@@ -1,15 +1,11 @@
-#![allow(dead_code)]
-
 use std::time::Duration;
 
 use crate::{
     action::Action,
-    animation::Tween,
     command_palette::{Command, CommandPaletteState, CommandStatus},
-    config::{ConfigField, ConfigState, REFRESH_RATES, history_window},
+    config::{ConfigField, ConfigState, REFRESH_RATES},
     export,
     focus::{FocusState, FocusTarget},
-    history::{History, Metric},
     process_search::ProcessSearchState,
     system::info::SystemInfo,
     theme::{Theme, ThemeKind},
@@ -19,11 +15,8 @@ use crate::{
 
 pub struct AppState {
     snapshot: Option<SystemInfo>,
-    history: History,
     theme: Theme,
     theme_kind: ThemeKind,
-    cpu_tween: Tween,
-    memory_tween: Tween,
     reduced_motion: bool,
     refresh_interval: Duration,
     widgets: WidgetVisibility,
@@ -35,25 +28,16 @@ pub struct AppState {
     timeline: Timeline,
 }
 
-const HISTORY_LIMIT: usize = 60;
 const TIMELINE_LIMIT: usize = 20;
-const ANIMATION_DURATION: Duration = Duration::from_millis(250);
 const DEFAULT_REFRESH_INTERVAL: Duration = REFRESH_RATES[0];
 
 impl AppState {
     pub fn new() -> Self {
-        Self::with_reduced_motion(false)
-    }
-
-    pub fn with_reduced_motion(reduced_motion: bool) -> Self {
         Self {
             snapshot: None,
-            history: History::new(HISTORY_LIMIT),
             theme: ThemeKind::Pulse.theme(),
             theme_kind: ThemeKind::Pulse,
-            cpu_tween: Tween::new(0.0, ANIMATION_DURATION, reduced_motion),
-            memory_tween: Tween::new(0.0, ANIMATION_DURATION, reduced_motion),
-            reduced_motion,
+            reduced_motion: false,
             refresh_interval: DEFAULT_REFRESH_INTERVAL,
             widgets: WidgetVisibility::default(),
             palette: CommandPaletteState::new(),
@@ -70,34 +54,7 @@ impl AppState {
     }
 
     pub fn update(&mut self, snapshot: SystemInfo) {
-        let first_snapshot = self.snapshot.is_none();
-        let cpu_usage = snapshot.cpu_usage.clamp(0.0, 100.0) as f64;
-        let memory_usage = memory_usage_percent(snapshot.used_ram, snapshot.total_ram);
-
-        self.history.record(
-            Metric::Cpu,
-            Some(snapshot.cpu_usage.clamp(0.0, 100.0).round() as f64),
-        );
-        self.record_history(&snapshot);
-
-        if first_snapshot {
-            self.cpu_tween.snap_to(cpu_usage);
-            self.memory_tween.snap_to(memory_usage);
-        } else {
-            self.cpu_tween.set_target_clamped(cpu_usage, 0.0, 100.0);
-            self.memory_tween
-                .set_target_clamped(memory_usage, 0.0, 100.0);
-        }
-
         self.snapshot = Some(snapshot);
-    }
-
-    pub fn snapshot(&self) -> Option<&SystemInfo> {
-        self.snapshot.as_ref()
-    }
-
-    pub fn history(&self) -> &History {
-        &self.history
     }
 
     pub fn theme(&self) -> &Theme {
@@ -116,32 +73,6 @@ impl AppState {
         self.refresh_interval
     }
 
-    pub fn history_window(&self) -> Duration {
-        history_window(
-            self.history.samples(Metric::Cpu).len(),
-            self.refresh_interval,
-        )
-    }
-
-    pub fn cpu_usage(&self) -> f64 {
-        self.cpu_tween.current()
-    }
-
-    pub fn memory_usage_percent(&self) -> f64 {
-        self.memory_tween.current()
-    }
-
-    pub fn update_animations(&mut self, delta: Duration) -> bool {
-        let cpu_changed = self.cpu_tween.update(delta);
-        let memory_changed = self.memory_tween.update(delta);
-
-        cpu_changed || memory_changed
-    }
-
-    pub fn animations_active(&self) -> bool {
-        self.cpu_tween.is_active() || self.memory_tween.is_active()
-    }
-
     pub fn palette(&self) -> &CommandPaletteState {
         &self.palette
     }
@@ -154,16 +85,13 @@ impl AppState {
         &self.config
     }
 
+    #[cfg(test)]
     pub fn selected_process(&self) -> Option<&str> {
         self.selected_process.as_deref()
     }
 
     pub fn widget_visible(&self, widget: WidgetId) -> bool {
         self.widgets.is_visible(widget)
-    }
-
-    pub fn widget_visibility(&self) -> &WidgetVisibility {
-        &self.widgets
     }
 
     pub fn process_search_results(&self) -> Vec<&crate::system::info::ProcessInfo> {
@@ -198,7 +126,6 @@ impl AppState {
 
     pub fn dispatch(&mut self, action: Action) -> bool {
         match action {
-            Action::Quit => return true,
             Action::OpenPalette => {
                 if !self.palette.is_open() {
                     self.palette.open();
@@ -273,45 +200,6 @@ impl AppState {
         }
 
         false
-    }
-
-    fn record_history(&mut self, snapshot: &SystemInfo) {
-        self.history.record(
-            Metric::Memory,
-            Some(memory_usage_percent(snapshot.used_ram, snapshot.total_ram)),
-        );
-        self.history.record(
-            Metric::NetworkDownload,
-            Some(
-                snapshot
-                    .networks
-                    .iter()
-                    .map(|network| network.received_per_sec)
-                    .sum(),
-            ),
-        );
-        self.history.record(
-            Metric::NetworkUpload,
-            Some(
-                snapshot
-                    .networks
-                    .iter()
-                    .map(|network| network.transmitted_per_sec)
-                    .sum(),
-            ),
-        );
-
-        let gpu_usages = snapshot
-            .gpus
-            .iter()
-            .filter_map(|gpu| gpu.usage.strip_suffix('%')?.parse::<f64>().ok())
-            .collect::<Vec<_>>();
-        let gpu_usage = if gpu_usages.is_empty() {
-            None
-        } else {
-            Some(gpu_usages.iter().sum::<f64>() / gpu_usages.len() as f64)
-        };
-        self.history.record(Metric::Gpu, gpu_usage);
     }
 
     fn execute_command(&mut self, command: Command) -> bool {
@@ -427,8 +315,6 @@ impl AppState {
 
     fn set_reduced_motion(&mut self, reduced_motion: bool) {
         self.reduced_motion = reduced_motion;
-        self.cpu_tween.set_reduced_motion(reduced_motion);
-        self.memory_tween.set_reduced_motion(reduced_motion);
         self.timeline.record(format!(
             "Reduced motion {}",
             if reduced_motion {
@@ -477,72 +363,21 @@ impl AppState {
     }
 }
 
-fn memory_usage_percent(used: f64, total: f64) -> f64 {
-    if total > 0.0 {
-        (used / total * 100.0).clamp(0.0, 100.0)
-    } else {
-        0.0
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{AppState, HISTORY_LIMIT};
+    use super::AppState;
     use crate::{
         action::Action,
         focus::FocusTarget,
-        history::Metric,
         system::info::{ProcessInfo, SystemInfo},
         theme::ThemeKind,
         widget::WidgetId,
     };
 
     #[test]
-    fn keeps_only_the_latest_sixty_cpu_samples() {
-        let mut app = AppState::new();
-
-        for sample in 0..=HISTORY_LIMIT {
-            app.update(snapshot(sample as f32));
-        }
-
-        let samples = app.history().samples(Metric::Cpu);
-        assert_eq!(samples.len(), HISTORY_LIMIT);
-        assert_eq!(samples.first(), Some(&1.0));
-        assert_eq!(samples.last(), Some(&(HISTORY_LIMIT as f64)));
-    }
-
-    #[test]
-    fn history_window_tracks_refresh_rate_for_the_recorded_samples() {
-        let mut app = AppState::new();
-        for sample in 0..HISTORY_LIMIT {
-            app.update(snapshot(sample as f32));
-        }
-
-        assert_eq!(app.history_window(), std::time::Duration::from_secs(60));
-
-        app.adjust_refresh_rate(1);
-        assert_eq!(app.history_window(), std::time::Duration::from_secs(120));
-
-        app.adjust_refresh_rate(1);
-        assert_eq!(app.history_window(), std::time::Duration::from_secs(240));
-    }
-
-    #[test]
-    fn clamps_and_rounds_cpu_samples() {
-        let mut app = AppState::new();
-
-        for sample in [-10.0, 42.6, 150.0] {
-            app.update(snapshot(sample));
-        }
-
-        assert_eq!(app.history().samples(Metric::Cpu), &[0.0, 43.0, 100.0]);
-    }
-
-    #[test]
     fn dispatches_available_and_planned_palette_commands_to_state() {
         let mut app = AppState::new();
 
-        assert!(app.dispatch(Action::Quit));
         app.dispatch(Action::FocusNext);
         assert!(app.is_focused(FocusTarget::Overview));
         app.dispatch(Action::OpenPalette);
@@ -666,15 +501,6 @@ mod tests {
                 .iter()
                 .any(|event| event.contains("Reduced motion enabled"))
         );
-    }
-
-    #[test]
-    fn advances_metric_tweens_after_a_new_sample() {
-        let mut app = AppState::new();
-        app.update(snapshot(10.0));
-        app.update(snapshot(90.0));
-
-        assert!(app.update_animations(std::time::Duration::from_millis(100)));
     }
 
     fn run_command(app: &mut AppState, query: &str) {

@@ -25,3 +25,10 @@
 Thumbs.db
 
 .nocturne/
+
+# Python tooling caches
+__pycache__/
+*.py[cod]
+
+# Local snapshot exports
+/sysmon/snapshot.json

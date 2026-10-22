@@ -6,15 +6,10 @@ mod storage;
 
 use super::DashboardWidgetId;
 
-#[allow(unused_imports)]
 pub use cpu::compose as compose_cpu;
-#[allow(unused_imports)]
 pub use gpu::compose as compose_gpu;
-#[allow(unused_imports)]
 pub use memory::compose as compose_memory;
-#[allow(unused_imports)]
 pub use network::compose as compose_network;
-#[allow(unused_imports)]
 pub use storage::compose as compose_storage;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

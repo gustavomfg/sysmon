@@ -98,7 +98,6 @@ struct MotionParticle {
 struct ElasticNode {
     center: (f32, f32),
     radius: f32,
-    phase: f32,
     stored_energy: f32,
     tension: f32,
     contraction: f32,
@@ -286,13 +285,12 @@ impl PhysiologyGrid {
 /// stages remain responsible for organization, lighting and presentation.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct OrganicMotion {
-    input: NormalizedPulseInput,
     aspect: f32,
     elapsed_seconds: f32,
-    intensity: f32,
     pressure: f32,
     density: f32,
     amplitude: f32,
+    #[cfg(test)]
     speed: f32,
     core: MotionCore,
     lobes: [MotionLobe; FLOW_LOBES],
@@ -414,7 +412,6 @@ impl OrganicMotion {
             ElasticNode {
                 center,
                 radius,
-                phase,
                 stored_energy: stored.clamp(0.0, 1.0),
                 tension,
                 contraction,
@@ -433,13 +430,12 @@ impl OrganicMotion {
         );
 
         Self {
-            input,
             aspect,
             elapsed_seconds,
-            intensity,
             pressure,
             density,
             amplitude,
+            #[cfg(test)]
             speed,
             core,
             lobes,

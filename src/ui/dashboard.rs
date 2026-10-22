@@ -174,7 +174,6 @@ impl DashboardApp {
     }
 
     pub fn update_animations(&mut self, delta: Duration) -> bool {
-        let legacy_changed = self.ui.update_animations(delta);
         self.elapsed = self.elapsed.saturating_add(delta);
         let health_snapshot = self
             .models
@@ -188,7 +187,7 @@ impl DashboardApp {
             self.ui.record_event(event);
         }
         self.pulse_behavior = self.pulse_behavior_engine.update(self.system_health, delta);
-        self.has_snapshot && (!self.ui.reduced_motion() || legacy_changed)
+        self.has_snapshot && !self.ui.reduced_motion()
     }
 
     pub fn animations_active(&self) -> bool {

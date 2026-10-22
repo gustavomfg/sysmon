@@ -19,6 +19,7 @@ use super::history_chart::{self, Scale};
 pub(super) struct CpuCardRenderer;
 
 impl CpuCardRenderer {
+    #[cfg(test)]
     pub(super) fn render(
         model: WidgetRenderModel,
         preset: DashboardPreset,

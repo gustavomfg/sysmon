@@ -1,10 +1,6 @@
 //! SysMon's terminal-independent energy, organic-motion and presentation
 //! pipeline for the active Pulse visualization.
 
-// V2 is intentionally registered before integration. Its public contracts are
-// exercised by this module's pure tests and will be consumed by later phases.
-#![allow(dead_code, unused_imports)]
-
 mod behavior;
 mod color;
 mod engine;
@@ -41,9 +37,9 @@ mod tests {
     use std::time::Duration;
 
     use super::{
-        FieldDimensions, FieldGradient, FlowField, FlowSample, LightingField, NoiseField,
-        NormalizedPoint, NormalizedPulseInput, PulseV2Engine, PulseV2Frame, PulseV2Preset,
-        PulseV2Rasterizer, RasterMode, ScalarField, StructuredField, TransportedField,
+        FieldDimensions, FieldGradient, FlowField, LightingField, NoiseField, NormalizedPoint,
+        NormalizedPulseInput, PulseV2Engine, PulseV2Frame, PulseV2Preset, PulseV2Rasterizer,
+        RasterMode, ScalarField, StructuredField, TransportedField,
     };
 
     #[test]
