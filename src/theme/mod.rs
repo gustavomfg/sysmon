@@ -67,6 +67,20 @@ pub struct Theme {
 }
 
 impl Theme {
+    /// Presentation-only palette for the central particle field. Geometry,
+    /// telemetry and animation stay independent of these colors.
+    pub(crate) fn pulse_scene(self) -> Self {
+        if self != Self::pulse() {
+            return self;
+        }
+        Self {
+            secondary: self.pulse_high,
+            accent: self.pulse_low,
+            info: self.text_muted,
+            ..self
+        }
+    }
+
     pub fn pulse() -> Self {
         pulse::make()
     }
@@ -88,12 +102,70 @@ mod tests {
     fn pulse_contains_the_documented_semantic_colors() {
         let theme = Theme::pulse();
 
-        assert_eq!(theme.background, Color::Rgb(0x0B, 0x10, 0x14));
+        assert_eq!(theme.background, Color::Rgb(0x08, 0x08, 0x08));
         assert_eq!(theme.primary, Color::Rgb(0x7B, 0xD8, 0x8F));
-        assert_eq!(theme.secondary, Color::Rgb(0x6A, 0xA6, 0xFF));
-        assert_eq!(theme.border_focused, Color::Rgb(0xA8, 0x55, 0xF7));
-        assert_eq!(theme.selection_background, Color::Rgb(0x31, 0x2E, 0x81));
+        assert_eq!(theme.secondary, Color::Rgb(0xC8, 0xC8, 0xC8));
+        assert_eq!(theme.border_focused, Color::Rgb(0xEE, 0xEE, 0xEE));
+        assert_eq!(theme.selection_background, Color::Rgb(0x30, 0x30, 0x30));
         assert_eq!(theme.danger, Color::Rgb(0xF0, 0x75, 0x75));
+    }
+
+    #[test]
+    fn neutral_chrome_and_semantic_text_have_readable_contrast() {
+        let theme = Theme::pulse();
+        for color in [
+            theme.background,
+            theme.surface,
+            theme.surface_alt,
+            theme.text,
+            theme.text_muted,
+            theme.border,
+            theme.border_focused,
+            theme.secondary,
+            theme.accent,
+            theme.info,
+            theme.selection_background,
+        ] {
+            let Color::Rgb(r, g, b) = color else {
+                panic!("RGB palette required")
+            };
+            assert_eq!(r, g);
+            assert_eq!(g, b);
+        }
+        fn luminance(color: Color) -> f64 {
+            let Color::Rgb(r, g, b) = color else {
+                panic!("RGB palette required")
+            };
+            let linear = |v: u8| {
+                let v = f64::from(v) / 255.0;
+                if v <= 0.04045 {
+                    v / 12.92
+                } else {
+                    ((v + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            0.2126 * linear(r) + 0.7152 * linear(g) + 0.0722 * linear(b)
+        }
+        for background in [
+            theme.background,
+            theme.surface,
+            theme.surface_alt,
+            theme.selection_background,
+        ] {
+            for foreground in [
+                theme.text,
+                theme.text_muted,
+                theme.success,
+                theme.warning,
+                theme.danger,
+            ] {
+                let contrast = (luminance(foreground) + 0.05) / (luminance(background) + 0.05);
+                assert!(
+                    contrast >= 4.5,
+                    "{foreground:?} on {background:?}: {contrast}"
+                );
+            }
+        }
     }
 
     #[test]

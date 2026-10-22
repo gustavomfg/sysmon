@@ -205,13 +205,29 @@ pub fn signal_color(state: DashboardState, theme: &Theme) -> Color {
     }
 }
 
-/// Cool → warm → hot ramp for load and temperature, built from theme tokens.
+/// Utilization bands, matching CPU/memory thresholds. These indicate load,
+/// not hardware failure; unknown values remain neutral.
 pub fn heat_color(amount: f64, theme: &Theme) -> Color {
-    let amount = amount.clamp(0.0, 1.0) as f32;
-    if amount < 0.5 {
-        mix(theme.primary, theme.warning, amount * 2.0)
+    use super::metrics::CPU_THRESHOLDS;
+    if !amount.is_finite() {
+        theme.text_muted
+    } else if amount >= CPU_THRESHOLDS.critical() {
+        theme.danger
+    } else if amount >= CPU_THRESHOLDS.warning() {
+        theme.warning
     } else {
-        mix(theme.warning, theme.danger, (amount - 0.5) * 2.0)
+        theme.success
+    }
+}
+
+/// Use the metric model's existing classification, including sustained pressure.
+pub fn metric_color(state: super::WidgetState, theme: &Theme) -> Color {
+    use super::WidgetState;
+    match state {
+        WidgetState::Warning => theme.warning,
+        WidgetState::Critical => theme.danger,
+        WidgetState::Unavailable | WidgetState::Loading => theme.text_muted,
+        _ => theme.success,
     }
 }
 
@@ -241,6 +257,40 @@ mod tests {
         theme::Theme,
         ui::dashboard_v2::{DashboardState, PulseBehavior},
     };
+
+    #[test]
+    fn utilization_colors_reserve_warm_tones_for_thresholds() {
+        let theme = Theme::pulse();
+        for value in [0.0, 0.5, 0.799] {
+            assert_eq!(super::heat_color(value, &theme), theme.success);
+        }
+        for value in [0.8, 0.949] {
+            assert_eq!(super::heat_color(value, &theme), theme.warning);
+        }
+        for value in [0.95, 1.0] {
+            assert_eq!(super::heat_color(value, &theme), theme.danger);
+        }
+        for value in [f64::NAN, f64::INFINITY] {
+            assert_eq!(super::heat_color(value, &theme), theme.text_muted);
+        }
+    }
+
+    #[test]
+    fn metric_colors_follow_state_without_reclassifying_data() {
+        use crate::ui::dashboard_v2::WidgetState;
+        let theme = Theme::pulse();
+        for (state, color) in [
+            (WidgetState::Idle, theme.success),
+            (WidgetState::Normal, theme.success),
+            (WidgetState::Active, theme.success),
+            (WidgetState::Warning, theme.warning),
+            (WidgetState::Critical, theme.danger),
+            (WidgetState::Unavailable, theme.text_muted),
+            (WidgetState::Loading, theme.text_muted),
+        ] {
+            assert_eq!(super::metric_color(state, &theme), color);
+        }
+    }
 
     fn row(trace: &VitalTrace, width: u16, reduced_motion: bool) -> String {
         let area = Rect::new(0, 0, width, 1);

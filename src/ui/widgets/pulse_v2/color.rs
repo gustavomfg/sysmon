@@ -234,7 +234,7 @@ mod tests {
     fn mapping_is_deterministic_and_does_not_mutate_lighting() {
         let frame = generated(input(0.22, 0.20, Some(0.18), 0.18), false);
         let before = frame.lighting().clone();
-        let theme = Theme::pulse();
+        let theme = Theme::pulse().pulse_scene();
         let first =
             SemanticColorField::from_lighting(frame.lighting(), frame.input(), &theme).unwrap();
         let second =
@@ -253,9 +253,12 @@ mod tests {
     #[test]
     fn spatial_mapping_moves_from_blue_lower_plane_to_purple_upper_plane() {
         let frame = generated(input(0.22, 0.20, Some(0.18), 0.18), false);
-        let colors =
-            SemanticColorField::from_lighting(frame.lighting(), frame.input(), &Theme::pulse())
-                .unwrap();
+        let colors = SemanticColorField::from_lighting(
+            frame.lighting(),
+            frame.input(),
+            &Theme::pulse().pulse_scene(),
+        )
+        .unwrap();
         let mut top = None;
         let mut bottom = None;
         for y in 0..frame.lighting().height() {
@@ -278,12 +281,15 @@ mod tests {
     }
 
     #[test]
-    fn intermediate_regions_prefer_violet_over_cyan() {
+    fn intermediate_regions_prefer_primary_over_secondary() {
         let frame = generated(input(0.22, 0.20, Some(0.18), 0.18), false);
-        let colors =
-            SemanticColorField::from_lighting(frame.lighting(), frame.input(), &Theme::pulse())
-                .unwrap();
-        let theme = Theme::pulse();
+        let colors = SemanticColorField::from_lighting(
+            frame.lighting(),
+            frame.input(),
+            &Theme::pulse().pulse_scene(),
+        )
+        .unwrap();
+        let theme = Theme::pulse().pulse_scene();
         let intermediate = colors
             .as_slice()
             .iter()
@@ -295,7 +301,7 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert!(intermediate.len() > 8);
-        let violet_favored = intermediate
+        let primary_favored = intermediate
             .iter()
             .filter(|(sample, _)| {
                 color_distance(sample.color(), theme.primary)
@@ -303,16 +309,19 @@ mod tests {
             })
             .count();
 
-        assert!(violet_favored * 2 >= intermediate.len());
+        assert!(primary_favored * 2 >= intermediate.len());
     }
 
     #[test]
     fn cold_and_organized_layers_remain_chromatically_separated() {
         let frame = generated(input(0.22, 0.20, Some(0.18), 0.18), false);
-        let colors =
-            SemanticColorField::from_lighting(frame.lighting(), frame.input(), &Theme::pulse())
-                .unwrap();
-        let theme = Theme::pulse();
+        let colors = SemanticColorField::from_lighting(
+            frame.lighting(),
+            frame.input(),
+            &Theme::pulse().pulse_scene(),
+        )
+        .unwrap();
+        let theme = Theme::pulse().pulse_scene();
         let mut cold = Vec::new();
         let mut organized = Vec::new();
 
@@ -330,21 +339,24 @@ mod tests {
         assert!(cold.len() > 4);
         assert!(organized.len() > 4);
         let cold_info_distance = mean_distance(&cold, theme.info);
-        let cold_violet_distance = mean_distance(&cold, theme.primary);
-        let organized_violet_distance =
+        let cold_primary_distance = mean_distance(&cold, theme.primary);
+        let organized_primary_distance =
             mean_nearest_distance(&organized, theme.primary, theme.accent);
-        let organized_cyan_distance = mean_distance(&organized, theme.secondary);
+        let organized_secondary_distance = mean_distance(&organized, theme.secondary);
 
-        assert!(cold_info_distance < cold_violet_distance);
-        assert!(organized_violet_distance < organized_cyan_distance);
+        assert!(cold_info_distance < cold_primary_distance);
+        assert!(organized_primary_distance < organized_secondary_distance);
     }
 
     #[test]
     fn calm_has_no_critical_color_and_peaks_are_the_only_hotspots() {
         let frame = generated(input(0.12, 0.16, None, 0.10), false);
-        let colors =
-            SemanticColorField::from_lighting(frame.lighting(), frame.input(), &Theme::pulse())
-                .unwrap();
+        let colors = SemanticColorField::from_lighting(
+            frame.lighting(),
+            frame.input(),
+            &Theme::pulse().pulse_scene(),
+        )
+        .unwrap();
 
         assert!(system_stress(frame.input()) < 0.46);
         assert!(
@@ -373,9 +385,12 @@ mod tests {
     #[test]
     fn critical_color_is_localized_to_energetic_regions() {
         let frame = generated(input(0.58, 0.62, Some(0.55), 0.60), false);
-        let colors =
-            SemanticColorField::from_lighting(frame.lighting(), frame.input(), &Theme::pulse())
-                .unwrap();
+        let colors = SemanticColorField::from_lighting(
+            frame.lighting(),
+            frame.input(),
+            &Theme::pulse().pulse_scene(),
+        )
+        .unwrap();
         let colored = colors
             .as_slice()
             .iter()
@@ -396,7 +411,7 @@ mod tests {
     fn busier_states_shift_the_existing_gradient_toward_purple() {
         let calm = generated(input(0.12, 0.16, None, 0.10), false);
         let busy = generated(input(0.40, 0.45, Some(0.30), 0.45), false);
-        let theme = Theme::pulse();
+        let theme = Theme::pulse().pulse_scene();
         let calm_colors =
             SemanticColorField::from_lighting(calm.lighting(), calm.input(), &theme).unwrap();
         let busy_colors =
@@ -435,7 +450,7 @@ mod tests {
                 true,
             )
             .unwrap();
-        let theme = Theme::pulse();
+        let theme = Theme::pulse().pulse_scene();
         let first_colors =
             SemanticColorField::from_lighting(first.lighting(), first.input(), &theme).unwrap();
         let later_colors =
@@ -446,19 +461,19 @@ mod tests {
 
     #[test]
     fn theme_tokens_are_the_only_color_sources() {
-        let theme = Theme::pulse();
+        let theme = Theme::pulse().pulse_scene();
         let normalized = NormalizedPulseInput::default();
         let frame = generated(normalized, true);
         let colors =
             SemanticColorField::from_lighting(frame.lighting(), normalized, &theme).unwrap();
 
         assert!(!colors.is_empty());
-        assert_eq!(theme.info, Theme::pulse().info);
-        assert_eq!(theme.secondary, Theme::pulse().secondary);
-        assert_eq!(theme.primary, Theme::pulse().primary);
-        assert_eq!(theme.accent, Theme::pulse().accent);
-        assert_eq!(theme.danger, Theme::pulse().danger);
-        assert_eq!(theme.text, Theme::pulse().text);
+        assert_eq!(theme.info, Theme::pulse().pulse_scene().info);
+        assert_eq!(theme.secondary, Theme::pulse().pulse_scene().secondary);
+        assert_eq!(theme.primary, Theme::pulse().pulse_scene().primary);
+        assert_eq!(theme.accent, Theme::pulse().pulse_scene().accent);
+        assert_eq!(theme.danger, Theme::pulse().pulse_scene().danger);
+        assert_eq!(theme.text, Theme::pulse().pulse_scene().text);
     }
 
     fn mean_distance(colors: &[Color], target: Color) -> f32 {

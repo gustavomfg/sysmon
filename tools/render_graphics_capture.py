@@ -23,7 +23,7 @@ for path in Path(sys.argv[1]).glob("*.cells"):
     width, height = map(int, rows[0].split())
     cell_width, cell_height, margin = 10, 21, 20
     canvas = Image.new("RGB", (width * cell_width + margin * 2,
-                               height * cell_height + margin * 2), (11, 16, 20))
+                               height * cell_height + margin * 2), tuple(map(int, rows[-1].split("|")[2].split(","))))
     draw = ImageDraw.Draw(canvas)
     for index, row in enumerate(rows[1:]):
         codepoints, fg, bg, strong = row.split("|")

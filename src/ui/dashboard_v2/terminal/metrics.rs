@@ -157,7 +157,13 @@ fn render_memory(
             .zip(total)
             .filter(|(_, total)| total.value() > 0.0)
             .map(|(used, total)| used.value() / total.value());
-        capacity_meter(line(body, offset), ratio, theme.primary, theme, buffer);
+        capacity_meter(
+            line(body, offset),
+            ratio,
+            super::super::vital::metric_color(model.state(), theme),
+            theme,
+            buffer,
+        );
         offset += 1;
     }
     render_percent_history(model, history_chart::region(body, offset), theme, buffer);
@@ -307,7 +313,7 @@ fn render_gpu(
         capacity_meter(
             line(body, offset),
             Some(used.value() / total.value()),
-            theme.border_focused,
+            super::super::vital::heat_color(used.value() / total.value(), theme),
             theme,
             buffer,
         );
@@ -485,7 +491,7 @@ fn render_storage(
         render_segmented_meter(
             line(body, 1),
             fraction.unwrap_or(0.0),
-            theme.chart_primary,
+            super::super::vital::metric_color(model.state(), theme),
             theme,
             buffer,
         );
@@ -629,7 +635,7 @@ fn render_gpu_inventory(
             capacity_meter(
                 line(body, offset),
                 Some(used / total),
-                theme.border_focused,
+                super::super::vital::heat_color(used / total, theme),
                 theme,
                 buffer,
             );
@@ -832,7 +838,10 @@ fn render_storage_inventory(
             render_segmented_meter(
                 line(content, row.saturating_add(1)),
                 fraction,
-                theme.chart_primary,
+                super::super::vital::metric_color(
+                    super::super::metrics::STORAGE_THRESHOLDS.classify(Some(fraction)),
+                    theme,
+                ),
                 theme,
                 buffer,
             );
@@ -1097,13 +1106,7 @@ fn render_percent_history(
         &[(
             sparkline(model, BlockId::PrimarySparkline),
             Style::default()
-                .fg(
-                    if model.visual().widget_id() == super::super::DashboardWidgetId::Gpu {
-                        theme.border_focused
-                    } else {
-                        theme.chart_primary
-                    },
-                )
+                .fg(super::super::vital::metric_color(model.state(), theme))
                 .bg(theme.surface),
         )],
         if model.visual().widget_id() == super::super::DashboardWidgetId::Memory {

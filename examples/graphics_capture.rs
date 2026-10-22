@@ -1,5 +1,5 @@
 //! Offline visual fixture. All telemetry in this example is synthetic.
-//! Usage: cargo run --release --example graphics_capture -- OUTPUT_DIR [--bench] [--animate]
+//! Usage: cargo run --release --example graphics_capture -- OUTPUT_DIR [--bench] [--animate] [--status=normal|warning|critical]
 //! It drives the real app, focus/expansion controls and ratatui TestBackend.
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
@@ -21,7 +21,7 @@ use sysmon::{
     },
     ui::dashboard::DashboardApp,
 };
-fn snapshot(i: usize) -> SystemInfo {
+fn snapshot(i: usize, status: &str) -> SystemInfo {
     let t = i as f64;
     let cpu = 22.0 + 15.0 * (t * 0.31).sin() + if i.is_multiple_of(19) { 39.0 } else { 0.0 };
     let net = NetworkInfo {
@@ -43,7 +43,7 @@ fn snapshot(i: usize) -> SystemInfo {
         read_bytes_per_sec: Some(10_000_000.0),
         written_bytes_per_sec: Some(1_000_000.0),
     };
-    SystemInfo {
+    let mut info = SystemInfo {
         host_name: "workstation".into(),
         os_name: "Linux".into(),
         kernel: "6.18".into(),
@@ -102,7 +102,27 @@ fn snapshot(i: usize) -> SystemInfo {
             celsius: Some(54.0),
             critical_celsius: Some(95.0),
         }],
+    };
+    // Explicit synthetic pressure fixtures for palette and state review.
+    if status != "normal" {
+        let load = if status == "warning" { 0.88 } else { 0.98 };
+        info.cpu_usage = (load * 100.0) as f32;
+        info.cpu_core_usages.fill(info.cpu_usage);
+        info.used_ram = info.total_ram * load;
+        info.available_ram = info.total_ram - info.used_ram;
+        info.load_average = (16.0 * load, 16.0 * load, 16.0 * load);
+        let temperature = if status == "warning" { 86.0 } else { 98.0 };
+        info.cpu_temperature_celsius = Some(temperature);
+        info.temperatures[0].celsius = Some(temperature);
+        for gpu in &mut info.gpus {
+            gpu.usage_percent = Some(load * 100.0);
+            gpu.vram_used_bytes = gpu.vram_total_bytes.map(|total| total * load);
+        }
+        for disk in info.disks.iter_mut().chain(&mut info.storage_devices) {
+            disk.available_space = disk.total_space * (1.0 - load);
+        }
     }
+    info
 }
 fn key(app: &mut DashboardApp, code: KeyCode, modifiers: KeyModifiers) {
     app.handle_event(Event::Key(KeyEvent::new(code, modifiers)));
@@ -120,6 +140,13 @@ fn main() {
     fs::create_dir_all(&folder).unwrap();
     let benchmark = std::env::args().any(|arg| arg == "--bench");
     let animate = std::env::args().any(|arg| arg == "--animate");
+    let status = std::env::args()
+        .find_map(|arg| arg.strip_prefix("--status=").map(str::to_owned))
+        .unwrap_or_else(|| "normal".to_owned());
+    assert!(
+        matches!(status.as_str(), "normal" | "warning" | "critical"),
+        "unknown fixture status"
+    );
     let cases = [
         (80, 24, 0, 0),
         (100, 30, 0, 0),
@@ -139,7 +166,10 @@ fn main() {
         let mut app = DashboardApp::new();
         let start = Instant::now() - Duration::from_secs(240);
         for i in 0..120 {
-            app.update(snapshot(i), start + Duration::from_secs(2 * i as u64));
+            app.update(
+                snapshot(i, &status),
+                start + Duration::from_secs(2 * i as u64),
+            );
             app.update_animations(Duration::from_secs(2));
         }
         for _ in 0..theme {

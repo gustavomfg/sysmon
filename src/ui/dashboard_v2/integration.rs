@@ -691,7 +691,7 @@ impl DashboardV2Renderer {
             return Ok(false);
         }
 
-        let pulse_theme = pulse_theme(theme);
+        let pulse_theme = theme.pulse_scene();
         let use_braille = raster_area.width >= 8 && raster_area.height >= 4;
         let field_width = if use_braille {
             usize::from(raster_area.width).checked_mul(2)
@@ -759,27 +759,6 @@ impl DashboardV2Renderer {
         draw_raster(raster_area, raster, theme, buffer);
         Ok(true)
     }
-}
-
-fn pulse_theme(theme: &Theme) -> Theme {
-    if *theme != Theme::pulse() {
-        return *theme;
-    }
-
-    // Keep the dashboard's terminal palette restrained while preserving the
-    // original Pulse identity in the central visualization: violet energy,
-    // cyan flow, and warm colors only for pressure.
-    let mut pulse = *theme;
-    pulse.primary = Color::Rgb(0xA8, 0x55, 0xF7);
-    pulse.secondary = Color::Rgb(0x22, 0xD3, 0xEE);
-    pulse.accent = Color::Rgb(0x7C, 0x3A, 0xED);
-    pulse.info = Color::Rgb(0x38, 0xBD, 0xF8);
-    pulse.warning = Color::Rgb(0xF5, 0x9E, 0x0B);
-    pulse.danger = Color::Rgb(0xEF, 0x44, 0x44);
-    pulse.pulse_low = Color::Rgb(0x6D, 0x28, 0xD9);
-    pulse.pulse_medium = Color::Rgb(0xA8, 0x55, 0xF7);
-    pulse.pulse_high = Color::Rgb(0x22, 0xD3, 0xEE);
-    pulse
 }
 
 fn visible_primary(
@@ -1131,7 +1110,7 @@ fn diagnosis(
         HealthSeverity::Elevated => (
             "elevated",
             format!("{source} under sustained load"),
-            theme.accent,
+            theme.warning,
         ),
         HealthSeverity::Stressed => (
             "stressed",
@@ -1553,7 +1532,7 @@ fn render_system_instruments(
         .max(1);
     if let Some((one, five, fifteen)) = context.load_average {
         let (arrow, arrow_color) = if one > fifteen * 1.15 + 0.05 {
-            ("↗", theme.warning)
+            ("↗", theme.text_muted)
         } else if one < fifteen * 0.85 - 0.05 {
             ("↘", theme.primary)
         } else {
@@ -1843,7 +1822,7 @@ fn render_temperatures(
     theme: &Theme,
     buffer: &mut Buffer,
 ) {
-    panel_heading(area, "TEMPERATURES", theme.warning, theme, buffer);
+    panel_heading(area, "TEMPERATURES", theme.text, theme, buffer);
     if !inventory.temperatures.is_empty() {
         for (index, sensor) in inventory.temperatures.iter().enumerate() {
             render_temperature_row(
@@ -1959,7 +1938,7 @@ fn render_processes(
     theme: &Theme,
     buffer: &mut Buffer,
 ) {
-    panel_heading(area, "TOP PROCESSES", theme.primary, theme, buffer);
+    panel_heading(area, "TOP PROCESSES", theme.text, theme, buffer);
     if area.height > 2 {
         render_process_columns_header(area, theme, buffer);
     }
