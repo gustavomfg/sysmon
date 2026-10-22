@@ -123,9 +123,12 @@ cargo run --offline --release --example graphics_capture -- target/graphics-capt
 cargo run --offline --release --example graphics_capture -- target/graphics-animated --bench --animate
 python3 tools/render_graphics_capture.py target/graphics-captures
 python3 tools/smoke_graphics_terminal.py
+python3 tools/benchmark_graphics_terminal.py target/release/sysmon --width 160 --height 45
 ```
 
 A conversão opcional para PNG precisa de Pillow e uma das fontes indicadas no script. Não há dependência nova no executável. Veja a [comparação visual](docs/graphics/comparison.png), a [arquitetura](docs/graphics-architecture.md), a [pesquisa](docs/graphics-research.md) e os [resultados e medições](docs/graphics-overhaul-results.md).
+
+O benchmark em PTY usa telemetria real durante oito segundos, descarta dois segundos de aquecimento e informa CPU relativa a um núcleo e RSS. Para comparar versões, alterne a ordem das execuções. Sua saída contém somente estatísticas, sem guardar informações da tela.
 
 ### Compatibilidade de terminal
 

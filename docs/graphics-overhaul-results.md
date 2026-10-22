@@ -1,9 +1,13 @@
 # Resultado da revisão gráfica
 
-Concluído em 13/10/2026, a partir de `334fb1f`, na branch
+Primeira entrega concluída em 13/10/2026, a partir de `334fb1f`, na branch
 `graphics/telemetry-instruments`. Sem push/publicação, dependências novas de
 runtime ou alteração de licença. Exclusões preexistentes do usuário preservadas
 e excluídas dos commits desta revisão.
+
+A continuação de 22/10/2026 corrigiu a invalidação excessiva do cache do Pulse;
+as novas medições estão na última seção deste documento. Os resultados da
+primeira entrega abaixo permanecem como registro histórico.
 
 ## Entrega
 
@@ -163,3 +167,83 @@ python3 tools/smoke_graphics_terminal.py
 - Próxima prioridade de desempenho: perfilar o caminho animado do Pulse e
   suas alocações, preservando sua identidade, métricas e resultado visual.
   Otimização desse motor não foi incluída nesta revisão lateral.
+
+## Continuação — desempenho em 22/10/2026
+
+Baseline desta etapa: `7596235`, com árvore limpa e 331 testes passando.
+As exclusões anteriores já haviam sido registradas no commit autorizado pelo
+usuário. A investigação concentrou-se no custo de animação que ficou documentado.
+
+### Causa e correção
+
+O cache usava ticks de 100 ms, mas também exigia igualdade da entrada animada.
+A interpolação de saúde/comportamento alterava essa entrada entre ticks,
+provocando gerações adicionais. Uma cópia de pesquisa instrumentada registrou
+148 gerações em oito segundos a 160×45, com 68 repetições no mesmo tick.
+O estágio de movimento orgânico concentrou cerca de 53% do tempo acumulado
+do pipeline nesse perfil inicial.
+
+A correção em `DashboardV2Renderer::render_pulse` reutiliza a cena dentro do
+tick animado e consome a entrada mais recente no primeiro frame do próximo
+tick. Mudanças de tamanho, tema e modo de movimento invalidam imediatamente.
+Em movimento reduzido, mudanças de telemetria continuam invalidando o cache.
+O perfil após a correção registrou **80 gerações e nenhuma repetição**.
+
+Nenhum algoritmo do motor de partículas, campo, ruído, iluminação, cores ou
+rasterização foi alterado. Métricas animadas agora aguardam o próximo tick
+de 100 ms e o frame disponível; os instrumentos laterais, alertas, coleta e
+linha vital mantêm suas próprias atualizações. A identidade visual permanece,
+com reutilização deliberada de frames intermediários.
+
+### Medições sem instrumentação
+
+Mesmo host AMD Ryzen 5 4600G, Rust 1.97.1, build release e governor `schedutil`.
+Configurações do sistema não foram alteradas. Três rodadas por tamanho, oito
+segundos cada, com ordem original/final, final/original e original/final.
+Dois segundos de aquecimento; aproximadamente 5,8 s medidos por execução.
+São **12 execuções com coleta real**, drenando a saída do PTY.
+
+| Terminal | CPU mediana anterior | CPU mediana nova | Variação relativa |
+| --- | ---: | ---: | ---: |
+| 80×24 | 29,09% de um núcleo | 16,74% de um núcleo | −42,5% |
+| 160×45 | 27,39% de um núcleo | 20,39% de um núcleo | −25,6% |
+
+A CPU nova variou de 14,67–21,90% em 80×24 e 18,25–23,39% em 160×45.
+As três execuções de cada tamanho ficaram abaixo das respectivas execuções
+anteriores. Ainda há custo relevante de animação; estas medições curtas de um
+host não garantem os mesmos percentuais em outras máquinas.
+
+Use os perfis instrumentados para identificar gerações e etapas; a comparação
+de CPU acima usa somente as execuções sem instrumentação. Os perfis tiveram
+tempos de etapa variáveis, registrados integralmente nas evidências.
+
+### Verificação e reprodução
+
+- **333 testes passaram**, sem falhas ou ignorados; Clippy estrito, formatação
+  e build de release passaram.
+- Novos testes verificam reutilização dentro do tick, consumo da última entrada
+  no próximo tick e invalidação por tamanho, tema e movimento reduzido.
+- **12 capturas completas idênticas byte a byte**: cinco tamanhos, três temas
+  e cinco expansões, comparando símbolos, cores e modificadores do primeiro
+  frame. Isso verifica aparência, sem alegar identidade da sequência temporal.
+- No próximo tick, o teste compara a cena reutilizada/atualizada com uma
+  renderização nova na mesma fase e com a mesma telemetria: pixels idênticos.
+- Smoke real em Unicode/True Color e ASCII/mono passou foco, expansão, busca,
+  tema e resize. Todas as execuções saíram com código 0 e restauraram modo raw
+  e tela alternativa.
+
+[Dados brutos, perfis, hashes e smoke](graphics/pulse-performance-20261022.json).
+O [patch de instrumentação](graphics/pulse-profiling.patch) foi aplicado somente
+à cópia temporária de pesquisa. Pode ser reaplicado a uma cópia de `7596235`
+ou à versão atual com `git apply --unidiff-zero` para repetir a contagem;
+não faz parte do executável normal.
+
+```bash
+python3 tools/benchmark_graphics_terminal.py target/release/sysmon --width 80 --height 24
+python3 tools/benchmark_graphics_terminal.py target/release/sysmon --width 160 --height 45
+```
+
+O script usa a biblioteca padrão do Python e limita a execução a 4–30 segundos
+mais o prazo de encerramento. Não guarda conteúdo da tela. Próxima oportunidade:
+estudar o custo interno do movimento orgânico, com equivalência visual
+demonstrada antes de qualquer mudança no motor.

@@ -17,6 +17,14 @@ Coleta: 1/2/4 segundos, GPU com cache de 5 segundos. Loop visual: intervalo de
 laterais atualizam seus modelos na coleta e seus pixels quando conteúdo,
 foco, tema, inventário, expansão ou geometria mudam.
 
+O cache da cena animada do Pulse usa ticks de 100 ms. Desde a correção de
+22/10/2026, mudanças intermediárias das métricas suavizadas são consolidadas:
+o primeiro frame disponível no próximo tick consome a entrada mais recente.
+Isso mantém a geração em aproximadamente 10 Hz, com a UI em até 20 Hz. Tamanho,
+tema e modo de movimento invalidam imediatamente; no movimento reduzido, uma
+nova entrada também invalida, pois o tick fica parado. A regra altera somente
+a reutilização da cena na integração; o motor e seus algoritmos são os mesmos.
+
 ## Histórico e tempo
 
 `chart.rs` mantém `TimeSeries<N>` em array circular, com escrita de slot e

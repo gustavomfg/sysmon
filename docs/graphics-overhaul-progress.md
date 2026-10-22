@@ -94,3 +94,30 @@ decisions will be recorded in the accompanying graphics documents.
   per-device histories, richer memory pressure telemetry, emulator diversity
   and profiling the existing animated Pulse cost. No required implementation
   step remains pending for the delivered lateral instruments.
+
+## Continuation — 2026-10-22
+
+- Resumed at clean commit `7596235`; the user had authorized and committed the
+  19 earlier deletions separately. No new user modifications were present.
+- Baseline remains 331 passing tests. Investigation artifacts and baseline
+  binaries are isolated in `target/pulse-performance-20261022/`.
+- Instrumented only a research copy of the Pulse pipeline. An eight-second
+  160×45 run generated 148 scenes, including 68 repeated 100 ms ticks. The
+  animated input comparison bypassed the intended raster cadence while the
+  health/behavior model eased between telemetry samples.
+- Implemented a small integration correction: animated scenes consume the
+  latest input on the next tick; reduced-motion scenes still respond directly
+  to telemetry. Theme, dimensions and motion-mode changes invalidate immediately.
+  No field, particle, noise, lighting, color or raster algorithm was changed.
+- Validation complete: 333 tests, strict all-target Clippy, format and release
+  build passed. Both terminal smoke modes passed with full restoration.
+- Instrumented follow-up: 80 scenes in eight seconds, zero duplicate ticks.
+  Twelve uninstrumented paired runs (three per version/size) measured median
+  one-core CPU of 29.09% → 16.74% at 80×24 and 27.39% → 20.39% at 160×45.
+  Individual runs and instrumented-stage variability are preserved in evidence.
+- All 12 full first-frame captures are byte-identical. Regression tests compare
+  refreshed scenes to fresh rendering at the same phase/input. Intermediate
+  frames are deliberately reused until the next 100 ms tick and available draw.
+- Results, raw measurements and the research-only instrumentation patch are
+  documented in `graphics-overhaul-results.md` and `docs/graphics/`.
+  No runtime dependency or Pulse engine change; local commits only, no push.
