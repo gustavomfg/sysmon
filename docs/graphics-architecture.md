@@ -108,8 +108,7 @@ em [Resultados](graphics-overhaul-results.md).
 
 ## Paleta semântica — revisão de 22/10/2026
 
-O tema padrão Pulse usa fundo `#080808`, superfície `#101010`, texto `#EEEEEE`
-e texto secundário `#A0A0A0`. Bordas, foco, seleção e informação são neutros.
+O tema padrão Pulse usa fundo `#080808`, superfície `#101010`, texto e texto secundário `#FFFFFF`. Bordas, foco, seleção e informação são neutros.
 Verde `#7BD88F`, amarelo `#E8C65A` e vermelho `#F07575` indicam, respectivamente,
 telemetria normal, atenção e estado crítico. Os presets opcionais Catppuccin e
 Tokyo Night continuam disponíveis com suas paletas próprias.
@@ -124,8 +123,13 @@ Rede e I/O usam branco e verde, com legendas e posições distintas, pois taxa a
 isoladamente não define um estado crítico. Tendência ascendente de load deixou
 de receber amarelo por si só.
 
-`Theme::pulse_scene` deriva tons verdes, profundidade e destaques claros para o
-SYSTEM PULSE. A alteração é exclusivamente de apresentação: os algoritmos de
+`Theme::pulse_scene` restaura a paleta original roxa/ciano, incluindo os tons
+de alerta e destaques anteriores, exclusivamente para o SYSTEM PULSE. A alteração é exclusivamente de apresentação: os algoritmos de
 movimento, energia, iluminação e rasterização não foram modificados. O campo
 continua aplicando os destaques de pressão existentes. Seus testes de cor usam a
 mesma paleta derivada aplicada pelo dashboard.
+
+Após os overlays e antes do fallback de terminal, `Theme::apply_text_palette`
+aplica branco aos caracteres textuais (letras, números e pontuação de unidades)
+do tema padrão. Remove DIM desses caracteres; mantém cores de Braille, blocos,
+barras e símbolos de estado. O logotipo usa fundo neutro para preservar contraste.

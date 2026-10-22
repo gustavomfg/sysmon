@@ -134,3 +134,18 @@ decisions will be recorded in the accompanying graphics documents.
 - Capturas sintéticas em cinco tamanhos e expansões: 12 pares sem alteração de caracteres.
 - Fixtures adicionais `--status=warning` e `--status=critical` permitem reproduzir os estados.
 - Evidências e limitações no relatório; commits locais, sem push.
+
+
+### Correção solicitada — Pulse original e textos brancos
+
+O usuário esclareceu que o Pulse deve manter as cores anteriores. Restaurados
+os tokens originais roxo/ciano e seus destaques; a interface permanece neutra.
+Todos os textos do tema padrão, inclusive valores em alerta e textos secundários,
+passam a branco. Gráficos, barras e símbolos mantêm suas cores semânticas.
+As três capturas `palette-*.png` foram atualizadas para refletir esta correção.
+
+Validação: suíte existente de 336 testes passou, e um novo teste de tipografia
+passou separadamente (337 testes no total). Build release e Clippy estrito passaram.
+A captura de 160×45 confirmou que as células não vazias da cena central conservam
+os mesmos caracteres e cores de primeiro plano da versão anterior à revisão de
+paleta. O motor de animação não foi alterado. Sem push.
