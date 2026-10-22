@@ -232,15 +232,11 @@ impl DashboardApp {
         if !self.prepared_primary.as_ref().is_some_and(|cache| {
             cache.revision == self.sample_revision && cache.context == cache_context
         }) {
-            let models = self
-                .models
-                .as_ref()
-                .map(|models| primary_models(models, widget_context))
-                .unwrap_or([None; 5]);
+            let models = primary_models(self.models.as_ref(), widget_context);
             self.prepared_primary = Some(PreparedPrimary {
                 revision: self.sample_revision,
                 context: cache_context,
-                models: Arc::new(models),
+                models,
             });
         }
         let primary = Arc::clone(
@@ -604,26 +600,47 @@ fn focused_widget(ui: &AppState) -> Option<crate::ui::dashboard_v2::DashboardWid
 }
 
 fn primary_models(
-    models: &LiveMetricModels,
+    models: Option<&LiveMetricModels>,
     context: WidgetContext,
-) -> [Option<crate::ui::dashboard_v2::WidgetRenderModel>; 5] {
-    [
-        WidgetRenderer::render_cpu(models.cpu(), context)
-            .ok()
-            .flatten(),
-        WidgetRenderer::render_memory(models.memory(), context)
-            .ok()
-            .flatten(),
-        WidgetRenderer::render_gpu(models.gpu(), context)
-            .ok()
-            .flatten(),
-        WidgetRenderer::render_network(models.network(), context)
-            .ok()
-            .flatten(),
-        WidgetRenderer::render_storage(models.storage(), context)
-            .ok()
-            .flatten(),
-    ]
+) -> Arc<[Option<crate::ui::dashboard_v2::WidgetRenderModel>; 5]> {
+    // Render blocks carry bounded history arrays. Construct the five cards on
+    // the heap one at a time instead of copying several large arrays through
+    // Option::map/unwrap_or on the terminal draw stack.
+    let mut prepared = Vec::with_capacity(5);
+    if let Some(models) = models {
+        prepared.push(
+            WidgetRenderer::render_cpu(models.cpu(), context)
+                .ok()
+                .flatten(),
+        );
+        prepared.push(
+            WidgetRenderer::render_memory(models.memory(), context)
+                .ok()
+                .flatten(),
+        );
+        prepared.push(
+            WidgetRenderer::render_gpu(models.gpu(), context)
+                .ok()
+                .flatten(),
+        );
+        prepared.push(
+            WidgetRenderer::render_network(models.network(), context)
+                .ok()
+                .flatten(),
+        );
+        prepared.push(
+            WidgetRenderer::render_storage(models.storage(), context)
+                .ok()
+                .flatten(),
+        );
+    } else {
+        prepared.resize_with(5, || None);
+    }
+    let prepared: Box<[_; 5]> = prepared
+        .into_boxed_slice()
+        .try_into()
+        .expect("five primary cards");
+    Arc::from(prepared)
 }
 
 fn dashboard_state_for_models(models: &LiveMetricModels) -> DashboardState {

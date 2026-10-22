@@ -71,9 +71,7 @@ impl GpuInfo {
         }
 
         let nvidia_gpus = nvidia_gpus.unwrap_or_default();
-        let has_nvidia_metrics = nvidia_gpus
-            .iter()
-            .any(|gpu| gpu.name.to_ascii_lowercase().contains("nvidia"));
+        let has_nvidia_metrics = !nvidia_gpus.is_empty();
         let mut gpus = nvidia_gpus;
         gpus.extend(
             drm_gpus
@@ -87,7 +85,17 @@ impl GpuInfo {
     fn parse_output(output: &str) -> Vec<Self> {
         let mut gpus = output
             .lines()
-            .filter_map(Self::parse_line)
+            .filter_map(|line| {
+                let (line, id) = line
+                    .rsplit_once(',')
+                    .filter(|(_, id)| id.trim().starts_with("GPU-"))
+                    .map_or((line, None), |(line, id)| (line, Some(id.trim())));
+                let mut gpu = Self::parse_line(line)?;
+                if let Some(id) = id {
+                    gpu.id = id.to_owned();
+                }
+                Some(gpu)
+            })
             .collect::<Vec<_>>();
         assign_stable_gpu_ids(&mut gpus);
         gpus
@@ -101,11 +109,11 @@ impl GpuInfo {
             let frequency_hz = parse_optional(fields[1]).map(|value| value * 1.0e6);
             let vram_total_bytes = parse_optional(fields[2]).map(mebibytes_to_bytes);
             let vram_used_bytes = parse_optional(fields[3]).map(mebibytes_to_bytes);
-            let usage_percent = fields[4].parse::<f64>().ok()?;
+            let usage_percent = parse_optional(fields[4]).filter(|value| *value <= 100.0);
             let temperature_celsius = parse_optional(fields[5]);
             let name = fields[6];
 
-            if name.is_empty() || !(0.0..=100.0).contains(&usage_percent) {
+            if name.is_empty() {
                 return None;
             }
 
@@ -114,12 +122,12 @@ impl GpuInfo {
                 name: name.to_string(),
                 temperature: temperature_celsius
                     .map_or_else(|| "—".to_owned(), |value| format!("{value:.0}°C")),
-                usage: format!("{usage_percent:.0}%"),
+                usage: usage_percent.map_or_else(|| "—".to_owned(), |value| format!("{value:.0}%")),
                 memory: vram_used_bytes.map_or_else(
                     || "—".to_owned(),
                     |value| format!("{:.0} MiB", value / 1024.0 / 1024.0),
                 ),
-                usage_percent: Some(usage_percent),
+                usage_percent,
                 vram_used_bytes,
                 vram_total_bytes,
                 temperature_celsius,
@@ -157,7 +165,7 @@ impl GpuInfo {
 fn query_nvidia_smi() -> Option<Vec<GpuInfo>> {
     let mut child = Command::new("nvidia-smi")
         .args([
-            "--query-gpu=name,temperature.gpu,utilization.gpu,memory.used,memory.total,clocks.current.graphics,power.draw",
+            "--query-gpu=name,temperature.gpu,utilization.gpu,memory.used,memory.total,clocks.current.graphics,power.draw,uuid",
             "--format=csv,noheader,nounits",
         ])
         .stdin(Stdio::null())
@@ -215,7 +223,14 @@ fn drm_gpu_infos() -> Vec<GpuInfo> {
             .into_iter()
             .filter_map(|entry| {
                 let uevent = std::fs::read_to_string(entry.path().join("device/uevent")).ok()?;
-                parse_drm_uevent(&uevent)
+                let mut gpu = parse_drm_uevent(&uevent)?;
+                if let Some(slot) = uevent
+                    .lines()
+                    .find_map(|line| line.strip_prefix("PCI_SLOT_NAME="))
+                {
+                    gpu.id = format!("pci:{slot}");
+                }
+                Some(gpu)
             })
             .collect()
     }
@@ -274,6 +289,9 @@ fn fallback_gpu_info(name: &str) -> GpuInfo {
 fn assign_stable_gpu_ids(gpus: &mut [GpuInfo]) {
     let mut occurrences = BTreeMap::<String, usize>::new();
     for gpu in gpus {
+        if !gpu.id.is_empty() {
+            continue;
+        }
         let base = stable_gpu_id(&gpu.name);
         let occurrence = occurrences.entry(base.clone()).or_insert(0);
         gpu.id = if *occurrence == 0 {
@@ -313,6 +331,28 @@ fn mebibytes_to_bytes(value: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::{GpuInfo, parse_drm_uevent};
+
+    #[test]
+    fn identical_gpu_names_keep_physical_ids_when_probe_order_changes() {
+        let first = "NVIDIA Audit GPU, 52, 10, 1024, 8192, 1800, 35, GPU-first";
+        let second = "NVIDIA Audit GPU, 48, 80, 2048, 8192, 1800, 50, GPU-second";
+        let forward = GpuInfo::parse_output(&format!("{first}\n{second}"));
+        let reverse = GpuInfo::parse_output(&format!("{second}\n{first}"));
+        assert_eq!(forward[0].id, reverse[1].id);
+        assert_eq!(forward[1].id, reverse[0].id);
+        assert_ne!(forward[0].id, forward[1].id);
+        assert_eq!(forward[0].usage_percent, Some(10.0));
+    }
+
+    #[test]
+    fn missing_utilization_keeps_other_gpu_readings() {
+        let gpus = GpuInfo::parse_output("NVIDIA Audit GPU, 52, N/A, 1024, 8192, 1800, 35");
+        assert_eq!(gpus.len(), 1);
+        assert_eq!(gpus[0].usage_percent, None);
+        assert_eq!(gpus[0].temperature_celsius, Some(52.0));
+        assert_eq!(gpus[0].vram_used_bytes, Some(1024.0 * 1024.0 * 1024.0));
+        assert_eq!(gpus[0].frequency_hz, Some(1.8e9));
+    }
 
     #[test]
     fn parses_all_valid_gpus() {

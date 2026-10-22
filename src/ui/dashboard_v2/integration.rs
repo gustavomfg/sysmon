@@ -73,7 +73,9 @@ impl DashboardV2SystemContext {
         processes.sort_unstable_by(|left, right| {
             right
                 .cpu_percent
-                .total_cmp(&left.cpu_percent)
+                .is_finite()
+                .cmp(&left.cpu_percent.is_finite())
+                .then_with(|| right.cpu_percent.total_cmp(&left.cpu_percent))
                 .then_with(|| right.memory_bytes.cmp(&left.memory_bytes))
                 .then_with(|| left.name.cmp(&right.name))
         });
@@ -2082,7 +2084,11 @@ fn render_process_row(
     buffer.set_stringn(
         cpu_x,
         y,
-        format!("{cpu_percent:>5.1}%"),
+        if cpu_percent.is_finite() {
+            format!("{cpu_percent:>5.1}%")
+        } else {
+            "    —".to_owned()
+        },
         usize::from(cpu_width),
         if idle {
             Style::default().fg(theme.text_muted).bg(theme.surface)
@@ -2522,7 +2528,7 @@ const fn widget_label(widget: DashboardWidgetId) -> &'static str {
         DashboardWidgetId::Gpu => "GPU",
         DashboardWidgetId::Network => "NETWORK",
         DashboardWidgetId::Storage => "STORAGE",
-        DashboardWidgetId::History => "HISTORY",
+        DashboardWidgetId::History => "TEMPERATURES",
         DashboardWidgetId::Processes => "PROCESSES",
         DashboardWidgetId::Alerts => "ALERTS",
     }

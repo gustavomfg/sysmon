@@ -109,12 +109,25 @@ impl DashboardLayoutEngine {
         place(&mut sections, DashboardRegion::Header, header, context);
         place(&mut sections, DashboardRegion::Footer, footer, context);
 
-        match preset {
-            DashboardPreset::Compact => compact_layout(&mut sections, body, preset, context)?,
-            DashboardPreset::Standard => standard_layout(&mut sections, body, preset, context)?,
-            DashboardPreset::Widescreen => widescreen_layout(&mut sections, body, preset, context)?,
-            DashboardPreset::LargeWidescreen => {
-                large_widescreen_layout(&mut sections, body, preset, context)?
+        let body_regions = DashboardRegion::ALL
+            .into_iter()
+            .filter(|region| !matches!(region, DashboardRegion::Header | DashboardRegion::Footer))
+            .filter(|region| context.includes(*region))
+            .collect::<Vec<_>>();
+        if let [region] = body_regions.as_slice() {
+            // An expanded panel owns the body even when that region is not
+            // part of the compact preset's normal multi-panel composition.
+            place(&mut sections, *region, body, context);
+        } else {
+            match preset {
+                DashboardPreset::Compact => compact_layout(&mut sections, body, preset, context)?,
+                DashboardPreset::Standard => standard_layout(&mut sections, body, preset, context)?,
+                DashboardPreset::Widescreen => {
+                    widescreen_layout(&mut sections, body, preset, context)?
+                }
+                DashboardPreset::LargeWidescreen => {
+                    large_widescreen_layout(&mut sections, body, preset, context)?
+                }
             }
         }
 

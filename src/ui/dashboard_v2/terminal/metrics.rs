@@ -369,6 +369,35 @@ fn render_network(
             graph_offset += 1;
         }
     }
+    if body.height >= 12
+        && let Some(inventory) = inventory
+    {
+        let budget = body.height.saturating_sub(graph_offset + 8);
+        if budget >= 2 {
+            write(
+                buffer,
+                line(body, graph_offset),
+                "INTERFACES · non-loopback total",
+                context_style(model, theme),
+            );
+            graph_offset += 1;
+            for interface in inventory.networks.iter().take(usize::from(budget - 1)) {
+                let rate = |value: Option<f64>| value.map_or_else(|| "—".to_owned(), format_rate);
+                write(
+                    buffer,
+                    line(body, graph_offset),
+                    &format!(
+                        "{}  ↓ {}  ↑ {}",
+                        interface.name,
+                        rate(interface.download_bytes_per_sec),
+                        rate(interface.upload_bytes_per_sec)
+                    ),
+                    context_style(model, theme),
+                );
+                graph_offset += 1;
+            }
+        }
+    }
     let graph = Rect::new(
         body.x,
         body.y.saturating_add(graph_offset),
@@ -631,6 +660,7 @@ fn render_gpu_inventory(
             );
             offset += 1;
         }
+        offset = render_gpu_peers(inventory, primary_index, body, offset, theme, buffer);
         render_percent_history(model, history_chart::region(body, offset), theme, buffer);
     } else {
         write(
@@ -652,7 +682,63 @@ fn render_gpu_inventory(
                 );
             }
         }
+        render_gpu_peers(inventory, primary_index, body, 2, theme, buffer);
     }
+}
+
+/// Extra space shows current readings for the other GPUs. The history below
+/// still belongs to the primary GPU; no histories from different devices mix.
+fn render_gpu_peers(
+    inventory: &HardwareInventory,
+    primary: usize,
+    body: Rect,
+    mut offset: u16,
+    theme: &Theme,
+    buffer: &mut Buffer,
+) -> u16 {
+    if body.height < 12 {
+        return offset;
+    }
+    let budget = body.height.saturating_sub(offset + 8);
+    let peers = inventory
+        .gpus
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| *index != primary);
+    let shown = usize::from(budget / 2).min(inventory.gpus.len().saturating_sub(1));
+    for (index, gpu) in peers.take(shown) {
+        write(
+            buffer,
+            line(body, offset),
+            &format!(
+                "GPU {}  {}  {}",
+                index + 1,
+                gpu_display_name(&gpu.name),
+                gpu_usage_text(gpu)
+            ),
+            context_style_for_theme(theme),
+        );
+        write(
+            buffer,
+            line(body, offset + 1),
+            &gpu_context(gpu),
+            context_style_for_theme(theme),
+        );
+        offset += 2;
+    }
+    if budget > 0 {
+        write(
+            buffer,
+            line(body, offset),
+            &format!(
+                "HISTORY  {}",
+                gpu_display_name(&inventory.gpus[primary].name)
+            ),
+            context_style_for_theme(theme),
+        );
+        offset += 1;
+    }
+    offset
 }
 
 // Preserve complete context tokens before assigning remaining rows to history.
@@ -730,6 +816,9 @@ fn gpu_context_with_frequency(gpu: &super::super::GpuDevice, include_frequency: 
     }
     if include_frequency && let Some(frequency) = gpu.frequency_hz {
         values.push(format_frequency(frequency));
+    }
+    if let Some(power) = gpu.power_watts {
+        values.push(format!("{power:.1} W"));
     }
     values.join(" · ")
 }

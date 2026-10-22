@@ -55,7 +55,10 @@ impl CpuCardRenderer {
             area.width,
             area.height.saturating_sub(1),
         );
-        if preset == DashboardPreset::Compact || body.width < 24 || body.height < 4 {
+        if (preset == DashboardPreset::Compact && body.height < 8)
+            || body.width < 24
+            || body.height < 4
+        {
             render_compact_body(model, body, theme, buffer);
         } else {
             let core_map = core_map_area(cores, body);
@@ -243,6 +246,10 @@ fn render_core_map(cores: &[f64], area: Rect, theme: &Theme, buffer: &mut Buffer
         let x = area
             .x
             .saturating_add(u16::try_from(index).unwrap_or(0).saturating_mul(stride));
+        if !usage.is_finite() {
+            buffer[(x, bottom)].set_char('—').set_fg(theme.text_muted);
+            continue;
+        }
         let load = (usage / 100.0).clamp(0.0, 1.0);
         let mut color = super::super::vital::heat_color(load, theme);
         if stride == 1 && index % 2 == 1 {

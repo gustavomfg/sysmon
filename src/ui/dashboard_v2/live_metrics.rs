@@ -66,9 +66,10 @@ impl LiveSnapshot {
                         .usage_percent
                         .or_else(|| parse_percent(&gpu.usage))
                         .and_then(valid_percent),
-                    vram_used_bytes: finite_non_negative(gpu.vram_used_bytes),
-                    vram_total_bytes: finite_non_negative(gpu.vram_total_bytes),
-                    temperature_celsius: finite_non_negative(gpu.temperature_celsius),
+                    vram_used_bytes: valid_capacity_used(gpu.vram_used_bytes, gpu.vram_total_bytes),
+                    vram_total_bytes: finite_non_negative(gpu.vram_total_bytes)
+                        .filter(|total| *total > 0.0),
+                    temperature_celsius: finite_temperature(gpu.temperature_celsius),
                     frequency_hz: finite_non_negative(gpu.frequency_hz),
                     power_watts: finite_non_negative(gpu.power_watts),
                     availability: MetricAvailability::Available,
@@ -85,10 +86,15 @@ impl LiveSnapshot {
                     name: disk.name.clone(),
                     model: disk.model.clone(),
                     mount_points: disk.mount_points.clone(),
-                    used_bytes: finite_non_negative(Some(
-                        (disk.total_space - disk.available_space).max(0.0) * GIBIBYTE,
-                    )),
-                    total_bytes: finite_non_negative(Some(disk.total_space.max(0.0) * GIBIBYTE)),
+                    used_bytes: finite_non_negative(Some(disk.available_space * GIBIBYTE))
+                        .filter(|available| {
+                            disk.total_space.is_finite()
+                                && disk.total_space > 0.0
+                                && *available <= disk.total_space * GIBIBYTE
+                        })
+                        .map(|available| disk.total_space * GIBIBYTE - available),
+                    total_bytes: finite_non_negative(Some(disk.total_space * GIBIBYTE))
+                        .filter(|total| *total > 0.0),
                     read_bytes_per_sec: finite_non_negative(disk.read_bytes_per_sec),
                     write_bytes_per_sec: finite_non_negative(disk.written_bytes_per_sec),
                     latency_seconds: None,
@@ -129,7 +135,7 @@ impl LiveSnapshot {
                 Some(TemperatureSensor {
                     id: HardwareId::new(HardwareKind::Temperature, sensor.id.clone())?,
                     label: sensor.label.clone(),
-                    celsius: finite_non_negative(sensor.celsius),
+                    celsius: finite_temperature(sensor.celsius),
                     critical_celsius: finite_non_negative(sensor.critical_celsius)
                         .filter(|limit| *limit > 0.0),
                     availability: MetricAvailability::Available,
@@ -145,7 +151,7 @@ impl LiveSnapshot {
                 if usage.is_finite() {
                     usage.clamp(0.0, 100.0)
                 } else {
-                    0.0
+                    f64::NAN
                 }
             })
             .collect();
@@ -154,9 +160,10 @@ impl LiveSnapshot {
             .get(super::inventory::select_primary_gpu(&hardware.gpus))
             .map(|gpu| LiveGpuSnapshot {
                 utilization_percent: gpu.utilization_percent,
-                vram_used_bytes: finite_non_negative(gpu.vram_used_bytes),
-                vram_total_bytes: finite_non_negative(gpu.vram_total_bytes),
-                temperature_celsius: finite_non_negative(gpu.temperature_celsius),
+                vram_used_bytes: valid_capacity_used(gpu.vram_used_bytes, gpu.vram_total_bytes),
+                vram_total_bytes: finite_non_negative(gpu.vram_total_bytes)
+                    .filter(|total| *total > 0.0),
+                temperature_celsius: finite_temperature(gpu.temperature_celsius),
                 frequency_hz: finite_non_negative(gpu.frequency_hz),
                 power_watts: finite_non_negative(gpu.power_watts),
             });
@@ -191,7 +198,7 @@ impl LiveSnapshot {
             cpu: CpuLiveSample {
                 utilization_percent: valid_percent(f64::from(snapshot.cpu_usage)),
                 frequency_hz: finite_non_negative(snapshot.cpu_frequency_hz),
-                temperature_celsius: finite_non_negative(snapshot.cpu_temperature_celsius),
+                temperature_celsius: finite_temperature(snapshot.cpu_temperature_celsius),
                 cores: snapshot.cpu_physical_cores.unwrap_or(snapshot.cpu_cores),
             },
             memory_used_bytes: finite_non_negative(Some(snapshot.used_ram * GIBIBYTE)),
@@ -417,9 +424,10 @@ impl LiveMetricsHistory {
             .gpu
             .map_or_else(GpuSample::unavailable, |gpu| GpuSample {
                 utilization_percent: finite_percent(gpu.utilization_percent),
-                vram_used_bytes: finite_non_negative(gpu.vram_used_bytes),
-                vram_total_bytes: finite_non_negative(gpu.vram_total_bytes),
-                temperature_celsius: finite_non_negative(gpu.temperature_celsius),
+                vram_used_bytes: valid_capacity_used(gpu.vram_used_bytes, gpu.vram_total_bytes),
+                vram_total_bytes: finite_non_negative(gpu.vram_total_bytes)
+                    .filter(|total| *total > 0.0),
+                temperature_celsius: finite_temperature(gpu.temperature_celsius),
                 frequency_hz: finite_non_negative(gpu.frequency_hz),
                 power_watts: finite_non_negative(gpu.power_watts),
             });
@@ -447,8 +455,8 @@ impl LiveMetricsHistory {
         self.storage = snapshot
             .storage
             .map_or_else(StorageSample::unavailable, |storage| StorageSample {
-                used_bytes: finite_non_negative(storage.used_bytes),
-                total_bytes: finite_non_negative(storage.total_bytes),
+                used_bytes: valid_capacity_used(storage.used_bytes, storage.total_bytes),
+                total_bytes: finite_non_negative(storage.total_bytes).filter(|total| *total > 0.0),
                 read_bytes_per_sec: finite_non_negative(storage.read_bytes_per_sec),
                 write_bytes_per_sec: finite_non_negative(storage.write_bytes_per_sec),
             });
@@ -489,7 +497,10 @@ impl LiveMetricsHistory {
             normalized(self.gpu.utilization_percent.map(|value| value / 100.0)),
             non_negative(self.gpu.vram_used_bytes),
             non_negative(self.gpu.vram_total_bytes),
-            non_negative(self.gpu.temperature_celsius),
+            MetricReading::new(
+                finite_temperature(self.gpu.temperature_celsius),
+                MetricAvailability::Available,
+            )?,
             non_negative(self.gpu.frequency_hz),
             non_negative(self.gpu.power_watts),
             self.gpu_history,
@@ -603,6 +614,15 @@ fn non_negative(value: Option<f64>) -> MetricReading {
 
 fn finite_percent(value: Option<f64>) -> Option<f64> {
     value.filter(|value| value.is_finite() && (0.0..=100.0).contains(value))
+}
+
+fn finite_temperature(value: Option<f64>) -> Option<f64> {
+    value.filter(|value| value.is_finite() && *value >= -273.15)
+}
+
+fn valid_capacity_used(used: Option<f64>, total: Option<f64>) -> Option<f64> {
+    finite_non_negative(used)
+        .filter(|used| finite_non_negative(total).is_none_or(|total| total > 0.0 && *used <= total))
 }
 
 fn finite_non_negative(value: Option<f64>) -> Option<f64> {
