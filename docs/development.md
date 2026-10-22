@@ -18,17 +18,19 @@ cargo build --offline --release --bin sysmon --example graphics_capture
 `--offline` exige dependências já disponíveis no cache do Cargo. Na primeira
 compilação, use os comandos sem essa opção para obtê-las.
 
-Os testes ficam junto dos módulos em `src/`. Históricos de produção pertencem
+Os testes unitários ficam junto dos módulos em `src/`; `tests/telemetry_modes.rs`
+confere valores conhecidos com a aplicação real em foco/expansão. Históricos de produção pertencem
 a `ui::dashboard_v2`; o estado de comandos em `app.rs` não mantém uma cópia deles.
 
 ## Capturas reproduzíveis
 
 O exemplo usa a aplicação real com `TestBackend` do ratatui e dados **sintéticos**.
 Gera arquivos `.cells` e `.txt` para cinco tamanhos de terminal, três temas e os
-principais modos expandidos:
+principais modos expandidos. `--all-focus` acrescenta os dez painéis expandidos
+em cada um dos cinco tamanhos:
 
 ```sh
-target/release/examples/graphics_capture target/captures/normal
+target/release/examples/graphics_capture target/captures/normal --all-focus
 target/release/examples/graphics_capture target/captures/warning --status=warning
 target/release/examples/graphics_capture target/captures/critical --status=critical
 python3 tools/render_graphics_capture.py target/captures/normal
@@ -47,6 +49,18 @@ python3 tools/smoke_graphics_terminal.py target/release/sysmon
 O smoke cria um PTY e exercita foco, expansão, busca, troca de tema, resize e saída
 em Unicode/True Color e ASCII/monocromático. Verifica a restauração do terminal.
 Não executa a exportação de snapshots.
+
+## Conferência dos coletores no Linux
+
+```sh
+cargo run --offline --release --example telemetry_check
+```
+
+A execução dura cerca de sete segundos, com três amostras após a inicialização.
+Compara CPU, memória, swap, rede e I/O com `/proc`, capacidade com `df` e registra
+as métricas disponíveis de GPU. Não grava hostname, nomes de processos ou conteúdo
+da tela. Frequência e GPU são leituras dinâmicas, não medições sincronizadas de
+laboratório; os limites e resultados estão na [auditoria](telemetry-audit.md).
 
 ## Benchmarks limitados
 

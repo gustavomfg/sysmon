@@ -4,6 +4,7 @@
 
 - [Arquitetura](architecture.md): estrutura do código, coleta, históricos, renderização e paletas.
 - [Desenvolvimento](development.md): build, verificações, capturas, smoke e benchmarks.
+- [Auditoria da telemetria](telemetry-audit.md): correções de coleta e validação em foco/expansão.
 - [Interface normal](assets/dashboard-normal.png), [atenção](assets/dashboard-warning.png) e [crítico](assets/dashboard-critical.png): capturas com telemetria sintética.
 
 ## Histórico

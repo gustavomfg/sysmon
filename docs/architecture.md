@@ -71,6 +71,14 @@ silenciosamente nem preenchimento de dados ausentes.
   aumentar o teto para acomodar picos antigos realmente retidos.
 - Bytes e taxas exibem unidades binárias explícitas; conversões do coletor
   legado em MB/s decimal ocorrem na adaptação para bytes/s.
+- CPU e CPU por processo: startup, intervalo insuficiente e reset não são 0%;
+  são dados indisponíveis. Os campos públicos `f32` usam NaN nesse caso; a UI
+  mostra `—` e a exportação JSON escreve `null`. CPU por processo verifica também
+  o instante de criação, para não reutilizar contadores de um PID reciclado.
+- Disco no Linux: capacidade agrupa sistemas de arquivos montados, deduplicando
+  aliases; I/O mede o dispositivo indicado usando `/sys/class/block/<id>/stat`
+  e deltas monotônicos. Primeira leitura, dispositivo novo e reset produzem lacunas.
+  IDs como `dm-0`, `md127`, `loop0` e `zram0` não perdem seus sufixos numéricos.
 - Rede: delta de bytes sobre intervalo monotônico real. Startup, interface nova,
   reset/wrap ou intervalo nulo tornam a taxa indisponível. Mudança de membros
   da agregação inicia uma nova época de histórico. Não loopback inclui interfaces
@@ -113,6 +121,13 @@ Novos campos públicos opcionais: `NetworkInfo::sample_interval` e
 externos que construam esses structs por literal precisam fornecer os campos.
 As funções de coleta existentes e construtores de conteúdo foram mantidos,
 com alternativas compartilhadas para o caminho de desenho da aplicação.
+
+Os painéis isolados pela expansão ocupam o corpo disponível em qualquer preset,
+incluindo Compact. A preparação dos cinco cards usa heap para evitar cópias grandes
+de arrays na pilha; o cache permanece por revisão de coleta/contexto. GPU expandida
+mostra as leituras atuais das demais placas, enquanto o histórico é identificado
+como pertencente à principal. Rede expandida lista as interfaces; o total do card
+continua excluindo loopback.
 
 Getters do modelo e o iterador de blocos recebem `&self`, evitando copiar todo
 o modelo na stack; cada bloco retornado continua sendo um valor. O iterador
