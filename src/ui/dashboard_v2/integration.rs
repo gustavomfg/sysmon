@@ -715,7 +715,11 @@ impl DashboardV2Renderer {
         };
         let cached = self.pulse_cache.as_ref().and_then(|cache| {
             (cache.dimensions == dimensions
-                && cache.input == input
+                // Animated inputs ease on every UI frame. Consume the latest
+                // input at the next 100 ms scene tick instead of bypassing the
+                // raster cadence for each intermediate value. A frozen scene
+                // has no advancing tick and must still react to new telemetry.
+                && (!reduced_motion || cache.input == input)
                 && cache.tick == tick
                 && cache.reduced_motion == reduced_motion
                 && cache.theme == pulse_theme)
@@ -2551,6 +2555,102 @@ const fn widget_label(widget: DashboardWidgetId) -> &'static str {
 mod tests {
     use super::*;
     use ratatui::{buffer::Buffer, layout::Rect};
+
+    #[test]
+    fn pulse_coalesces_eased_inputs_until_the_next_scene_tick() {
+        let area = Rect::new(0, 0, 24, 8);
+        let theme = Theme::pulse();
+        let initial = NormalizedPulseInput::default();
+        let latest = NormalizedPulseInput::try_new(0.9, 0.8, Some(0.7), 0.6, 0.9, 0.5).unwrap();
+        let mut renderer = DashboardV2Renderer::new();
+        let mut first = Buffer::empty(area);
+        renderer
+            .render_pulse(
+                area,
+                initial,
+                Duration::from_millis(1000),
+                false,
+                &theme,
+                &mut first,
+            )
+            .unwrap();
+        for milliseconds in [1001, 1020, 1050, 1099] {
+            let mut frame = Buffer::empty(area);
+            renderer
+                .render_pulse(
+                    area,
+                    latest,
+                    Duration::from_millis(milliseconds),
+                    false,
+                    &theme,
+                    &mut frame,
+                )
+                .unwrap();
+            assert_eq!(
+                frame, first,
+                "input easing must not regenerate a scene within its tick"
+            );
+            assert_eq!(renderer.pulse_cache.as_ref().unwrap().input, initial);
+        }
+        let mut next = Buffer::empty(area);
+        renderer
+            .render_pulse(
+                area,
+                latest,
+                Duration::from_millis(1100),
+                false,
+                &theme,
+                &mut next,
+            )
+            .unwrap();
+        assert_eq!(renderer.pulse_cache.as_ref().unwrap().input, latest);
+        assert_ne!(next, first);
+        let mut fresh = Buffer::empty(area);
+        DashboardV2Renderer::new()
+            .render_pulse(
+                area,
+                latest,
+                Duration::from_millis(1100),
+                false,
+                &theme,
+                &mut fresh,
+            )
+            .unwrap();
+        assert_eq!(
+            next, fresh,
+            "the next tick renders the latest telemetry without changing its pixels"
+        );
+    }
+
+    #[test]
+    fn pulse_cache_refreshes_immediately_for_geometry_theme_and_reduced_motion() {
+        let mut renderer = DashboardV2Renderer::new();
+        let area = Rect::new(0, 0, 24, 8);
+        let input = NormalizedPulseInput::default();
+        let busy = NormalizedPulseInput::try_new(0.9, 0.8, None, 0.6, 0.9, 0.5).unwrap();
+        let theme = Theme::pulse();
+        let other = crate::theme::ThemeKind::TokyoNight.theme();
+        let elapsed = Duration::from_millis(1050);
+        for (area, input, reduced, theme) in [
+            (area, input, false, theme),
+            (Rect::new(0, 0, 30, 9), busy, false, theme),
+            (area, busy, false, other),
+            (area, busy, true, other),
+            (area, input, true, other),
+            (area, input, false, other),
+        ] {
+            let mut actual = Buffer::empty(area);
+            renderer
+                .render_pulse(area, input, elapsed, reduced, &theme, &mut actual)
+                .unwrap();
+            let mut expected = Buffer::empty(area);
+            DashboardV2Renderer::new()
+                .render_pulse(area, input, elapsed, reduced, &theme, &mut expected)
+                .unwrap();
+            assert_eq!(actual, expected);
+            assert_eq!(renderer.pulse_cache.as_ref().unwrap().input, input);
+        }
+    }
 
     #[test]
     fn primary_cache_reuses_pixels_and_invalidates_focus_theme_and_geometry() {
