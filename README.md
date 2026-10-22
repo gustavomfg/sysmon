@@ -8,7 +8,7 @@ Um monitor de sistema no terminal feito em Rust, com interface TUI leve, atualiz
 
 ## Preview
 
-![Dashboard com instrumentos de telemetria](docs/graphics/dashboard.png)
+![Dashboard com instrumentos de telemetria](docs/graphics/palette-normal.png)
 
 Captura do renderer real a 160×45, com dados sintéticos identificados do exemplo de desenvolvimento.
 
@@ -20,7 +20,7 @@ Captura do renderer real a 160×45, com dados sintéticos identificados do exemp
 - Mapa de núcleos no card de CPU: uma barra por núcleo lógico, revelando núcleos saturados mesmo quando a média está baixa.
 - Instrumentos de telemetria em Braille, com timestamps reais, escalas, picos e preenchimento discreto.
 - Narrador de eventos: mudanças de saúde que persistem (ex.: "CPU under sustained load", "Back to calm") entram em RECENT EVENTS com idade relativa.
-- Painéis arredondados com anel de foco violeta no painel e no card selecionados.
+- Painéis com foco branco e superfícies neutras no tema Pulse; verde para telemetria normal, amarelo para atenção e vermelho para estado crítico.
 - CPU com escala fixa de 0–100%, comparação em pontos percentuais e detalhamento por núcleo no modo expandido.
 - Informações de sistema: OS, kernel, uptime, cores, load average e quantidade de processos.
 - Contexto operacional ao vivo com hostname, memória disponível, idade da amostra e identidade dos processos.

@@ -247,3 +247,59 @@ O script usa a biblioteca padrão do Python e limita a execução a 4–30 segun
 mais o prazo de encerramento. Não guarda conteúdo da tela. Próxima oportunidade:
 estudar o custo interno do movimento orgânico, com equivalência visual
 demonstrada antes de qualquer mudança no motor.
+
+
+## Revisão da paleta — 22/10/2026
+
+A pedido do usuário, o tema padrão passou a usar preto/cinza/branco como base,
+verde para atividade normal, amarelo para atenção e vermelho para estado crítico.
+Azul e roxo foram removidos do tema padrão, inclusive do remapeamento visual do
+Pulse. Os dois temas opcionais mantêm suas identidades. Não houve mudanças em
+coleta, limiares dos modelos, animação, geometria, cadência ou dependências.
+
+Correções de significado: GPU não usa mais a cor de foco, históricos de CPU/RAM/GPU
+acompanham o estado atual do modelo, uso de 40–50% não fica amarelo, títulos de
+temperatura não sugerem alerta permanente e aumento de load não é aviso por si só.
+Rede e disco I/O distinguem séries em branco/verde, sem inferir perigo de uma taxa.
+
+Capturas abaixo usam **telemetria sintética**, renderizada pelo dashboard real:
+
+- [Estado normal](graphics/palette-normal.png)
+- [Atenção](graphics/palette-warning.png)
+- [Crítico](graphics/palette-critical.png)
+
+Validação: 336 testes passaram; Clippy estrito e build release passaram. Os testes
+novos cobrem faixas de utilização, estado indisponível, correspondência de estados
+e contraste mínimo 4,5:1 dos textos neutros e semânticos nas superfícies e seleção.
+Uma primeira execução identificou contraste insuficiente do vermelho na seleção;
+o fundo foi escurecido e o teste passou. Os testes do campo de cores foram ligados
+à mesma paleta de cena usada em produção, mantendo as verificações de separação
+das regiões e de localização dos destaques críticos.
+
+Foram geradas 36 capturas (12 composições × três estados), abrangendo cinco tamanhos,
+três temas e modos expandidos. Inspeção visual do estado normal e de alerta confirmou
+contraste, alinhamento e distinção de séries. A comparação das 12 capturas normais
+com `d90c679` encontrou **zero caracteres alterados**, incluindo o Pulse; as cores
+mudaram intencionalmente. Isso valida as cenas capturadas, não todas as fases de
+uma animação. Não foi repetido benchmark de CPU, pois esta revisão não alterou o
+pipeline de cálculo nem sua frequência.
+
+Reprodução:
+
+```sh
+cargo test --offline --all-targets
+cargo clippy --offline --all-targets -- -D warnings
+cargo build --offline --release --bin sysmon --example graphics_capture
+target/release/examples/graphics_capture target/palette-normal
+target/release/examples/graphics_capture target/palette-warning --status=warning
+target/release/examples/graphics_capture target/palette-critical --status=critical
+python3 tools/render_graphics_capture.py target/palette-normal
+```
+
+O conversor de capturas usa agora o fundo da última célula como margem, evitando
+uma moldura azulada herdada da paleta antiga. Logs intermediários ficam em
+`target/palette-review/` e as três imagens de referência estão versionadas acima.
+
+O teste real em PTY também passou nos modos Unicode/TrueColor e ASCII/mono:
+oito eventos por modo, saída 0, tela alternativa e modo raw restaurados.
+[Evidência do terminal](graphics/palette-terminal-smoke.jsonl).

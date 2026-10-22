@@ -104,3 +104,28 @@ agora empresta o modelo durante a iteração, algo a considerar em consumidores 
 Os testes cobrem buffers, janelas, disponibilidade, escalas, taxas, clipping,
 Unicode, caches, navegação e integração. Capturas reproduzíveis e medições estão
 em [Resultados](graphics-overhaul-results.md).
+
+
+## Paleta semântica — revisão de 22/10/2026
+
+O tema padrão Pulse usa fundo `#080808`, superfície `#101010`, texto `#EEEEEE`
+e texto secundário `#A0A0A0`. Bordas, foco, seleção e informação são neutros.
+Verde `#7BD88F`, amarelo `#E8C65A` e vermelho `#F07575` indicam, respectivamente,
+telemetria normal, atenção e estado crítico. Os presets opcionais Catppuccin e
+Tokyo Night continuam disponíveis com suas paletas próprias.
+
+CPU, memória e GPU usam a classificação existente do modelo para colorir o
+histórico inteiro pelo **estado atual**; isso não classifica individualmente cada
+amostra antiga. Valores e marcadores `!`/`×` continuam permitindo leitura sem cor.
+As barras de utilização usam os limites existentes de 80% e 95%; capacidade de
+disco usa 85% e 95%. Esses limites indicam utilização/pressão, não diagnóstico de
+falha física. Temperaturas mantêm os limites conhecidos do sensor quando disponíveis.
+Rede e I/O usam branco e verde, com legendas e posições distintas, pois taxa alta
+isoladamente não define um estado crítico. Tendência ascendente de load deixou
+de receber amarelo por si só.
+
+`Theme::pulse_scene` deriva tons verdes, profundidade e destaques claros para o
+SYSTEM PULSE. A alteração é exclusivamente de apresentação: os algoritmos de
+movimento, energia, iluminação e rasterização não foram modificados. O campo
+continua aplicando os destaques de pressão existentes. Seus testes de cor usam a
+mesma paleta derivada aplicada pelo dashboard.

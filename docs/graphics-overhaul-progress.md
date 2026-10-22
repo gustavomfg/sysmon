@@ -121,3 +121,16 @@ decisions will be recorded in the accompanying graphics documents.
 - Results, raw measurements and the research-only instrumentation patch are
   documented in `graphics-overhaul-results.md` and `docs/graphics/`.
   No runtime dependency or Pulse engine change; local commits only, no push.
+
+
+### 22/10/2026 — revisão das cores solicitada pelo usuário
+
+- Base limpa em `d90c679`; nenhuma alteração preexistente.
+- Tema Pulse neutro, com verde/amarelo/vermelho sem azul ou roxo na interface padrão.
+- Gráficos percentuais agora acompanham os estados dos modelos; GPU deixou de usar a cor de foco.
+- Faixas de utilização substituem o gradiente que amarelava valores baixos.
+- Pulse recebeu somente remapeamento da paleta, mantendo geometria e movimento.
+- 336 testes passaram; build release e Clippy com `-D warnings` passaram.
+- Capturas sintéticas em cinco tamanhos e expansões: 12 pares sem alteração de caracteres.
+- Fixtures adicionais `--status=warning` e `--status=critical` permitem reproduzir os estados.
+- Evidências e limitações no relatório; commits locais, sem push.
