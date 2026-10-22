@@ -349,18 +349,6 @@ pub fn peak_floor<const CAPACITY: usize>(history: TimeSeries<CAPACITY>, fallback
         .map_or(fallback, |maximum| maximum * 0.75)
 }
 
-pub fn validate_non_negative_pair(
-    first: MetricReading,
-    second: MetricReading,
-) -> Result<(), MetricModelError> {
-    if first.value().is_some_and(|value| value < 0.0)
-        || second.value().is_some_and(|value| value < 0.0)
-    {
-        return Err(MetricModelError::NegativeValue);
-    }
-    Ok(())
-}
-
 pub fn validate_capacity_pair(
     used: MetricReading,
     total: MetricReading,
@@ -384,12 +372,6 @@ pub fn trend_of<const CAPACITY: usize>(history: TimeSeries<CAPACITY>) -> Trend {
     history
         .sparkline::<CHART_POINTS>(super::super::chart::TimeWindow::Medium)
         .trend()
-}
-
-pub fn volatility_of<const CAPACITY: usize>(history: TimeSeries<CAPACITY>) -> Intensity {
-    history
-        .volatility(super::super::chart::TimeWindow::Medium)
-        .intensity()
 }
 
 pub fn rising(trend: Trend) -> bool {

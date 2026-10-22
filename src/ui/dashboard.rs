@@ -1,4 +1,7 @@
-use std::time::{Duration, Instant};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::{
@@ -35,7 +38,7 @@ use crate::{
 pub struct DashboardApp {
     live_metrics: LiveMetricsHistory,
     models: Option<LiveMetricModels>,
-    system_context: Option<crate::ui::dashboard_v2::DashboardV2SystemContext>,
+    system_context: Option<Arc<crate::ui::dashboard_v2::DashboardV2SystemContext>>,
     health_engine: HealthEngine,
     pulse_behavior_engine: PulseBehaviorEngine,
     system_health: crate::ui::dashboard_v2::SystemHealth,
@@ -46,8 +49,16 @@ pub struct DashboardApp {
     last_error: Option<LiveMetricsError>,
     has_snapshot: bool,
     last_collected_at: Option<Instant>,
+    sample_revision: u64,
+    prepared_primary: Option<PreparedPrimary>,
     expanded_widget: Option<crate::ui::dashboard_v2::DashboardWidgetId>,
     narrator: HealthNarrator,
+}
+
+struct PreparedPrimary {
+    revision: u64,
+    context: WidgetContext,
+    models: Arc<[Option<crate::ui::dashboard_v2::WidgetRenderModel>; 5]>,
 }
 
 /// Turns health transitions into short timeline sentences. A change must
@@ -119,6 +130,8 @@ impl DashboardApp {
             last_error: None,
             has_snapshot: false,
             last_collected_at: None,
+            sample_revision: 0,
+            prepared_primary: None,
             expanded_widget: None,
             narrator: HealthNarrator::new(),
         }
@@ -137,10 +150,12 @@ impl DashboardApp {
     }
 
     pub fn update(&mut self, snapshot: SystemInfo, collected_at: Instant) {
+        self.sample_revision = self.sample_revision.wrapping_add(1);
         self.ui.update(snapshot.clone());
         self.last_collected_at = Some(collected_at);
-        self.system_context =
-            Some(crate::ui::dashboard_v2::DashboardV2SystemContext::from_system_info(&snapshot));
+        self.system_context = Some(Arc::new(
+            crate::ui::dashboard_v2::DashboardV2SystemContext::from_system_info(&snapshot),
+        ));
         let live_snapshot = LiveSnapshot::from_system_info(&snapshot);
         match self
             .live_metrics
@@ -159,7 +174,6 @@ impl DashboardApp {
     }
 
     pub fn update_animations(&mut self, delta: Duration) -> bool {
-        let legacy_changed = self.ui.update_animations(delta);
         self.elapsed = self.elapsed.saturating_add(delta);
         let health_snapshot = self
             .models
@@ -173,7 +187,7 @@ impl DashboardApp {
             self.ui.record_event(event);
         }
         self.pulse_behavior = self.pulse_behavior_engine.update(self.system_health, delta);
-        self.has_snapshot && (!self.ui.reduced_motion() || legacy_changed)
+        self.has_snapshot && !self.ui.reduced_motion()
     }
 
     pub fn animations_active(&self) -> bool {
@@ -208,11 +222,30 @@ impl DashboardApp {
             .with_reduced_motion(self.ui.reduced_motion())
             .with_focus(focused_widget)
             .with_availability(availability);
-        let primary = self
-            .models
-            .as_ref()
-            .map(|models| primary_models(models, widget_context))
-            .unwrap_or([None; 5]);
+        // The lateral instruments have no frame-driven animation. Their
+        // semantic models change on telemetry, focus, availability or mode.
+        // Pulse continues to receive the live elapsed clock independently.
+        let cache_context = WidgetContext::new(preset, dashboard_state, Duration::ZERO)
+            .with_reduced_motion(self.ui.reduced_motion())
+            .with_focus(focused_widget)
+            .with_availability(availability);
+        if !self.prepared_primary.as_ref().is_some_and(|cache| {
+            cache.revision == self.sample_revision && cache.context == cache_context
+        }) {
+            let models = primary_models(self.models.as_ref(), widget_context);
+            self.prepared_primary = Some(PreparedPrimary {
+                revision: self.sample_revision,
+                context: cache_context,
+                models,
+            });
+        }
+        let primary = Arc::clone(
+            &self
+                .prepared_primary
+                .as_ref()
+                .expect("prepared above")
+                .models,
+        );
         let inventory = self
             .models
             .as_ref()
@@ -229,20 +262,23 @@ impl DashboardApp {
                     .checked_mul(3)
                     .unwrap_or(Duration::MAX)
             });
-        let content =
-            DashboardV2Content::new(primary, self.pulse_behavior.input(), dashboard_state)
-                .with_pulse_behavior(self.pulse_behavior)
-                .with_system_health(self.system_health)
-                .with_inventory(inventory)
-                .with_live_mode(self.has_snapshot)
-                .with_focused_widget(focused_widget)
-                .with_expanded_widget(self.expanded_widget)
-                .with_data_stale(data_stale)
-                .with_sample_age(sample_age)
-                .with_recent_events(self.ui.timeline().events().to_vec())
-                .with_event_ages(self.ui.timeline().ages(Instant::now()));
+        let content = DashboardV2Content::from_shared_primary(
+            primary,
+            self.pulse_behavior.input(),
+            dashboard_state,
+        )
+        .with_pulse_behavior(self.pulse_behavior)
+        .with_system_health(self.system_health)
+        .with_inventory(inventory)
+        .with_live_mode(self.has_snapshot)
+        .with_focused_widget(focused_widget)
+        .with_expanded_widget(self.expanded_widget)
+        .with_data_stale(data_stale)
+        .with_sample_age(sample_age)
+        .with_recent_events(self.ui.timeline().events().to_vec())
+        .with_event_ages(self.ui.timeline().ages(Instant::now()));
         let content = if let Some(system_context) = self.system_context.clone() {
-            content.with_system_context(system_context)
+            content.with_shared_system_context(system_context)
         } else {
             content
         };
@@ -270,6 +306,7 @@ impl DashboardApp {
         }
 
         self.render_overlay(frame, &theme);
+        theme.apply_text_palette(frame.buffer_mut());
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> bool {
@@ -563,26 +600,47 @@ fn focused_widget(ui: &AppState) -> Option<crate::ui::dashboard_v2::DashboardWid
 }
 
 fn primary_models(
-    models: &LiveMetricModels,
+    models: Option<&LiveMetricModels>,
     context: WidgetContext,
-) -> [Option<crate::ui::dashboard_v2::WidgetRenderModel>; 5] {
-    [
-        WidgetRenderer::render_cpu(models.cpu(), context)
-            .ok()
-            .flatten(),
-        WidgetRenderer::render_memory(models.memory(), context)
-            .ok()
-            .flatten(),
-        WidgetRenderer::render_gpu(models.gpu(), context)
-            .ok()
-            .flatten(),
-        WidgetRenderer::render_network(models.network(), context)
-            .ok()
-            .flatten(),
-        WidgetRenderer::render_storage(models.storage(), context)
-            .ok()
-            .flatten(),
-    ]
+) -> Arc<[Option<crate::ui::dashboard_v2::WidgetRenderModel>; 5]> {
+    // Render blocks carry bounded history arrays. Construct the five cards on
+    // the heap one at a time instead of copying several large arrays through
+    // Option::map/unwrap_or on the terminal draw stack.
+    let mut prepared = Vec::with_capacity(5);
+    if let Some(models) = models {
+        prepared.push(
+            WidgetRenderer::render_cpu(models.cpu(), context)
+                .ok()
+                .flatten(),
+        );
+        prepared.push(
+            WidgetRenderer::render_memory(models.memory(), context)
+                .ok()
+                .flatten(),
+        );
+        prepared.push(
+            WidgetRenderer::render_gpu(models.gpu(), context)
+                .ok()
+                .flatten(),
+        );
+        prepared.push(
+            WidgetRenderer::render_network(models.network(), context)
+                .ok()
+                .flatten(),
+        );
+        prepared.push(
+            WidgetRenderer::render_storage(models.storage(), context)
+                .ok()
+                .flatten(),
+        );
+    } else {
+        prepared.resize_with(5, || None);
+    }
+    let prepared: Box<[_; 5]> = prepared
+        .into_boxed_slice()
+        .try_into()
+        .expect("five primary cards");
+    Arc::from(prepared)
 }
 
 fn dashboard_state_for_models(models: &LiveMetricModels) -> DashboardState {

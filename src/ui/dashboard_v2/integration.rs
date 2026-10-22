@@ -1,11 +1,9 @@
-#![allow(dead_code)]
-
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
 };
 
 use crate::{
@@ -27,8 +25,9 @@ use super::{
 
 const PRIMARY_COUNT: usize = 5;
 const PRIMARY_CARD_GAP: u16 = 1;
-const PRIMARY_CPU_MINIMUM: u16 = 7;
-const PRIMARY_CARD_MINIMUMS: [u16; PRIMARY_COUNT] = [PRIMARY_CPU_MINIMUM, 4, 4, 4, 4];
+const PRIMARY_CPU_MINIMUM: u16 = 6;
+// Storage reserves one I/O trace row; RAM uses a compact capacity rail.
+const PRIMARY_CARD_MINIMUMS: [u16; PRIMARY_COUNT] = [PRIMARY_CPU_MINIMUM, 4, 4, 4, 5];
 const PULSE_TITLE: &str = "SYSTEM PULSE";
 const HEADER_TITLE: &str = "SYSMON";
 
@@ -74,7 +73,9 @@ impl DashboardV2SystemContext {
         processes.sort_unstable_by(|left, right| {
             right
                 .cpu_percent
-                .total_cmp(&left.cpu_percent)
+                .is_finite()
+                .cmp(&left.cpu_percent.is_finite())
+                .then_with(|| right.cpu_percent.total_cmp(&left.cpu_percent))
                 .then_with(|| right.memory_bytes.cmp(&left.memory_bytes))
                 .then_with(|| left.name.cmp(&right.name))
         });
@@ -102,14 +103,13 @@ impl DashboardV2SystemContext {
 /// into collectors, snapshots, or the V1 application state.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DashboardV2Content {
-    // Boxed: the five models are ~100 KB, and the builder methods below
-    // move `self` on every call.
-    primary: Box<[Option<WidgetRenderModel>; PRIMARY_COUNT]>,
+    // Immutable semantic models are shared between animation frames.
+    primary: Arc<[Option<WidgetRenderModel>; PRIMARY_COUNT]>,
     pulse_input: NormalizedPulseInput,
     pulse_behavior: Option<PulseBehavior>,
     state: DashboardState,
     inventory: super::HardwareInventory,
-    system_context: Option<DashboardV2SystemContext>,
+    system_context: Option<Arc<DashboardV2SystemContext>>,
     live_mode: bool,
     focused_widget: Option<DashboardWidgetId>,
     expanded_widget: Option<DashboardWidgetId>,
@@ -126,8 +126,16 @@ impl DashboardV2Content {
         pulse_input: NormalizedPulseInput,
         state: DashboardState,
     ) -> Self {
+        Self::from_shared_primary(Arc::new(primary), pulse_input, state)
+    }
+
+    pub fn from_shared_primary(
+        primary: Arc<[Option<WidgetRenderModel>; PRIMARY_COUNT]>,
+        pulse_input: NormalizedPulseInput,
+        state: DashboardState,
+    ) -> Self {
         Self {
-            primary: Box::new(primary),
+            primary,
             pulse_input,
             pulse_behavior: None,
             state,
@@ -175,12 +183,17 @@ impl DashboardV2Content {
     }
 
     pub fn with_system_context(mut self, context: DashboardV2SystemContext) -> Self {
-        self.system_context = Some(context);
+        self.system_context = Some(Arc::new(context));
         self
     }
 
     pub fn system_context(&self) -> Option<&DashboardV2SystemContext> {
-        self.system_context.as_ref()
+        self.system_context.as_deref()
+    }
+
+    pub fn with_shared_system_context(mut self, context: Arc<DashboardV2SystemContext>) -> Self {
+        self.system_context = Some(context);
+        self
     }
 
     pub fn with_live_mode(mut self, live_mode: bool) -> Self {
@@ -318,6 +331,7 @@ pub struct DashboardV2Renderer {
     pulse: PulseV2Engine,
     widgets: TerminalRenderer,
     pulse_cache: Option<PulseRasterCache>,
+    primary_cache: Option<PrimaryPanelCache>,
     vital: VitalTrace,
 }
 
@@ -331,6 +345,31 @@ struct PulseRasterCache {
     raster: ColorRasterFrame,
 }
 
+#[derive(Debug)]
+struct PrimaryPanelCache {
+    primary: Arc<[Option<WidgetRenderModel>; PRIMARY_COUNT]>,
+    area: Rect,
+    preset: DashboardPreset,
+    expanded: Option<DashboardWidgetId>,
+    focused: Option<DashboardWidgetId>,
+    theme: Theme,
+    inventory: super::HardwareInventory,
+    pixels: Buffer,
+    rendered: [Option<DashboardWidgetId>; PRIMARY_COUNT],
+    length: usize,
+}
+
+fn copy_cells(source: &Buffer, target: &mut Buffer, area: Rect) {
+    let clip = area
+        .intersection(*source.area())
+        .intersection(*target.area());
+    for y in clip.y..clip.bottom() {
+        for x in clip.x..clip.right() {
+            target[(x, y)] = source[(x, y)].clone();
+        }
+    }
+}
+
 impl DashboardV2Renderer {
     pub fn new() -> Self {
         Self {
@@ -338,6 +377,7 @@ impl DashboardV2Renderer {
             pulse: PulseV2Engine::new(),
             widgets: TerminalRenderer::new(),
             pulse_cache: None,
+            primary_cache: None,
             vital: VitalTrace::new(),
         }
     }
@@ -425,7 +465,7 @@ impl DashboardV2Renderer {
             primary_len = self.render_primary(
                 primary_area,
                 preset,
-                content.primary(),
+                Arc::clone(&content.primary),
                 content.expanded_widget(),
                 focused,
                 theme,
@@ -501,10 +541,10 @@ impl DashboardV2Renderer {
 
     #[allow(clippy::too_many_arguments)]
     fn render_primary(
-        &self,
+        &mut self,
         area: Rect,
         preset: DashboardPreset,
-        models: [Option<WidgetRenderModel>; PRIMARY_COUNT],
+        primary: Arc<[Option<WidgetRenderModel>; PRIMARY_COUNT]>,
         expanded_widget: Option<DashboardWidgetId>,
         focused: Option<DashboardWidgetId>,
         theme: &Theme,
@@ -515,12 +555,32 @@ impl DashboardV2Renderer {
         if area.width == 0 || area.height == 0 {
             return Ok(0);
         }
+        if let Some(cache) = self.primary_cache.as_ref()
+            && Arc::ptr_eq(&cache.primary, &primary)
+            && cache.area == area
+            && cache.preset == preset
+            && cache.expanded == expanded_widget
+            && cache.focused == focused
+            && cache.theme == *theme
+            && cache.inventory == *inventory
+        {
+            copy_cells(&cache.pixels, buffer, area);
+            *rendered = cache.rendered;
+            return Ok(cache.length);
+        }
+        let models = primary.as_ref();
 
         // Primary metrics are one instrument panel. Individual metric
         // renderers still own their semantic anatomy, but they no longer
         // create competing outer boxes of their own.
         let framed = area.width >= 16 && area.height >= 20;
-        buffer.set_style(area, Style::default().bg(theme.surface));
+        let clip = area.intersection(*buffer.area());
+        for y in clip.y..clip.bottom() {
+            for x in clip.x..clip.right() {
+                buffer[(x, y)].reset();
+                buffer[(x, y)].set_bg(theme.surface);
+            }
+        }
         if framed {
             draw_titled_panel_frame(
                 area,
@@ -583,6 +643,20 @@ impl DashboardV2Renderer {
             }
         }
 
+        let mut pixels = Buffer::empty(area);
+        copy_cells(buffer, &mut pixels, area);
+        self.primary_cache = Some(PrimaryPanelCache {
+            primary,
+            area,
+            preset,
+            expanded: expanded_widget,
+            focused,
+            theme: *theme,
+            inventory: inventory.clone(),
+            pixels,
+            rendered: *rendered,
+            length,
+        });
         Ok(length)
     }
 
@@ -617,7 +691,7 @@ impl DashboardV2Renderer {
             return Ok(false);
         }
 
-        let pulse_theme = pulse_theme(theme);
+        let pulse_theme = theme.pulse_scene();
         let use_braille = raster_area.width >= 8 && raster_area.height >= 4;
         let field_width = if use_braille {
             usize::from(raster_area.width).checked_mul(2)
@@ -641,7 +715,11 @@ impl DashboardV2Renderer {
         };
         let cached = self.pulse_cache.as_ref().and_then(|cache| {
             (cache.dimensions == dimensions
-                && cache.input == input
+                // Animated inputs ease on every UI frame. Consume the latest
+                // input at the next 100 ms scene tick instead of bypassing the
+                // raster cadence for each intermediate value. A frozen scene
+                // has no advancing tick and must still react to new telemetry.
+                && (!reduced_motion || cache.input == input)
                 && cache.tick == tick
                 && cache.reduced_motion == reduced_motion
                 && cache.theme == pulse_theme)
@@ -681,27 +759,6 @@ impl DashboardV2Renderer {
         draw_raster(raster_area, raster, theme, buffer);
         Ok(true)
     }
-}
-
-fn pulse_theme(theme: &Theme) -> Theme {
-    if *theme != Theme::pulse() {
-        return *theme;
-    }
-
-    // Keep the dashboard's terminal palette restrained while preserving the
-    // original Pulse identity in the central visualization: violet energy,
-    // cyan flow, and warm colors only for pressure.
-    let mut pulse = *theme;
-    pulse.primary = Color::Rgb(0xA8, 0x55, 0xF7);
-    pulse.secondary = Color::Rgb(0x22, 0xD3, 0xEE);
-    pulse.accent = Color::Rgb(0x7C, 0x3A, 0xED);
-    pulse.info = Color::Rgb(0x38, 0xBD, 0xF8);
-    pulse.warning = Color::Rgb(0xF5, 0x9E, 0x0B);
-    pulse.danger = Color::Rgb(0xEF, 0x44, 0x44);
-    pulse.pulse_low = Color::Rgb(0x6D, 0x28, 0xD9);
-    pulse.pulse_medium = Color::Rgb(0xA8, 0x55, 0xF7);
-    pulse.pulse_high = Color::Rgb(0x22, 0xD3, 0xEE);
-    pulse
 }
 
 fn visible_primary(
@@ -827,12 +884,13 @@ fn primary_stack_heights(total_height: u16, count: usize) -> [u16; PRIMARY_COUNT
         .copied()
         .sum::<u16>();
     let extra = usable_height.saturating_sub(minimum_height);
-    let extra_base = extra / secondary_count.max(1);
-    let extra_remainder = extra % secondary_count.max(1);
+    let cpu_extra = extra.min(1);
+    let extra_base = extra.saturating_sub(cpu_extra) / secondary_count.max(1);
+    let extra_remainder = extra.saturating_sub(cpu_extra) % secondary_count.max(1);
     let mut heights = [0; PRIMARY_COUNT];
     for (index, height) in heights.iter_mut().enumerate().take(card_count) {
         let additional = if index == 0 {
-            0
+            cpu_extra
         } else {
             extra_base.saturating_add(u16::from(((index - 1) as u16) < extra_remainder))
         };
@@ -930,8 +988,8 @@ fn render_header(
         &[(
             brand,
             Style::default()
-                .fg(theme.background)
-                .bg(theme.primary)
+                .fg(theme.text)
+                .bg(theme.surface_alt)
                 .add_modifier(Modifier::BOLD),
         )],
         buffer,
@@ -1052,7 +1110,7 @@ fn diagnosis(
         HealthSeverity::Elevated => (
             "elevated",
             format!("{source} under sustained load"),
-            theme.accent,
+            theme.warning,
         ),
         HealthSeverity::Stressed => (
             "stressed",
@@ -1474,7 +1532,7 @@ fn render_system_instruments(
         .max(1);
     if let Some((one, five, fifteen)) = context.load_average {
         let (arrow, arrow_color) = if one > fifteen * 1.15 + 0.05 {
-            ("↗", theme.warning)
+            ("↗", theme.text_muted)
         } else if one < fifteen * 0.85 - 0.05 {
             ("↘", theme.primary)
         } else {
@@ -1764,14 +1822,15 @@ fn render_temperatures(
     theme: &Theme,
     buffer: &mut Buffer,
 ) {
-    panel_heading(area, "TEMPERATURES", theme.warning, theme, buffer);
+    panel_heading(area, "TEMPERATURES", theme.text, theme, buffer);
     if !inventory.temperatures.is_empty() {
         for (index, sensor) in inventory.temperatures.iter().enumerate() {
             render_temperature_row(
                 area,
                 2 + index as u16,
                 &sensor.label,
-                sensor.celsius.map(|value| value.clamp(0.0, 100.0) as u16),
+                sensor.celsius,
+                sensor.critical_celsius,
                 theme,
                 buffer,
             );
@@ -1796,14 +1855,28 @@ fn render_temperature_row(
     area: Rect,
     row: u16,
     label: &str,
-    value: Option<u16>,
+    value: Option<f64>,
+    critical: Option<f64>,
     theme: &Theme,
     buffer: &mut Buffer,
 ) {
     if row >= area.height {
         return;
     }
-    let value_text = value.map_or_else(|| "—".to_owned(), |value| format!("{value}°C"));
+    let value = value.filter(|value| value.is_finite());
+    let critical = critical.filter(|limit| limit.is_finite() && *limit > 0.0);
+    let value_text = value.map_or_else(
+        || "—".to_owned(),
+        |value| {
+            if area.width >= 48
+                && let Some(limit) = critical
+            {
+                format!("{value:.0}°C / {limit:.0}°C")
+            } else {
+                format!("{value:.0}°C")
+            }
+        },
+    );
     let value_width = u16::try_from(value_text.chars().count()).unwrap_or(area.width);
     let label_width = area
         .width
@@ -1825,13 +1898,23 @@ fn render_temperature_row(
         Style::default().fg(theme.text_muted).bg(theme.surface),
     );
     if let Some(value) = value {
-        // Map 30–95 °C onto the heat ramp so idle sensors stay cool-toned.
-        let heat = heat_color((f64::from(value) - 30.0) / 65.0, theme);
+        // Only a driver-reported limit justifies critical coloring. Unknown
+        // sensors retain a neutral measuring scale and their actual number.
+        let ceiling = critical.unwrap_or_else(|| (value.max(100.0) / 25.0).ceil() * 25.0);
+        let heat = critical.map_or(theme.info, |limit| {
+            if value >= limit {
+                theme.danger
+            } else if value >= limit * 0.9 {
+                theme.warning
+            } else {
+                theme.primary
+            }
+        });
         draw_fractional_bar(
             bar_start,
             y,
             bar_width,
-            f64::from(value) / 100.0,
+            value / ceiling,
             heat,
             theme.border,
             theme.surface,
@@ -1855,7 +1938,7 @@ fn render_processes(
     theme: &Theme,
     buffer: &mut Buffer,
 ) {
-    panel_heading(area, "TOP PROCESSES", theme.primary, theme, buffer);
+    panel_heading(area, "TOP PROCESSES", theme.text, theme, buffer);
     if area.height > 2 {
         render_process_columns_header(area, theme, buffer);
     }
@@ -2001,7 +2084,11 @@ fn render_process_row(
     buffer.set_stringn(
         cpu_x,
         y,
-        format!("{cpu_percent:>5.1}%"),
+        if cpu_percent.is_finite() {
+            format!("{cpu_percent:>5.1}%")
+        } else {
+            "    —".to_owned()
+        },
         usize::from(cpu_width),
         if idle {
             Style::default().fg(theme.text_muted).bg(theme.surface)
@@ -2147,16 +2234,7 @@ fn format_sample_age(age: Duration) -> String {
 }
 
 fn format_bytes(value: f64) -> String {
-    let value = value.max(0.0);
-    if value >= 1024.0 * 1024.0 * 1024.0 {
-        format!("{:.1} GB", value / 1024.0 / 1024.0 / 1024.0)
-    } else if value >= 1024.0 * 1024.0 {
-        format!("{:.1} MB", value / 1024.0 / 1024.0)
-    } else if value >= 1024.0 {
-        format!("{:.1} KB", value / 1024.0)
-    } else {
-        format!("{value:.0} B")
-    }
+    super::terminal::instruments::format_bytes(value)
 }
 
 fn panel_heading(
@@ -2371,7 +2449,7 @@ fn draw_fractional_bar(
     }
 }
 
-/// Cool → warm → hot ramp for load and temperature, built from theme tokens.
+/// Utilization colors follow the shared semantic thresholds.
 fn heat_color(amount: f64, theme: &Theme) -> ratatui::style::Color {
     vital::heat_color(amount, theme)
 }
@@ -2450,7 +2528,7 @@ const fn widget_label(widget: DashboardWidgetId) -> &'static str {
         DashboardWidgetId::Gpu => "GPU",
         DashboardWidgetId::Network => "NETWORK",
         DashboardWidgetId::Storage => "STORAGE",
-        DashboardWidgetId::History => "HISTORY",
+        DashboardWidgetId::History => "TEMPERATURES",
         DashboardWidgetId::Processes => "PROCESSES",
         DashboardWidgetId::Alerts => "ALERTS",
     }
@@ -2459,7 +2537,227 @@ const fn widget_label(widget: DashboardWidgetId) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ratatui::{buffer::Buffer, layout::Rect};
+    use ratatui::{buffer::Buffer, layout::Rect, style::Color};
+
+    #[test]
+    fn pulse_coalesces_eased_inputs_until_the_next_scene_tick() {
+        let area = Rect::new(0, 0, 24, 8);
+        let theme = Theme::pulse();
+        let initial = NormalizedPulseInput::default();
+        let latest = NormalizedPulseInput::try_new(0.9, 0.8, Some(0.7), 0.6, 0.9, 0.5).unwrap();
+        let mut renderer = DashboardV2Renderer::new();
+        let mut first = Buffer::empty(area);
+        renderer
+            .render_pulse(
+                area,
+                initial,
+                Duration::from_millis(1000),
+                false,
+                &theme,
+                &mut first,
+            )
+            .unwrap();
+        for milliseconds in [1001, 1020, 1050, 1099] {
+            let mut frame = Buffer::empty(area);
+            renderer
+                .render_pulse(
+                    area,
+                    latest,
+                    Duration::from_millis(milliseconds),
+                    false,
+                    &theme,
+                    &mut frame,
+                )
+                .unwrap();
+            assert_eq!(
+                frame, first,
+                "input easing must not regenerate a scene within its tick"
+            );
+            assert_eq!(renderer.pulse_cache.as_ref().unwrap().input, initial);
+        }
+        let mut next = Buffer::empty(area);
+        renderer
+            .render_pulse(
+                area,
+                latest,
+                Duration::from_millis(1100),
+                false,
+                &theme,
+                &mut next,
+            )
+            .unwrap();
+        assert_eq!(renderer.pulse_cache.as_ref().unwrap().input, latest);
+        assert_ne!(next, first);
+        let mut fresh = Buffer::empty(area);
+        DashboardV2Renderer::new()
+            .render_pulse(
+                area,
+                latest,
+                Duration::from_millis(1100),
+                false,
+                &theme,
+                &mut fresh,
+            )
+            .unwrap();
+        assert_eq!(
+            next, fresh,
+            "the next tick renders the latest telemetry without changing its pixels"
+        );
+    }
+
+    #[test]
+    fn pulse_cache_refreshes_immediately_for_geometry_theme_and_reduced_motion() {
+        let mut renderer = DashboardV2Renderer::new();
+        let area = Rect::new(0, 0, 24, 8);
+        let input = NormalizedPulseInput::default();
+        let busy = NormalizedPulseInput::try_new(0.9, 0.8, None, 0.6, 0.9, 0.5).unwrap();
+        let theme = Theme::pulse();
+        let other = crate::theme::ThemeKind::TokyoNight.theme();
+        let elapsed = Duration::from_millis(1050);
+        for (area, input, reduced, theme) in [
+            (area, input, false, theme),
+            (Rect::new(0, 0, 30, 9), busy, false, theme),
+            (area, busy, false, other),
+            (area, busy, true, other),
+            (area, input, true, other),
+            (area, input, false, other),
+        ] {
+            let mut actual = Buffer::empty(area);
+            renderer
+                .render_pulse(area, input, elapsed, reduced, &theme, &mut actual)
+                .unwrap();
+            let mut expected = Buffer::empty(area);
+            DashboardV2Renderer::new()
+                .render_pulse(area, input, elapsed, reduced, &theme, &mut expected)
+                .unwrap();
+            assert_eq!(actual, expected);
+            assert_eq!(renderer.pulse_cache.as_ref().unwrap().input, input);
+        }
+    }
+
+    #[test]
+    fn primary_cache_reuses_pixels_and_invalidates_focus_theme_and_geometry() {
+        let mut renderer = DashboardV2Renderer::new();
+        let primary = Arc::new([None; PRIMARY_COUNT]);
+        let inventory = super::super::HardwareInventory::default();
+        let area = Rect::new(0, 0, 40, 30);
+        let theme = Theme::pulse();
+        let mut ids = [None; PRIMARY_COUNT];
+        let mut first = Buffer::empty(area);
+        renderer
+            .render_primary(
+                area,
+                DashboardPreset::Standard,
+                Arc::clone(&primary),
+                None,
+                None,
+                &theme,
+                &mut first,
+                &mut ids,
+                &inventory,
+            )
+            .unwrap();
+        let pointer = renderer
+            .primary_cache
+            .as_ref()
+            .unwrap()
+            .pixels
+            .content
+            .as_ptr();
+        let mut second = Buffer::empty(area);
+        renderer
+            .render_primary(
+                area,
+                DashboardPreset::Standard,
+                Arc::clone(&primary),
+                None,
+                None,
+                &theme,
+                &mut second,
+                &mut ids,
+                &inventory,
+            )
+            .unwrap();
+        assert_eq!(first, second);
+        assert_eq!(
+            renderer
+                .primary_cache
+                .as_ref()
+                .unwrap()
+                .pixels
+                .content
+                .as_ptr(),
+            pointer
+        );
+        renderer
+            .render_primary(
+                area,
+                DashboardPreset::Standard,
+                Arc::clone(&primary),
+                None,
+                Some(DashboardWidgetId::Cpu),
+                &theme,
+                &mut second,
+                &mut ids,
+                &inventory,
+            )
+            .unwrap();
+        assert_eq!(
+            renderer.primary_cache.as_ref().unwrap().focused,
+            Some(DashboardWidgetId::Cpu)
+        );
+        let other = crate::theme::ThemeKind::TokyoNight.theme();
+        renderer
+            .render_primary(
+                area,
+                DashboardPreset::Standard,
+                Arc::clone(&primary),
+                None,
+                None,
+                &other,
+                &mut second,
+                &mut ids,
+                &inventory,
+            )
+            .unwrap();
+        assert_eq!(renderer.primary_cache.as_ref().unwrap().theme, other);
+        let small = Rect::new(2, 3, 28, 12);
+        renderer
+            .render_primary(
+                small,
+                DashboardPreset::Compact,
+                primary,
+                None,
+                None,
+                &theme,
+                &mut second,
+                &mut ids,
+                &inventory,
+            )
+            .unwrap();
+        assert_eq!(renderer.primary_cache.as_ref().unwrap().area, small);
+    }
+
+    #[test]
+    fn thermal_instrument_preserves_extreme_values_and_requires_reported_limits_for_alerts() {
+        let theme = Theme::pulse();
+        let area = Rect::new(0, 0, 60, 1);
+        let mut unknown = Buffer::empty(area);
+        render_temperature_row(area, 0, "GPU", Some(110.0), None, &theme, &mut unknown);
+        let text: String = unknown.content.iter().map(|cell| cell.symbol()).collect();
+        assert!(text.contains("110°C"));
+        assert!(
+            unknown
+                .content
+                .iter()
+                .all(|cell| cell.fg != theme.danger && cell.fg != theme.warning)
+        );
+        let mut known = Buffer::empty(area);
+        render_temperature_row(area, 0, "CPU", Some(96.0), Some(95.0), &theme, &mut known);
+        let text: String = known.content.iter().map(|cell| cell.symbol()).collect();
+        assert!(text.contains("96°C / 95°C"));
+        assert!(known.content.iter().any(|cell| cell.fg == theme.danger));
+    }
 
     fn input() -> NormalizedPulseInput {
         NormalizedPulseInput::try_new(0.35, 0.42, Some(0.28), 0.22, 0.34, 0.12).unwrap()
@@ -2676,7 +2974,7 @@ mod tests {
             );
             let count = visible.iter().filter(|index| **index != usize::MAX).count();
             let expected_count = match height {
-                24 => 3,
+                24 => 4,
                 32 => 5,
                 40 => 5,
                 _ => unreachable!(),
@@ -2805,7 +3103,8 @@ mod tests {
             Rect::new(0, 0, 80, 12),
             0,
             "CPU Package",
-            Some(42),
+            Some(42.0),
+            None,
             &theme,
             &mut buffer,
         );

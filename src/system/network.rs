@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 use sysinfo::Networks;
@@ -8,6 +9,8 @@ pub struct NetworkInfo {
     pub interface: String,
     pub received_per_sec: f64,
     pub transmitted_per_sec: f64,
+    /// None marks startup, a newly observed interface, or a counter reset.
+    pub sample_interval: Option<Duration>,
 }
 
 impl NetworkInfo {
@@ -33,12 +36,53 @@ impl NetworkInfo {
                 interface: name.to_string(),
                 received_per_sec: bytes_per_second(data.received(), interval),
                 transmitted_per_sec: bytes_per_second(data.transmitted(), interval),
+                sample_interval: (!interval.is_zero()).then_some(interval),
             })
             .collect::<Vec<Self>>();
 
         sort_deterministically(&mut interfaces);
         interfaces
     }
+
+    pub(crate) fn collected(
+        networks: &Networks,
+        interval: Duration,
+        previous: &BTreeMap<String, (u64, u64)>,
+    ) -> Vec<Self> {
+        let mut interfaces = Self::get_all(networks, interval);
+        for interface in &mut interfaces {
+            if let Some((_, data)) = networks
+                .iter()
+                .find(|(name, _)| *name == &interface.interface)
+            {
+                interface.sample_interval = valid_interval(
+                    previous.get(&interface.interface).copied(),
+                    (data.total_received(), data.total_transmitted()),
+                    interval,
+                );
+            }
+        }
+        interfaces
+    }
+    pub(crate) fn legacy_view(mut interfaces: Vec<Self>) -> Vec<Self> {
+        interfaces.sort_by(|a, b| {
+            (b.received_per_sec + b.transmitted_per_sec)
+                .total_cmp(&(a.received_per_sec + a.transmitted_per_sec))
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        interfaces.truncate(5);
+        interfaces
+    }
+}
+
+fn valid_interval(
+    previous: Option<(u64, u64)>,
+    current: (u64, u64),
+    interval: Duration,
+) -> Option<Duration> {
+    previous
+        .filter(|(rx, tx)| current.0 >= *rx && current.1 >= *tx)
+        .and_then(|_| (!interval.is_zero()).then_some(interval))
 }
 
 fn sort_deterministically(interfaces: &mut [NetworkInfo]) {
@@ -81,6 +125,7 @@ mod tests {
                 interface: format!("net{index}"),
                 received_per_sec: index as f64,
                 transmitted_per_sec: index as f64,
+                sample_interval: Some(Duration::from_secs(1)),
             })
             .collect();
 
@@ -99,6 +144,7 @@ mod tests {
                 interface: format!("net{index}"),
                 received_per_sec: index as f64,
                 transmitted_per_sec: index as f64,
+                sample_interval: Some(Duration::from_secs(1)),
             })
             .collect();
         interfaces.sort_by(|left, right| left.id.cmp(&right.id));
@@ -107,5 +153,27 @@ mod tests {
         assert_eq!(interfaces.len(), 5);
         assert_eq!(interfaces[0].id, "net0");
         assert_eq!(interfaces[4].id, "net4");
+    }
+
+    #[test]
+    fn startup_resets_wraps_and_zero_time_are_unavailable_instead_of_fake_rates() {
+        let interval = Duration::from_millis(1500);
+        assert_eq!(super::valid_interval(None, (100, 200), interval), None);
+        assert_eq!(
+            super::valid_interval(Some((5000, 100)), (6500, 200), interval),
+            Some(interval)
+        );
+        assert_eq!(
+            super::valid_interval(Some((6500, 200)), (10, 300), interval),
+            None
+        );
+        assert_eq!(
+            super::valid_interval(Some((u64::MAX, 200)), (2, 300), interval),
+            None
+        );
+        assert_eq!(
+            super::valid_interval(Some((0, 0)), (0, 0), Duration::ZERO),
+            None
+        );
     }
 }

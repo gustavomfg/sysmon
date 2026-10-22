@@ -31,13 +31,15 @@ pub struct SystemInfoCollector {
     components: Components,
     last_disk_inventory_refresh: Option<Instant>,
     last_disk_io_sample: Option<Instant>,
+    disk_io_counters: BTreeMap<String, (u64, u64)>,
+    last_cpu_sample: Option<Instant>,
     last_network_refresh: Option<Instant>,
     last_process_refresh: Option<Instant>,
     cached_disks: Vec<DiskInfo>,
     cached_storage_devices: Vec<DiskInfo>,
     processes_list: Vec<ProcessInfo>,
     /// Accumulated CPU milliseconds per PID at the previous process refresh.
-    process_cpu_times: HashMap<u32, u64>,
+    process_cpu_times: HashMap<u32, (u64, u64)>,
     disk_models: BTreeMap<String, DiskModelCacheEntry>,
 }
 
@@ -66,6 +68,8 @@ pub struct TemperatureInfo {
     pub id: String,
     pub label: String,
     pub celsius: Option<f64>,
+    /// Driver-reported critical temperature, when the sensor provides it.
+    pub critical_celsius: Option<f64>,
 }
 
 #[derive(Debug, Clone)]
@@ -73,6 +77,7 @@ pub struct ProcessInfo {
     pub pid: u32,
     pub name: String,
     pub memory: f64,
+    /// Percent of one core; NaN until a valid process sampling interval exists.
     pub cpu_usage: f32,
 }
 
@@ -90,12 +95,13 @@ pub struct SystemInfo {
     /// Logical execution threads reported by the collector.
     #[allow(dead_code)]
     pub cpu_logical_threads: usize,
+    /// Global CPU percent; NaN until two appropriately spaced samples exist.
     pub cpu_usage: f32,
     #[allow(dead_code)]
     pub cpu_frequency_hz: Option<f64>,
     #[allow(dead_code)]
     pub cpu_temperature_celsius: Option<f64>,
-    /// Usage of each logical CPU, in collector order.
+    /// Usage of each logical CPU, in collector order; NaN during startup.
     pub cpu_core_usages: Vec<f32>,
     pub total_ram: f64,
     pub used_ram: f64,
@@ -131,6 +137,8 @@ impl SystemInfoCollector {
             components: Components::new_with_refreshed_list(),
             last_disk_inventory_refresh: None,
             last_disk_io_sample: None,
+            disk_io_counters: BTreeMap::new(),
+            last_cpu_sample: None,
             last_network_refresh: None,
             last_process_refresh: None,
             cached_disks: Vec::new(),
@@ -147,7 +155,19 @@ impl SystemInfoCollector {
             .map_or(Duration::ZERO, |previous| {
                 collected_at.saturating_duration_since(previous)
             });
+        let previous_networks = self
+            .networks
+            .iter()
+            .map(|(name, data)| {
+                (
+                    name.clone(),
+                    (data.total_received(), data.total_transmitted()),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
         self.networks.refresh(true);
+        let all_networks =
+            NetworkInfo::collected(&self.networks, network_interval, &previous_networks);
         self.last_network_refresh = Some(collected_at);
 
         let process_refresh_due = refresh_due(
@@ -159,7 +179,11 @@ impl SystemInfoCollector {
         if process_refresh_due {
             refresh_kind = refresh_kind.with_processes(process_refresh_kind());
         }
+        let cpu_ready = self.last_cpu_sample.is_some_and(|previous| {
+            collected_at.saturating_duration_since(previous) >= sysinfo::MINIMUM_CPU_UPDATE_INTERVAL
+        });
         self.system.refresh_specifics(refresh_kind);
+        self.last_cpu_sample = Some(collected_at);
         if process_refresh_due {
             self.refresh_processes(collected_at);
         }
@@ -192,14 +216,18 @@ impl SystemInfoCollector {
             cpu_cores: self.system.cpus().len(),
             cpu_physical_cores: System::physical_core_count(),
             cpu_logical_threads: self.system.cpus().len(),
-            cpu_usage: self.system.global_cpu_usage(),
+            cpu_usage: if cpu_ready {
+                self.system.global_cpu_usage()
+            } else {
+                f32::NAN
+            },
             cpu_frequency_hz,
             cpu_temperature_celsius,
             cpu_core_usages: self
                 .system
                 .cpus()
                 .iter()
-                .map(|cpu| cpu.cpu_usage())
+                .map(|cpu| if cpu_ready { cpu.cpu_usage() } else { f32::NAN })
                 .collect(),
             total_ram: self.system.total_memory() as f64 / 1024.0 / 1024.0 / 1024.0,
             used_ram: self.system.used_memory() as f64 / 1024.0 / 1024.0 / 1024.0,
@@ -213,8 +241,8 @@ impl SystemInfoCollector {
             storage_devices: self.cached_storage_devices.clone(),
             processes_list: self.processes_list.clone(),
             gpus: self.gpus.get().to_vec(),
-            networks: NetworkInfo::get(&self.networks, network_interval),
-            all_networks: NetworkInfo::get_all(&self.networks, network_interval),
+            networks: NetworkInfo::legacy_view(all_networks.clone()),
+            all_networks,
             temperatures,
         }
     }
@@ -246,6 +274,7 @@ impl SystemInfoCollector {
         let disk_interval = self
             .last_disk_io_sample
             .map(|previous| collected_at.saturating_duration_since(previous));
+        let previous_io = std::mem::take(&mut self.disk_io_counters);
         let mut legacy_disks = Vec::new();
         let mut grouped_disks = BTreeMap::<String, DiskInfo>::new();
         let raw_disk_names = self
@@ -257,7 +286,7 @@ impl SystemInfoCollector {
             .iter()
             .filter_map(|name| {
                 let id = physical_disk_id(name);
-                (id != *name).then_some(id)
+                (id != storage_name(name)).then_some(id)
             })
             .collect::<BTreeSet<_>>();
         let current_disk_ids = raw_disk_names
@@ -283,6 +312,11 @@ impl SystemInfoCollector {
             let total_space = disk.total_space() as f64 / 1024.0 / 1024.0 / 1024.0;
             let available_space = disk.available_space() as f64 / 1024.0 / 1024.0 / 1024.0;
             let usage = disk.usage();
+            let key = storage_name(&raw_name);
+            let counters = (usage.total_read_bytes, usage.total_written_bytes);
+            let previous = previous_io.get(&key).copied();
+            self.disk_io_counters.insert(key, counters);
+            let (read_rate, write_rate) = counter_rates(previous, counters, disk_interval);
             let model = self
                 .disk_models
                 .get(&id)
@@ -298,8 +332,8 @@ impl SystemInfoCollector {
                 total_space,
                 available_space,
                 is_virtual: id.starts_with("zram") || mount_point == "[SWAP]",
-                read_bytes_per_sec: bytes_per_second(usage.read_bytes, disk_interval),
-                written_bytes_per_sec: bytes_per_second(usage.written_bytes, disk_interval),
+                read_bytes_per_sec: read_rate,
+                written_bytes_per_sec: write_rate,
             });
             let entry = grouped_disks.entry(id.clone()).or_insert_with(|| DiskInfo {
                 id: id.clone(),
@@ -319,15 +353,19 @@ impl SystemInfoCollector {
             if count_capacity {
                 entry.total_space += total_space;
                 entry.available_space += available_space;
-                entry.read_bytes_per_sec = add_optional(
-                    entry.read_bytes_per_sec,
-                    bytes_per_second(usage.read_bytes, disk_interval),
-                );
-                entry.written_bytes_per_sec = add_optional(
-                    entry.written_bytes_per_sec,
-                    bytes_per_second(usage.written_bytes, disk_interval),
-                );
+                entry.read_bytes_per_sec = add_optional(entry.read_bytes_per_sec, read_rate);
+                entry.written_bytes_per_sec = add_optional(entry.written_bytes_per_sec, write_rate);
             }
+        }
+        #[cfg(target_os = "linux")]
+        for (id, entry) in &mut grouped_disks {
+            let key = format!("device:{id}");
+            let rates = block_counters(id).map_or((None, None), |current| {
+                self.disk_io_counters.insert(key.clone(), current);
+                counter_rates(previous_io.get(&key).copied(), current, disk_interval)
+            });
+            entry.read_bytes_per_sec = rates.0;
+            entry.written_bytes_per_sec = rates.1;
         }
         self.cached_disks = legacy_disks;
         self.cached_storage_devices = grouped_disks.into_values().collect::<Vec<_>>();
@@ -349,13 +387,17 @@ impl SystemInfoCollector {
             .map(|process| {
                 let pid = process.pid().as_u32();
                 let cpu_time = process.accumulated_cpu_time();
-                self.process_cpu_times.insert(pid, cpu_time);
+                self.process_cpu_times
+                    .insert(pid, (process.start_time(), cpu_time));
                 ProcessInfo {
                     pid,
                     name: process.name().to_string_lossy().to_string(),
                     memory: process.memory() as f64 / 1024.0 / 1024.0,
                     cpu_usage: process_cpu_percent(
-                        previous_times.get(&pid).copied(),
+                        previous_times
+                            .get(&pid)
+                            .filter(|(start, _)| *start == process.start_time())
+                            .map(|(_, time)| *time),
                         cpu_time,
                         elapsed,
                     ),
@@ -409,13 +451,15 @@ fn process_cpu_percent(
     elapsed: Option<Duration>,
 ) -> f32 {
     let (Some(previous_ms), Some(elapsed)) = (previous_ms, elapsed) else {
-        return 0.0;
+        return f32::NAN;
     };
     let elapsed_ms = elapsed.as_secs_f64() * 1000.0;
     if elapsed_ms <= 0.0 {
-        return 0.0;
+        return f32::NAN;
     }
-    (current_ms.saturating_sub(previous_ms) as f64 / elapsed_ms * 100.0) as f32
+    current_ms
+        .checked_sub(previous_ms)
+        .map_or(f32::NAN, |delta| (delta as f64 / elapsed_ms * 100.0) as f32)
 }
 
 fn refresh_due(last_refresh: Option<Instant>, now: Instant, interval: Duration) -> bool {
@@ -473,6 +517,10 @@ fn temperature_infos(components: &Components) -> Vec<TemperatureInfo> {
                     .temperature()
                     .map(f64::from)
                     .filter(|value| value.is_finite()),
+                critical_celsius: component
+                    .critical()
+                    .map(f64::from)
+                    .filter(|limit| limit.is_finite() && *limit > 0.0),
             })
         })
         .collect::<Vec<_>>();
@@ -528,30 +576,43 @@ fn stable_sensor_id(label: &str) -> String {
         .collect::<String>()
 }
 
-fn physical_disk_id(name: &str) -> String {
-    let name = name.strip_prefix("/dev/").unwrap_or(name);
-    if let Some(index) = name.rfind('p')
-        && name[index + 1..]
-            .chars()
-            .all(|character| character.is_ascii_digit())
-        && index > 0
-        && (name[..index].contains("nvme") || name[..index].contains("mmcblk"))
-    {
-        return name[..index].to_owned();
-    }
-    if name.contains("nvme") || name.contains("mmcblk") {
-        return name.to_owned();
-    }
-    let suffix_start = name
-        .char_indices()
-        .rev()
-        .find(|(_, character)| !character.is_ascii_digit())
-        .map_or(0, |(index, _)| index + 1);
-    if suffix_start < name.len() {
-        name[..suffix_start].to_owned()
+fn storage_name(name: &str) -> String {
+    let resolved = if name.starts_with("/dev/") {
+        std::fs::canonicalize(name).ok()
     } else {
-        name.to_owned()
+        None
+    };
+    let name = resolved
+        .as_ref()
+        .and_then(|path| path.to_str())
+        .unwrap_or(name);
+    name.strip_prefix("/dev/").unwrap_or(name).to_owned()
+}
+
+fn physical_disk_id(name: &str) -> String {
+    let name = storage_name(name);
+    if let Some((base, partition)) = name.rsplit_once('p')
+        && !partition.is_empty()
+        && partition.chars().all(|c| c.is_ascii_digit())
+        && (base.starts_with("nvme") || base.starts_with("mmcblk"))
+    {
+        return base.to_owned();
     }
+    // Only well-known letter-named block devices have a bare numeric
+    // partition suffix. dm-0, md127, loop0 and zram0 are device identities.
+    for prefix in ["sd", "hd", "vd", "xvd"] {
+        if let Some(rest) = name.strip_prefix(prefix) {
+            let letters = rest.chars().take_while(|c| c.is_ascii_lowercase()).count();
+            let (device, partition) = rest.split_at(letters);
+            if !device.is_empty()
+                && !partition.is_empty()
+                && partition.chars().all(|c| c.is_ascii_digit())
+            {
+                return format!("{prefix}{device}");
+            }
+        }
+    }
+    name
 }
 
 fn read_disk_model(id: &str) -> Option<String> {
@@ -571,12 +632,39 @@ fn read_disk_model(id: &str) -> Option<String> {
 }
 
 fn add_optional(left: Option<f64>, right: Option<f64>) -> Option<f64> {
-    match (left, right) {
-        (Some(left), Some(right)) if left.is_finite() && right.is_finite() => Some(left + right),
-        (Some(left), _) if left.is_finite() => Some(left),
-        (_, Some(right)) if right.is_finite() => Some(right),
-        _ => None,
-    }
+    left.zip(right).map(|(left, right)| left + right)
+}
+
+#[cfg(target_os = "linux")]
+fn block_counters(id: &str) -> Option<(u64, u64)> {
+    let value = std::fs::read_to_string(format!("/sys/class/block/{id}/stat")).ok()?;
+    let fields = value.split_whitespace().collect::<Vec<_>>();
+    // Linux diskstats reports sectors in 512-byte units, independently of
+    // the physical sector size. Read the whole named device exactly once.
+    Some((
+        fields.get(2)?.parse::<u64>().ok()?.checked_mul(512)?,
+        fields.get(6)?.parse::<u64>().ok()?.checked_mul(512)?,
+    ))
+}
+
+fn counter_rates(
+    previous: Option<(u64, u64)>,
+    current: (u64, u64),
+    interval: Option<Duration>,
+) -> (Option<f64>, Option<f64>) {
+    let Some((rx, tx)) = previous else {
+        return (None, None);
+    };
+    (
+        current
+            .0
+            .checked_sub(rx)
+            .and_then(|bytes| bytes_per_second(bytes, interval)),
+        current
+            .1
+            .checked_sub(tx)
+            .and_then(|bytes| bytes_per_second(bytes, interval)),
+    )
 }
 
 fn should_count_storage_sample(
@@ -585,10 +673,10 @@ fn should_count_storage_sample(
     physical_id: &str,
     has_partition_records: bool,
 ) -> bool {
-    if has_partition_records && raw_name == physical_id {
+    if has_partition_records && storage_name(raw_name) == physical_id {
         return false;
     }
-    seen_partition_names.insert(raw_name.to_owned())
+    seen_partition_names.insert(storage_name(raw_name))
 }
 
 fn bytes_per_second(bytes: u64, interval: Option<Duration>) -> Option<f64> {
@@ -604,6 +692,38 @@ mod tests {
         ProcessInfo, human_temperature_label, physical_disk_id, process_cpu_percent,
         should_count_storage_sample, sort_processes_for_dashboard, temperature_priority,
     };
+
+    #[test]
+    fn numbered_logical_devices_are_not_merged_and_new_counters_are_gaps() {
+        for name in ["dm-0", "dm-1", "md127", "loop0", "zram0", "custom9"] {
+            assert_eq!(physical_disk_id(&format!("/dev/{name}")), name);
+        }
+        let interval = Some(std::time::Duration::from_millis(1500));
+        assert_eq!(
+            super::counter_rates(None, (9_000_000, 8_000_000), interval),
+            (None, None)
+        );
+        assert_eq!(
+            super::counter_rates(Some((100, 200)), (1600, 3200), interval),
+            (Some(1000.0), Some(2000.0))
+        );
+        assert_eq!(
+            super::counter_rates(Some((100, 200)), (1, 3200), interval),
+            (None, Some(2000.0))
+        );
+        assert_eq!(super::add_optional(None, Some(1000.0)), None);
+        let mut seen = BTreeSet::new();
+        assert!(!should_count_storage_sample(
+            &mut seen, "/dev/sda", "sda", true
+        ));
+        assert!(should_count_storage_sample(
+            &mut seen,
+            "/dev/sda1",
+            "sda",
+            true
+        ));
+        assert!(!should_count_storage_sample(&mut seen, "sda1", "sda", true));
+    }
 
     #[test]
     fn physical_disk_ids_group_common_linux_partition_names() {
@@ -644,13 +764,11 @@ mod tests {
         // One busy thread for 2 s of wall time is 100%, not a multiple of it.
         assert_eq!(process_cpu_percent(Some(1_000), 3_000, two_seconds), 100.0);
         assert_eq!(process_cpu_percent(Some(0), 500, two_seconds), 25.0);
-        // No baseline yet, or no elapsed time, reads as idle instead of guessing.
-        assert_eq!(process_cpu_percent(None, 3_000, two_seconds), 0.0);
-        assert_eq!(process_cpu_percent(Some(0), 3_000, None), 0.0);
-        assert_eq!(
-            process_cpu_percent(Some(0), 3_000, Some(std::time::Duration::ZERO)),
-            0.0
-        );
+        // A missing baseline or elapsed time is unavailable, never invented idle.
+        assert!(process_cpu_percent(None, 3_000, two_seconds).is_nan());
+        assert!(process_cpu_percent(Some(0), 3_000, None).is_nan());
+        assert!(process_cpu_percent(Some(0), 3_000, Some(std::time::Duration::ZERO)).is_nan());
+        assert!(process_cpu_percent(Some(5000), 3000, two_seconds).is_nan());
     }
 
     #[test]

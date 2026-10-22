@@ -113,6 +113,7 @@ fn run_app(
     let mut last_render = Instant::now() - RENDER_INTERVAL;
     let mut last_animation_update = Instant::now();
     let mut render_pending = true;
+    let terminal_capabilities = sysmon::terminal_capabilities::TerminalCapabilities::detect();
 
     loop {
         let now = Instant::now();
@@ -133,7 +134,10 @@ fn run_app(
 
         let render_due = last_render.elapsed() >= RENDER_INTERVAL;
         if render_pending && (received_snapshot || render_due || !app.animations_active()) {
-            terminal.draw(|frame| app.draw(frame))?;
+            terminal.draw(|frame| {
+                app.draw(frame);
+                terminal_capabilities.apply(frame.buffer_mut());
+            })?;
             last_render = now;
             render_pending = false;
         }

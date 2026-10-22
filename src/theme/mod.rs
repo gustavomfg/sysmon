@@ -67,6 +67,45 @@ pub struct Theme {
 }
 
 impl Theme {
+    /// Presentation-only palette for the central particle field. Geometry,
+    /// telemetry and animation stay independent of these colors.
+    pub(crate) fn pulse_scene(self) -> Self {
+        if self != Self::pulse() {
+            return self;
+        }
+        Self {
+            primary: Color::Rgb(0xA8, 0x55, 0xF7),
+            secondary: Color::Rgb(0x22, 0xD3, 0xEE),
+            accent: Color::Rgb(0x7C, 0x3A, 0xED),
+            info: Color::Rgb(0x38, 0xBD, 0xF8),
+            warning: Color::Rgb(0xF5, 0x9E, 0x0B),
+            danger: Color::Rgb(0xEF, 0x44, 0x44),
+            text: Color::Rgb(0xD9, 0xE2, 0xE8),
+            pulse_low: Color::Rgb(0x6D, 0x28, 0xD9),
+            pulse_medium: Color::Rgb(0xA8, 0x55, 0xF7),
+            pulse_high: Color::Rgb(0x22, 0xD3, 0xEE),
+            ..self
+        }
+    }
+
+    /// Final typography policy for the default terminal theme. Apply before
+    /// ASCII/color fallback: Braille, block plots and status symbols keep their
+    /// semantic colors, while labels, numbers and units share a white foreground.
+    pub(crate) fn apply_text_palette(self, buffer: &mut ratatui::buffer::Buffer) {
+        if self != Self::pulse() {
+            return;
+        }
+        for cell in &mut buffer.content {
+            if cell.symbol().chars().any(|c| {
+                c.is_alphanumeric()
+                    || matches!(c, '%' | '/' | ':' | ',' | '.' | '(' | ')' | '[' | ']' | '°')
+            }) {
+                cell.set_fg(self.text);
+                cell.modifier.remove(ratatui::style::Modifier::DIM);
+            }
+        }
+    }
+
     pub fn pulse() -> Self {
         pulse::make()
     }
@@ -88,12 +127,108 @@ mod tests {
     fn pulse_contains_the_documented_semantic_colors() {
         let theme = Theme::pulse();
 
-        assert_eq!(theme.background, Color::Rgb(0x0B, 0x10, 0x14));
+        assert_eq!(theme.background, Color::Rgb(0x08, 0x08, 0x08));
         assert_eq!(theme.primary, Color::Rgb(0x7B, 0xD8, 0x8F));
-        assert_eq!(theme.secondary, Color::Rgb(0x6A, 0xA6, 0xFF));
-        assert_eq!(theme.border_focused, Color::Rgb(0xA8, 0x55, 0xF7));
-        assert_eq!(theme.selection_background, Color::Rgb(0x31, 0x2E, 0x81));
+        assert_eq!(theme.secondary, Color::Rgb(0xC8, 0xC8, 0xC8));
+        assert_eq!(theme.border_focused, Color::Rgb(0xFF, 0xFF, 0xFF));
+        assert_eq!(theme.selection_background, Color::Rgb(0x30, 0x30, 0x30));
         assert_eq!(theme.danger, Color::Rgb(0xF0, 0x75, 0x75));
+    }
+
+    #[test]
+    fn neutral_chrome_and_semantic_text_have_readable_contrast() {
+        let theme = Theme::pulse();
+        for color in [
+            theme.background,
+            theme.surface,
+            theme.surface_alt,
+            theme.text,
+            theme.text_muted,
+            theme.border,
+            theme.border_focused,
+            theme.secondary,
+            theme.accent,
+            theme.info,
+            theme.selection_background,
+        ] {
+            let Color::Rgb(r, g, b) = color else {
+                panic!("RGB palette required")
+            };
+            assert_eq!(r, g);
+            assert_eq!(g, b);
+        }
+        fn luminance(color: Color) -> f64 {
+            let Color::Rgb(r, g, b) = color else {
+                panic!("RGB palette required")
+            };
+            let linear = |v: u8| {
+                let v = f64::from(v) / 255.0;
+                if v <= 0.04045 {
+                    v / 12.92
+                } else {
+                    ((v + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            0.2126 * linear(r) + 0.7152 * linear(g) + 0.0722 * linear(b)
+        }
+        for background in [
+            theme.background,
+            theme.surface,
+            theme.surface_alt,
+            theme.selection_background,
+        ] {
+            for foreground in [
+                theme.text,
+                theme.text_muted,
+                theme.success,
+                theme.warning,
+                theme.danger,
+            ] {
+                let contrast = (luminance(foreground) + 0.05) / (luminance(background) + 0.05);
+                assert!(
+                    contrast >= 4.5,
+                    "{foreground:?} on {background:?}: {contrast}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn white_typography_preserves_plots_and_status_markers() {
+        use ratatui::{
+            buffer::Buffer,
+            layout::Rect,
+            style::{Modifier, Style},
+        };
+        let theme = Theme::pulse();
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 9, 1));
+        buffer.set_string(
+            0,
+            0,
+            "CPU98%",
+            Style::default()
+                .fg(theme.danger)
+                .add_modifier(Modifier::DIM),
+        );
+        for (x, symbol, color) in [
+            (6, "⣿", theme.primary),
+            (7, "━", theme.warning),
+            (8, "◆", theme.danger),
+        ] {
+            buffer[(x, 0)].set_symbol(symbol).set_fg(color);
+        }
+        theme.apply_text_palette(&mut buffer);
+        for x in 0..6 {
+            assert_eq!(buffer[(x, 0)].fg, Color::Rgb(255, 255, 255));
+            assert!(!buffer[(x, 0)].modifier.contains(Modifier::DIM));
+        }
+        assert_eq!(buffer[(6, 0)].fg, theme.primary);
+        assert_eq!(buffer[(7, 0)].fg, theme.warning);
+        assert_eq!(buffer[(8, 0)].fg, theme.danger);
+        let scene = theme.pulse_scene();
+        assert_eq!(scene.primary, Color::Rgb(0xA8, 0x55, 0xF7));
+        assert_eq!(scene.secondary, Color::Rgb(0x22, 0xD3, 0xEE));
+        assert_eq!(scene.text, Color::Rgb(0xD9, 0xE2, 0xE8));
     }
 
     #[test]

@@ -8,38 +8,29 @@ Um monitor de sistema no terminal feito em Rust, com interface TUI leve, atualiz
 
 ## Preview
 
-```text
-┌─ SYSMON ───────────── SYSTEM MONITOR · host ─────── Standard · LIVE ─┐
-│┌─ METRICS ─────────┐┌─ SYSTEM PULSE ─────────────┐┌─ TEMPERATURES ──┐│
-││ CPU          42%  ││ · ·  ·····  ·   · ···       ││ CPU Package 52°C││
-││ MEM  5.2 / 15.5G ││   ····  ·······  ···        │├─ TOP PROCESSES ─┤│
-││ GPU          25%  ││ ···    ·········   ·        ││  42  sysmon 2%  ││
-││ NET     ↓ 10 KB/s ││     ·  ·····  ·····        ││  87  shell  1%  ││
-││ DISK   R 24 MB/s  │└────────────────────────────┘├─ RECENT EVENTS ─┤│
-│└───────────────────┘┌─ SYSTEM ──────────────────┐ │› SysMon started ││
-│                     │ HOST workstation  UP 2h   │ └─────────────────┘│
-└─────────────────────┴───────────────────────────┴────────────────────┘
-```
+![Dashboard com instrumentos de telemetria](docs/assets/dashboard-normal.png)
+
+Captura do renderer real a 160×45, com dados sintéticos identificados do exemplo de desenvolvimento.
 
 ## Recursos
 
 - Dashboard TUI usando `ratatui` e `crossterm`.
 - Linha vital no cabeçalho: um traço de eletrocardiograma cujo ritmo (bpm), amplitude e onda T seguem o System Pulse, com diagnóstico em linguagem natural do que está ditando o ritmo.
-- Tabela de processos sem threads duplicadas, com CPU por processo medida no próprio intervalo de coleta, colorida por calor e com medidor por linha.
+- Tabela de processos sem threads duplicadas, com CPU por processo medida no próprio intervalo de coleta, texto branco e medidor por linha.
 - Mapa de núcleos no card de CPU: uma barra por núcleo lógico, revelando núcleos saturados mesmo quando a média está baixa.
-- Gráficos de histórico com brilho sob a linha, usando a altura livre dos cards.
+- Instrumentos de telemetria em Braille, com timestamps reais, escalas, picos e preenchimento discreto.
 - Narrador de eventos: mudanças de saúde que persistem (ex.: "CPU under sustained load", "Back to calm") entram em RECENT EVENTS com idade relativa.
-- Painéis arredondados com anel de foco violeta no painel e no card selecionados.
-- Uso geral de CPU com histórico visual.
+- Painéis com foco branco e superfícies neutras no tema Pulse; verde para telemetria normal, amarelo para atenção e vermelho para estado crítico.
+- CPU com escala fixa de 0–100%, comparação em pontos percentuais e detalhamento por núcleo no modo expandido.
 - Informações de sistema: OS, kernel, uptime, cores, load average e quantidade de processos.
 - Contexto operacional ao vivo com hostname, memória disponível, idade da amostra e identidade dos processos.
-- RAM e swap usados/totais com barra de progresso.
+- RAM com barra de capacidade, memória disponível, histórico e contexto de swap quando disponível.
 - Top 5 processos por uso de CPU, exibindo também PID e memória.
-- Discos montados com espaço usado/total.
-- Rede por interface em `MB/s`, priorizando as interfaces com mais tráfego.
-- GPUs NVIDIA via `nvidia-smi`, quando disponível, exibindo todas as placas detectadas.
+- Armazenamento com capacidade separada da atividade histórica de leitura/escrita.
+- Rede com download/upload, picos recentes e escala compartilhada; interfaces adicionais aparecem nos detalhes.
+- Métricas da GPU principal via `nvidia-smi`, quando disponível, inclusive em foco e expansão.
 - Layout responsivo, com aviso quando o terminal não possui o tamanho mínimo necessário.
-- Paleta de cores discreta, bordas quadradas e medidores ASCII para manter a leitura com cara de terminal.
+- Três temas, barras finas e cores consistentes; saída alternativa em ASCII, 16/256 cores ou monocromática.
 - Primeira coleta real antes do desenho inicial, sem valores de demonstração na interface principal.
 - Command palette, busca de processos, foco por widget e modo de movimento reduzido.
 - Saída segura com restauração do terminal.
@@ -110,31 +101,33 @@ Na command palette, use as setas para navegar, `Enter` para executar e `Esc` par
 
 O app coleta as métricas no intervalo configurado (1, 2 ou 4 segundos) e mantém a animação/renderização separada da coleta. Eventos de mouse não são capturados, evitando picos falsos de CPU ao mover ou rolar o mouse no terminal.
 
-A coleta principal vem da crate `sysinfo`. Para GPUs, o app chama `nvidia-smi`, valida as métricas retornadas e exibe todas as placas com dados válidos quando o comando está disponível e retorna com sucesso. Uma linha inválida não impede a exibição das demais GPUs.
+A coleta principal vem da crate `sysinfo`. Para a GPU, o app chama `nvidia-smi`, valida as métricas retornadas e seleciona a placa principal. O painel normal, o foco e a expansão mostram exclusivamente as métricas e o histórico dessa placa.
 
 ## Limitações
 
 - GPUs são detectadas apenas em placas NVIDIA com `nvidia-smi` disponível.
-- A leitura de rede divide o delta de bytes pelo intervalo real entre atualizações e apresenta a taxa em `MB/s` decimal.
+- Rede e I/O aparecem em unidades binárias explícitas (`KiB/s`, `MiB/s`); startup e resets de rede produzem lacunas, sem taxas artificiais.
+- O histórico retém 120 amostras por série. Os cards mostram os últimos dois minutos disponíveis; a expansão aproveita o histórico retido. Alterar a largura não muda a janela temporal.
+- O painel e o histórico de GPU acompanham apenas a placa principal. O histórico de armazenamento acompanha o dispositivo principal, com valores atuais dos demais discos disponíveis. Rede agrega interfaces que não são loopback, incluindo interfaces virtuais.
+- Sensores sem limite crítico informado pelo driver usam uma escala visual neutra. As heurísticas gerais de saúde do SYSTEM PULSE continuam sendo as existentes.
 - O layout ajusta a proporção dos painéis conforme a largura; abaixo do tamanho mínimo, o app exibe um aviso em vez de cortar o dashboard.
 
 ## Desenvolvimento
 
-Comandos úteis:
+As instruções de testes, capturas sintéticas, smoke em terminal e benchmarks
+estão em [Desenvolvimento](docs/development.md). A [documentação](docs/README.md)
+reúne a arquitetura atual e as evidências históricas das revisões.
+
+### Compatibilidade de terminal
+
+Detecção padrão preserva Unicode e True Color em terminais modernos; `TERM=linux` ou `dumb` usa ASCII e 16 cores. Para configurar explicitamente:
 
 ```bash
-cargo fmt
-cargo check
-cargo clippy -- -D warnings
-cargo test
+SYSMON_COLOR=ansi256 cargo run --release
+SYSMON_COLOR=mono SYSMON_GRAPHICS=ascii cargo run --release
 ```
 
-Build limpo, se necessário:
-
-```bash
-cargo clean
-cargo build --release
-```
+`SYSMON_COLOR` aceita `truecolor`, `ansi16`, `ansi256` e `mono`; `SYSMON_GRAPHICS` aceita `unicode` e `ascii`. `NO_COLOR` desativa cores quando não há escolha explícita em `SYSMON_COLOR`.
 
 ## Stack
 

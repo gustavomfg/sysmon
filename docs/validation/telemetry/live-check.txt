@@ -1,0 +1,10 @@
+startup: CPU and I/O unavailable until a second sample
+capacity_filesystems=9 mean_frequency_mhz=Some(2707.4166666666665)
+gpu: usage=28.0% used_mib=Some(546.0) total_mib=Some(8188.0) temp_c=Some(49.0) clock_mhz=Some(210.0) power_w=None
+sample 1: cpu=8.05% proc=8.04% ram_error=0B swap_error=0B net_error_max=0B/s disk_directions=4 gpu_metrics=1/2 sensors=3
+capacity_filesystems=9 mean_frequency_mhz=Some(3016.4166666666665)
+gpu: usage=28.0% used_mib=Some(546.0) total_mib=Some(8188.0) temp_c=Some(49.0) clock_mhz=Some(210.0) power_w=None
+sample 2: cpu=15.95% proc=15.95% ram_error=0B swap_error=0B net_error_max=0B/s disk_directions=4 gpu_metrics=1/2 sensors=3
+capacity_filesystems=9 mean_frequency_mhz=Some(2150.1666666666665)
+gpu: usage=30.0% used_mib=Some(546.0) total_mib=Some(8188.0) temp_c=Some(49.0) clock_mhz=Some(210.0) power_w=None
+sample 3: cpu=11.47% proc=11.44% ram_error=1900544B swap_error=0B net_error_max=0B/s disk_directions=4 gpu_metrics=1/2 sensors=3

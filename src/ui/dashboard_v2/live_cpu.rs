@@ -84,7 +84,12 @@ impl CpuLiveHistory {
             MetricReading::unavailable(),
             MetricReading::unavailable(),
             non_negative_reading(sample.frequency_hz),
-            non_negative_reading(sample.temperature_celsius),
+            MetricReading::new(
+                sample
+                    .temperature_celsius
+                    .filter(|value| value.is_finite() && *value >= -273.15),
+                MetricAvailability::Available,
+            )?,
             sample.cores.max(1),
             self.history,
         )?;

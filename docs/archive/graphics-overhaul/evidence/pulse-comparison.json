@@ -1,0 +1,62 @@
+[
+  {
+    "terminal": "80x24",
+    "rect": [
+      0,
+      2,
+      80,
+      12
+    ],
+    "cells": 960,
+    "identical": true,
+    "sha256": "084b2cb8443a3e2f90d4fc25df8c6207c3efa9d3bcd8be36dbbf75f6e7dfff0f"
+  },
+  {
+    "terminal": "100x30",
+    "rect": [
+      27,
+      2,
+      42,
+      19
+    ],
+    "cells": 798,
+    "identical": true,
+    "sha256": "4b9d2ee65e0cedc7a1fb77897d44f4fbefe582dd7273ae8e5242702a0a8e6eeb"
+  },
+  {
+    "terminal": "120x35",
+    "rect": [
+      33,
+      2,
+      51,
+      23
+    ],
+    "cells": 1173,
+    "identical": true,
+    "sha256": "72e9f4073bef508be778497e5899daa43f0240aa7d572b66f4c2a4ddbd72953c"
+  },
+  {
+    "terminal": "160x45",
+    "rect": [
+      39,
+      2,
+      77,
+      31
+    ],
+    "cells": 2387,
+    "identical": true,
+    "sha256": "f2a06c478449f6c39e714e9ce48431c7b406b4b7988cfbb11c045c8595d7cd66"
+  },
+  {
+    "terminal": "200x55",
+    "rect": [
+      51,
+      2,
+      97,
+      40
+    ],
+    "cells": 3880,
+    "identical": true,
+    "sha256": "70bd84adb78cb29294139ca21411730757590b3df10637fedd004ab6c279d8b3"
+  }
+]

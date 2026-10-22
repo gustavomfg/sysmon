@@ -1,0 +1,19 @@
+--- a/src/ui/widgets/pulse_v2/engine.rs
++++ b/src/ui/widgets/pulse_v2/engine.rs
+@@ -124,0 +125 @@
++        let profile_start = std::time::Instant::now();
+@@ -127,0 +129 @@
++        let profile_0 = profile_start.elapsed().as_micros();
+@@ -129,0 +132 @@
++        let profile_1 = profile_start.elapsed().as_micros();
+@@ -130,0 +134 @@
++        let profile_2 = profile_start.elapsed().as_micros();
+@@ -132,0 +137 @@
++        let profile_3 = profile_start.elapsed().as_micros();
+@@ -133,0 +139 @@
++        let profile_4 = profile_start.elapsed().as_micros();
+@@ -140,0 +147 @@
++        let profile_5 = profile_start.elapsed().as_micros();
+@@ -141,0 +149,2 @@
++        let profile_6 = profile_start.elapsed().as_micros();
++        eprintln!("PULSE_PROFILE,{},{},{},{},{},{},{},{}", elapsed.as_millis(), profile_0, profile_1-profile_0, profile_2-profile_1, profile_3-profile_2, profile_4-profile_3, profile_5-profile_4, profile_6-profile_5);

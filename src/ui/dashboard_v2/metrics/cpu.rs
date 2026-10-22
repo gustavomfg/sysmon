@@ -247,11 +247,14 @@ fn comparison_over_recent_window<const CAPACITY: usize>(
     let mut previous = None;
     let mut fallback = None;
     for sample in history.iter() {
+        let Some(value) = sample.usable_value() else {
+            continue;
+        };
         if sample.offset() < current_sample.offset() {
-            fallback = sample.usable_value();
+            fallback = Some((value, sample.offset()));
         }
         if sample.offset() < current_sample.offset() && sample.offset() <= target {
-            previous = sample.usable_value();
+            previous = Some((value, sample.offset()));
         }
     }
     let previous = if current_sample.offset() >= minimum_lag {
@@ -263,9 +266,12 @@ fn comparison_over_recent_window<const CAPACITY: usize>(
     else {
         return PeriodComparison::unknown();
     };
-    let previous = previous
-        .and_then(|value| MetricValue::new(value, MetricUnit::Percent, 1, VisualPriority::Primary));
-    PeriodComparison::from_values(current, previous)
+    let window = previous.map(|(_, at)| current_sample.offset().saturating_sub(at));
+    let previous = previous.and_then(|(value, _)| {
+        MetricValue::new(value, MetricUnit::Percent, 1, VisualPriority::Primary)
+    });
+    let comparison = PeriodComparison::from_values(current, previous);
+    window.map_or(comparison, |window| comparison.with_window(window))
 }
 
 #[cfg(test)]

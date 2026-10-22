@@ -73,6 +73,7 @@ pub struct TemperatureSensor {
     pub id: HardwareId,
     pub label: String,
     pub celsius: Option<f64>,
+    pub critical_celsius: Option<f64>,
     pub availability: MetricAvailability,
 }
 
@@ -251,6 +252,7 @@ mod tests {
                 id: id(HardwareKind::Temperature, "cpu"),
                 label: "CPU".to_owned(),
                 celsius: Some(50.0),
+                critical_celsius: None,
                 availability: MetricAvailability::Available,
             }],
         );
