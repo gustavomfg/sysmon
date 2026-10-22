@@ -1,12 +1,15 @@
 # Resultado da revisão gráfica
 
+> Registro histórico das entregas de outubro de 2026. Para o comportamento atual,
+> consulte a [arquitetura](../../architecture.md) e as [instruções de desenvolvimento](../../development.md).
+
 Primeira entrega concluída em 13/10/2026, a partir de `334fb1f`, na branch
 `graphics/telemetry-instruments`. Sem push/publicação, dependências novas de
 runtime ou alteração de licença. Exclusões preexistentes do usuário preservadas
 e excluídas dos commits desta revisão.
 
 A continuação de 22/10/2026 corrigiu a invalidação excessiva do cache do Pulse;
-as novas medições estão na última seção deste documento. Os resultados da
+as novas medições estão na seção de desempenho deste documento. Os resultados da
 primeira entrega abaixo permanecem como registro histórico.
 
 ## Entrega
@@ -26,8 +29,8 @@ primeira entrega abaixo permanecem como registro histórico.
 - Históricos circulares, timestamps monotônicos, gaps reais, unidades binárias,
   cache de modelos/pixels e alternativas de saída do terminal.
 
-O [fluxo e os contratos](graphics-architecture.md) e a
-[pesquisa/auditoria](graphics-research.md) descrevem as decisões por componente.
+O [fluxo e os contratos](../../architecture.md) e a
+[pesquisa/auditoria](research.md) descrevem as decisões por componente.
 
 ## Evidência visual
 
@@ -35,12 +38,12 @@ As imagens são renderizações das **células reais do TestBackend com telemetr
 sintética explícita**, não fotografias de hardware nem mockups de uma interface
 que não existe. Fonte Meslo Mono, Pillow, células de 10×21 px.
 
-![Comparação a 120×35: original à esquerda, revisão à direita](graphics/comparison.png)
+![Comparação a 120×35: original à esquerda, revisão à direita](evidence/comparison.png)
 
-- [Dashboard 160×45](graphics/dashboard.png)
-- [CPU expandida](graphics/cpu-expanded.png)
-- [Rede expandida](graphics/network-expanded.png)
-- [Armazenamento expandido](graphics/storage-expanded.png)
+- [Dashboard 160×45](evidence/dashboard.png)
+- [CPU expandida](evidence/cpu-expanded.png)
+- [Rede expandida](evidence/network-expanded.png)
+- [Armazenamento expandido](evidence/storage-expanded.png)
 
 Inspeção antes/depois: eixos e unidades legíveis, picos preservados, trilhos de
 capacidade finos, menor preenchimento decorativo, cores consistentes e espaço
@@ -50,7 +53,7 @@ priorizando Pulse, CPU e RAM, conforme o layout existente.
 
 O painel completo de SYSTEM PULSE, incluindo símbolos, cores e modificadores,
 foi **idêntico ao original nos cinco tamanhos**, no mesmo cenário determinístico:
-[retângulos e hashes](graphics/pulse-comparison.json). Seu motor, campo, paleta,
+[retângulos e hashes](evidence/pulse-comparison.json). Seu motor, campo, paleta,
 rasterizador e relógio não foram alterados. Testes existentes de resposta às
 métricas continuam passando. A captura estática não comprova ausência de
 flicker em todos os emuladores.
@@ -79,7 +82,7 @@ aumentado. Os novos testes verificam produção e geometria separadamente.
 O primeiro harness PTY não respondeu à consulta de posição do cursor de
 Crossterm e encerrou cedo; foi corrigido para emular essa resposta. O script
 reproduzível está em `tools/smoke_graphics_terminal.py`, e
-[seus resultados](graphics/terminal-smoke.jsonl) registram somente metadados,
+[seus resultados](evidence/terminal-smoke.jsonl) registram somente metadados,
 sem salvar informações pessoais da captura de telemetria real.
 
 ## Desempenho medido
@@ -107,8 +110,8 @@ do Pulse.
 Expansões: CPU +11,2%, RAM +9,6%, GPU −13,7%, rede −59,5%, armazenamento −6,6%.
 CPU/RAM acrescentam aproximadamente 23–27 µs por frame neste cenário; a cópia
 do buffer expandido tem custo proporcional à área. Não é alegado ganho em
-todos os modos. [Todas as medianas](graphics/render-benchmark.csv) e
-[rodadas brutas](graphics/render-benchmark-raw.csv).
+todos os modos. [Todas as medianas](evidence/render-benchmark.csv) e
+[rodadas brutas](evidence/render-benchmark-raw.csv).
 
 ### Animação avançando 50 ms/frame
 
@@ -116,8 +119,8 @@ Três rodadas equivalentes com `--bench --animate`. Em 160×45: 12.398 → 12.09
 µs/frame (−2,5%); 200×55: 16.445 → 16.238 µs/frame (−1,3%). Nos três temas em
 120×35 as diferenças são pequenas, incluindo +0,4% em um tema. Ganhos grandes
 do quadro congelado **não representam o ganho total com animação ativa**.
-[Medianas](graphics/animated-benchmark.csv),
-[dados brutos](graphics/animated-benchmark-raw.csv).
+[Medianas](evidence/animated-benchmark.csv),
+[dados brutos](evidence/animated-benchmark-raw.csv).
 
 ### Aplicação real, oito segundos por execução
 
@@ -131,7 +134,7 @@ por combinação, portanto sem conclusão estatística de ganho geral.
 | 80×24 | 49,75% → 46,78% | 6.824 → 7.404 KiB |
 | 160×45 | 28,36% → 27,81% | 7.980 → 8.812 KiB |
 
-[Amostragens resumidas](graphics/live-benchmark.json). O consumo total com
+[Amostragens resumidas](evidence/live-benchmark.json). O consumo total com
 animação **continua alto** nesta máquina. O contraste com o quadro congelado e
 os modos expandidos sugere que gerar novas fases do Pulse domina o custo; isso
 é uma inferência dos benchmarks e do caminho de código, não um perfil de
@@ -232,8 +235,8 @@ tempos de etapa variáveis, registrados integralmente nas evidências.
   tema e resize. Todas as execuções saíram com código 0 e restauraram modo raw
   e tela alternativa.
 
-[Dados brutos, perfis, hashes e smoke](graphics/pulse-performance-20261022.json).
-O [patch de instrumentação](graphics/pulse-profiling.patch) foi aplicado somente
+[Dados brutos, perfis, hashes e smoke](evidence/pulse-performance-20261022.json).
+O [patch de instrumentação](evidence/pulse-profiling.patch) foi aplicado somente
 à cópia temporária de pesquisa. Pode ser reaplicado a uma cópia de `7596235`
 ou à versão atual com `git apply --unidiff-zero` para repetir a contagem;
 não faz parte do executável normal.
@@ -264,9 +267,9 @@ Rede e disco I/O distinguem séries em branco/verde, sem inferir perigo de uma t
 
 Capturas abaixo usam **telemetria sintética**, renderizada pelo dashboard real:
 
-- [Estado normal](graphics/palette-normal.png)
-- [Atenção](graphics/palette-warning.png)
-- [Crítico](graphics/palette-critical.png)
+- [Estado normal](../../assets/dashboard-normal.png)
+- [Atenção](../../assets/dashboard-warning.png)
+- [Crítico](../../assets/dashboard-critical.png)
 
 Validação: 336 testes passaram; Clippy estrito e build release passaram. Os testes
 novos cobrem faixas de utilização, estado indisponível, correspondência de estados
@@ -302,7 +305,7 @@ uma moldura azulada herdada da paleta antiga. Logs intermediários ficam em
 
 O teste real em PTY também passou nos modos Unicode/TrueColor e ASCII/mono:
 oito eventos por modo, saída 0, tela alternativa e modo raw restaurados.
-[Evidência do terminal](graphics/palette-terminal-smoke.jsonl).
+[Evidência do terminal](evidence/palette-terminal-smoke.jsonl).
 
 
 ### Correção solicitada — Pulse original e textos brancos

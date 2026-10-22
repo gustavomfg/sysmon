@@ -1,5 +1,8 @@
 # Graphics overhaul — progress
 
+> Registro histórico encerrado. Os caminhos em comandos e logs descrevem a
+> organização existente na época; diretórios temporários podem ter sido removidos.
+
 ## Recovery and scope
 
 - Started 2026-10-12, baseline `334fb1f` on `main`.

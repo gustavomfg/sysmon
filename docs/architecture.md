@@ -1,5 +1,21 @@
 # Arquitetura — Telemetry Instruments
 
+## Organização do código
+
+- `src/main.rs`: terminal, eventos e execução da coleta em background.
+- `src/system/`: coleta e normalização de hardware e sistema operacional.
+- `src/ui/dashboard.rs`: estado de execução, navegação e overlays.
+- `src/ui/dashboard_v2/`: modelos, históricos temporais e instrumentos de terminal.
+- `src/pulse_v2/`: motor independente de partículas, campos e rasterização.
+- `src/theme/`: paletas e política de texto.
+- `src/app.rs` e módulos associados: comandos, configuração, foco, busca e eventos.
+- `src/animation/`: utilitário público `Tween`, mantido para compatibilidade da biblioteca.
+
+O estado de interação retém o snapshot necessário para busca/exportação, mas não
+calcula históricos ou tweens de métricas. O único histórico de telemetria em uso
+é `LiveMetricsHistory`; o movimento do Pulse usa os motores de saúde e comportamento.
+O módulo `crate::pulse_v2` e os reexports existentes continuam públicos.
+
 ## Fluxo e responsabilidades
 
 ```text
@@ -103,7 +119,7 @@ o modelo na stack; cada bloco retornado continua sendo um valor. O iterador
 agora empresta o modelo durante a iteração, algo a considerar em consumidores externos.
 Os testes cobrem buffers, janelas, disponibilidade, escalas, taxas, clipping,
 Unicode, caches, navegação e integração. Capturas reproduzíveis e medições estão
-em [Resultados](graphics-overhaul-results.md).
+em [Resultados](archive/graphics-overhaul/results.md).
 
 
 ## Paleta semântica — revisão de 22/10/2026

@@ -8,7 +8,7 @@ Um monitor de sistema no terminal feito em Rust, com interface TUI leve, atualiz
 
 ## Preview
 
-![Dashboard com instrumentos de telemetria](docs/graphics/palette-normal.png)
+![Dashboard com instrumentos de telemetria](docs/assets/dashboard-normal.png)
 
 Captura do renderer real a 160×45, com dados sintéticos identificados do exemplo de desenvolvimento.
 
@@ -16,7 +16,7 @@ Captura do renderer real a 160×45, com dados sintéticos identificados do exemp
 
 - Dashboard TUI usando `ratatui` e `crossterm`.
 - Linha vital no cabeçalho: um traço de eletrocardiograma cujo ritmo (bpm), amplitude e onda T seguem o System Pulse, com diagnóstico em linguagem natural do que está ditando o ritmo.
-- Tabela de processos sem threads duplicadas, com CPU por processo medida no próprio intervalo de coleta, colorida por calor e com medidor por linha.
+- Tabela de processos sem threads duplicadas, com CPU por processo medida no próprio intervalo de coleta, texto branco e medidor por linha.
 - Mapa de núcleos no card de CPU: uma barra por núcleo lógico, revelando núcleos saturados mesmo quando a média está baixa.
 - Instrumentos de telemetria em Braille, com timestamps reais, escalas, picos e preenchimento discreto.
 - Narrador de eventos: mudanças de saúde que persistem (ex.: "CPU under sustained load", "Back to calm") entram em RECENT EVENTS com idade relativa.
@@ -114,21 +114,9 @@ A coleta principal vem da crate `sysinfo`. Para GPUs, o app chama `nvidia-smi`, 
 
 ## Desenvolvimento
 
-### Capturas dos gráficos
-
-O exemplo abaixo usa dados **sintéticos identificados**, a aplicação real e o `TestBackend` do ratatui. Gera capturas textuais e por célula para cinco tamanhos, três temas e os principais modos expandidos:
-
-```bash
-cargo run --offline --release --example graphics_capture -- target/graphics-captures --bench
-cargo run --offline --release --example graphics_capture -- target/graphics-animated --bench --animate
-python3 tools/render_graphics_capture.py target/graphics-captures
-python3 tools/smoke_graphics_terminal.py
-python3 tools/benchmark_graphics_terminal.py target/release/sysmon --width 160 --height 45
-```
-
-A conversão opcional para PNG precisa de Pillow e uma das fontes indicadas no script. Não há dependência nova no executável. Veja a [comparação visual](docs/graphics/comparison.png), a [arquitetura](docs/graphics-architecture.md), a [pesquisa](docs/graphics-research.md) e os [resultados e medições](docs/graphics-overhaul-results.md).
-
-O benchmark em PTY usa telemetria real durante oito segundos, descarta dois segundos de aquecimento e informa CPU relativa a um núcleo e RSS. Para comparar versões, alterne a ordem das execuções. Sua saída contém somente estatísticas, sem guardar informações da tela.
+As instruções de testes, capturas sintéticas, smoke em terminal e benchmarks
+estão em [Desenvolvimento](docs/development.md). A [documentação](docs/README.md)
+reúne a arquitetura atual e as evidências históricas das revisões.
 
 ### Compatibilidade de terminal
 
@@ -140,22 +128,6 @@ SYSMON_COLOR=mono SYSMON_GRAPHICS=ascii cargo run --release
 ```
 
 `SYSMON_COLOR` aceita `truecolor`, `ansi16`, `ansi256` e `mono`; `SYSMON_GRAPHICS` aceita `unicode` e `ascii`. `NO_COLOR` desativa cores quando não há escolha explícita em `SYSMON_COLOR`.
-
-Comandos úteis:
-
-```bash
-cargo fmt
-cargo check
-cargo clippy -- -D warnings
-cargo test
-```
-
-Build limpo, se necessário:
-
-```bash
-cargo clean
-cargo build --release
-```
 
 ## Stack
 
