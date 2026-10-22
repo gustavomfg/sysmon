@@ -311,6 +311,7 @@ impl DashboardApp {
         }
 
         self.render_overlay(frame, &theme);
+        theme.apply_text_palette(frame.buffer_mut());
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> bool {

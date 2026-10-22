@@ -988,8 +988,8 @@ fn render_header(
         &[(
             brand,
             Style::default()
-                .fg(theme.background)
-                .bg(theme.primary)
+                .fg(theme.text)
+                .bg(theme.surface_alt)
                 .add_modifier(Modifier::BOLD),
         )],
         buffer,
