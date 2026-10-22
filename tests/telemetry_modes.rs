@@ -110,7 +110,10 @@ fn current_values_remain_correct_when_focused_expanded_and_updated() {
                 assert!(expanded.contains("FOCUS TEMPERATURES"));
             }
             if tabs == 5 {
-                assert!(expanded.contains("AMD Audit GPU"));
+                assert!(expanded.contains("RTX 4060"));
+                assert!(!expanded.contains("AMD Audit GPU"));
+                assert!(!focused.contains("AMD Audit GPU"));
+                assert!(!expanded.contains("6.5 W"));
             }
             if tabs == 10 {
                 for name in ["enp4s0", "eth1", "lo"] {

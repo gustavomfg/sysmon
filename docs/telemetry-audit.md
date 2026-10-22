@@ -26,8 +26,9 @@ incluindo foco, expansão, nova coleta e retorno ao dashboard.
   presets compactos. Um painel isolado agora recebe o corpo disponível.
 - O cabeçalho de foco térmico agora indica TEMPERATURES, em vez do nome legado HISTORY.
 - CPU expandida em 80×24 usa o espaço para frequência, temperatura e núcleos.
-  GPU mostra potência quando informada e leituras das placas adicionais; o histórico
-  permanece identificado com a principal. Rede mostra os valores por interface.
+  GPU mostra potência quando informada. Conforme o escopo esclarecido pelo usuário,
+  o painel exibe exclusivamente a GPU principal em todos os modos; valores e histórico
+  usam a mesma placa. Rede mostra os valores por interface.
 - A preparação dos cards foi movida para o heap. A auditoria reproduziu um estouro
   de pilha no desenho em debug; a correção passou sem aumentar a pilha dos testes.
 
@@ -39,7 +40,7 @@ incluindo foco, expansão, nova coleta e retorno ao dashboard.
 | RAM | `MemTotal - MemAvailable`, em GiB; cache recuperável permanece disponível | Total e disponível comparados com `/proc/meminfo`; valores, percentual e swap nos modos de tela |
 | Swap | Total e ocupado, separados de RAM | Comparação com `SwapTotal - SwapFree`; conversão e exibição |
 | GPU NVIDIA | `nvidia-smi`: %, MiB convertidos para bytes, MHz para Hz, °C e W opcionais | Query real com métricas disponíveis; parsing de N/A, unidades, VRAM inválida, IDs e múltiplas GPUs |
-| Outras GPUs | Inventário DRM, com campos ausentes quando não coletados | GPU AMD detectada nesta máquina sem métricas pelo coletor atual; fixture valida valores de uma segunda GPU |
+| Outras GPUs | Inventário DRM, com campos ausentes quando não coletados | GPU AMD detectada nesta máquina sem métricas pelo coletor atual; fixture confirma que uma segunda GPU não aparece no painel da principal |
 | Rede | Delta de bytes / tempo monotônico; soma exclui loopback | `/proc/net/dev`, unidades binárias, agregação e interfaces individuais; startup/reset nos testes |
 | Armazenamento | Capacidade dos volumes montados; taxas do dispositivo identificado | `df -B1` e `/proc/diskstats`; unidades, deduplicação, IDs, primeira amostra e reset |
 | Temperatura | Sensores do `sysinfo`; limite crítico informado pelo driver | Três sensores presentes; valores e limite de referência em captura expandida; dados negativos e ausentes |
@@ -90,8 +91,9 @@ instrumento externo. Potência indisponível não pôde ser validada em hardware
 Processos e disco atualizam a cada dois segundos; GPU é consultada a cada cinco.
 Entre essas consultas, a UI apresenta a última leitura disponível. Timestamps do
 histórico são do snapshot da aplicação, não um registro de cada chamada do driver.
-Históricos de GPU e disco pertencem ao dispositivo principal; os demais mostram
-valores atuais. A auditoria não implementou históricos separados por dispositivo.
+O painel de GPU é dedicado exclusivamente à principal. O inventário completo
+permite selecioná-la, sem adicionar métricas de outras GPUs à tela. O histórico
+de disco pertence ao dispositivo principal; os demais discos mostram valores atuais. A auditoria não implementou históricos separados por dispositivo.
 
 AMD/Intel sem métricas, RAID/LVM e hotplug foram exercitados por contratos e casos
 controlados; não foram todos reproduzidos fisicamente nesta máquina. Os limites

@@ -124,9 +124,11 @@ com alternativas compartilhadas para o caminho de desenho da aplicação.
 
 Os painéis isolados pela expansão ocupam o corpo disponível em qualquer preset,
 incluindo Compact. A preparação dos cinco cards usa heap para evitar cópias grandes
-de arrays na pilha; o cache permanece por revisão de coleta/contexto. GPU expandida
-mostra as leituras atuais das demais placas, enquanto o histórico é identificado
-como pertencente à principal. Rede expandida lista as interfaces; o total do card
+de arrays na pilha; o cache permanece por revisão de coleta/contexto. O painel de
+GPU mostra somente a placa principal, tanto na visão normal como em foco/expansão.
+Valores atuais e histórico usam a mesma seleção; uma troca de identidade reinicia
+o histórico. O inventário das outras placas serve à detecção e seleção automática.
+Rede expandida lista as interfaces; o total do card
 continua excluindo loopback.
 
 Getters do modelo e o iterador de blocos recebem `&self`, evitando copiar todo

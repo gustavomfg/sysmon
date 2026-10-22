@@ -28,7 +28,7 @@ Captura do renderer real a 160×45, com dados sintéticos identificados do exemp
 - Top 5 processos por uso de CPU, exibindo também PID e memória.
 - Armazenamento com capacidade separada da atividade histórica de leitura/escrita.
 - Rede com download/upload, picos recentes e escala compartilhada; interfaces adicionais aparecem nos detalhes.
-- GPUs NVIDIA via `nvidia-smi`, quando disponível, exibindo todas as placas detectadas.
+- Métricas da GPU principal via `nvidia-smi`, quando disponível, inclusive em foco e expansão.
 - Layout responsivo, com aviso quando o terminal não possui o tamanho mínimo necessário.
 - Três temas, barras finas e cores consistentes; saída alternativa em ASCII, 16/256 cores ou monocromática.
 - Primeira coleta real antes do desenho inicial, sem valores de demonstração na interface principal.
@@ -101,14 +101,14 @@ Na command palette, use as setas para navegar, `Enter` para executar e `Esc` par
 
 O app coleta as métricas no intervalo configurado (1, 2 ou 4 segundos) e mantém a animação/renderização separada da coleta. Eventos de mouse não são capturados, evitando picos falsos de CPU ao mover ou rolar o mouse no terminal.
 
-A coleta principal vem da crate `sysinfo`. Para GPUs, o app chama `nvidia-smi`, valida as métricas retornadas e exibe todas as placas com dados válidos quando o comando está disponível e retorna com sucesso. Uma linha inválida não impede a exibição das demais GPUs.
+A coleta principal vem da crate `sysinfo`. Para a GPU, o app chama `nvidia-smi`, valida as métricas retornadas e seleciona a placa principal. O painel normal, o foco e a expansão mostram exclusivamente as métricas e o histórico dessa placa.
 
 ## Limitações
 
 - GPUs são detectadas apenas em placas NVIDIA com `nvidia-smi` disponível.
 - Rede e I/O aparecem em unidades binárias explícitas (`KiB/s`, `MiB/s`); startup e resets de rede produzem lacunas, sem taxas artificiais.
 - O histórico retém 120 amostras por série. Os cards mostram os últimos dois minutos disponíveis; a expansão aproveita o histórico retido. Alterar a largura não muda a janela temporal.
-- Históricos de GPU e armazenamento acompanham o dispositivo principal; os valores atuais dos demais dispositivos continuam disponíveis. Rede agrega interfaces que não são loopback, incluindo interfaces virtuais.
+- O painel e o histórico de GPU acompanham apenas a placa principal. O histórico de armazenamento acompanha o dispositivo principal, com valores atuais dos demais discos disponíveis. Rede agrega interfaces que não são loopback, incluindo interfaces virtuais.
 - Sensores sem limite crítico informado pelo driver usam uma escala visual neutra. As heurísticas gerais de saúde do SYSTEM PULSE continuam sendo as existentes.
 - O layout ajusta a proporção dos painéis conforme a largura; abaixo do tamanho mínimo, o app exibe um aviso em vez de cortar o dashboard.
 

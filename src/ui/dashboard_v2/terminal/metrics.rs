@@ -586,15 +586,7 @@ fn render_gpu_inventory(
     let primary_index = select_primary_gpu(&inventory.gpus);
     let primary = &inventory.gpus[primary_index];
     let primary_name = gpu_display_name(&primary.name);
-    let title = if inventory.gpus.len() > 1 {
-        format!(
-            "GPU  {primary_name}  ({}/{})",
-            primary_index + 1,
-            inventory.gpus.len()
-        )
-    } else {
-        format!("GPU  {primary_name}")
-    };
+    let title = format!("GPU  {primary_name}");
     render_header(&title, model, area, theme, buffer);
     let body = body(area);
     if body.height == 0 {
@@ -660,7 +652,6 @@ fn render_gpu_inventory(
             );
             offset += 1;
         }
-        offset = render_gpu_peers(inventory, primary_index, body, offset, theme, buffer);
         render_percent_history(model, history_chart::region(body, offset), theme, buffer);
     } else {
         write(
@@ -682,63 +673,7 @@ fn render_gpu_inventory(
                 );
             }
         }
-        render_gpu_peers(inventory, primary_index, body, 2, theme, buffer);
     }
-}
-
-/// Extra space shows current readings for the other GPUs. The history below
-/// still belongs to the primary GPU; no histories from different devices mix.
-fn render_gpu_peers(
-    inventory: &HardwareInventory,
-    primary: usize,
-    body: Rect,
-    mut offset: u16,
-    theme: &Theme,
-    buffer: &mut Buffer,
-) -> u16 {
-    if body.height < 12 {
-        return offset;
-    }
-    let budget = body.height.saturating_sub(offset + 8);
-    let peers = inventory
-        .gpus
-        .iter()
-        .enumerate()
-        .filter(|(index, _)| *index != primary);
-    let shown = usize::from(budget / 2).min(inventory.gpus.len().saturating_sub(1));
-    for (index, gpu) in peers.take(shown) {
-        write(
-            buffer,
-            line(body, offset),
-            &format!(
-                "GPU {}  {}  {}",
-                index + 1,
-                gpu_display_name(&gpu.name),
-                gpu_usage_text(gpu)
-            ),
-            context_style_for_theme(theme),
-        );
-        write(
-            buffer,
-            line(body, offset + 1),
-            &gpu_context(gpu),
-            context_style_for_theme(theme),
-        );
-        offset += 2;
-    }
-    if budget > 0 {
-        write(
-            buffer,
-            line(body, offset),
-            &format!(
-                "HISTORY  {}",
-                gpu_display_name(&inventory.gpus[primary].name)
-            ),
-            context_style_for_theme(theme),
-        );
-        offset += 1;
-    }
-    offset
 }
 
 // Preserve complete context tokens before assigning remaining rows to history.
